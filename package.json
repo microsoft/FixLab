@@ -75,7 +75,7 @@
     "@github/copilot-sdk": "1.0.23"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
+    "@playwright/test": "^1.65.0",
     "@types/node": "^22.18.3",
     "eslint": "^9.35.0",
     "globals": "^16.3.0",
