@@ -1982,6 +1982,65 @@ test("new DEV/PPE portal defaults use real reads only in their environments and 
   assert.equal(configuredTestSynthesis(profile, "", undefined, "dev").unitTestsOnly, true);
 });
 
+test("PPE POST-only approval uses reviewed API bases without granting other methods or surviving recovery", async () => {
+  const repository = createGitRepository();
+  const profile = validProfile();
+  profile.environments = ["dev", "ppe"];
+  profile.browserAutomation.dataSafety.post = { ppe: {
+    scope: "api://example-service/access", sessionHelper: "ppe-session.mjs",
+    baseUrls: ["https://api.shared.example.test/api/ppe/v1"]
+  } };
+  writeFileSync(join(repository, "ppe-session.mjs"),
+    'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  const launches = [];
+  const executor = (input) => {
+    launches.push(input);
+    return { completion: new Promise(() => {}) };
+  };
+  let running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
+  try {
+    const post = (changes = {}, origin = running.url) => jsonRequest(running.url, "/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
+      body: JSON.stringify({ request: "Approve all PPE POST requests for this job.", mode: "validate-only",
+        targetEnvironment: "ppe", allowPostRequests: true, postWriteApprovalConfirmed: true,
+        postBaseApprovalConfirmed: true, ...changes })
+    });
+    const created = await post();
+    assert.equal(created.response.status, 202, created.body.error);
+    assert.equal(launches[0].postWriteApproval.mode, "post-base");
+    assert.equal(created.body.job.postWriteApproved, true);
+    assert.equal(created.body.job.ppeWriteApproved, false);
+    assert.match(launches[0].prompt, /all PPE POST requests, including writes/u);
+    assert.match(launches[0].prompt, /fixlab_nonproduction_post/u);
+    assert.doesNotMatch(launches[0].prompt, /Use fixlab_ppe_write/u);
+    for (const changes of [
+      { postBaseApprovalConfirmed: "yes" }, { allowPostRequests: false },
+      { postWriteApprovalConfirmed: false }, { targetEnvironment: "dev" },
+      { allowPpeWrites: true, ppeWriteApprovalConfirmed: true },
+      { testMutationMode: "none" }, { testMutationMode: "intercepted" }
+    ]) {
+      assert.equal((await post(changes)).response.status, 400, JSON.stringify(changes));
+    }
+    for (const origin of ["", "https://example.invalid"]) {
+      assert.equal((await post({}, origin)).response.status, 403);
+    }
+    const queued = await post();
+    const held = await jsonRequest(running.url, "/api/jobs/hold", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: queued.body.queue[0].id })
+    });
+    assert.equal(held.body.held[0].postWriteApproved, false);
+    await running.dashboard.close();
+    running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
+    assert.equal((await jsonRequest(running.url, "/api/status")).body.job.postWriteApproved, false);
+  } finally {
+    await running.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 for (const environment of ["dev", "ppe"]) {
 for (const enabled of [true, false]) {
   test(`${environment.toUpperCase()} portal default ${enabled} is environment-bound, recovered and cannot change on retry`, async () => {

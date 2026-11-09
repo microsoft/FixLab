@@ -176,6 +176,7 @@ const allowDevWritesInput = document.querySelector("#allow-dev-writes");
 let postUiBlocked = true;
 let postRuntimeAvailable = false;
 let postCheckboxEnvironment = null;
+let postCheckboxScope = null;
 let repositoryReadiness = null;
 
 function updatePostRequestsOption() {
@@ -185,14 +186,19 @@ function updatePostRequestsOption() {
   const available = postRuntimeAvailable && !postUiBlocked && ["dev", "sit", "uat", "ppe"].includes(environment) &&
     !document.querySelector('[name="testMutationMode"]').value;
   const key = available ? environment : "";
-  if (postCheckboxEnvironment !== key) {
+  const scope = repositoryReadiness?.postBaseEnvironments?.includes(environment) ? "base" : "endpoint";
+  if (postCheckboxEnvironment !== key || postCheckboxScope !== scope) {
     allowPostRequestsInput.checked = false;
     allowDevWritesInput.checked = key === "ppe" && repositoryReadiness?.ppeWriteConfigured === true;
     postCheckboxEnvironment = key;
+    postCheckboxScope = scope;
   }
   allowDevWritesInput.disabled = !available || !["dev", "ppe"].includes(environment);
   document.querySelector("#origin-writes-label").textContent =
     `Allow all ${environment === "ppe" ? "PPE" : "DEV"} API writes for this job`;
+  document.querySelector("#post-writes-label").textContent = scope === "base"
+    ? `Allow all ${environment.toUpperCase()} POST requests, including writes, for this job`
+    : "Allow POST writes for this job in the selected environment";
   allowPostRequestsInput.disabled = !available || allowDevWritesInput.checked;
   updateIntegrationOptions();
 }
@@ -2694,6 +2700,8 @@ form.addEventListener("submit", async (event) => {
       return;
     }
     const data = new FormData(form);
+    const reviewedPostEnvironment = postCheckboxEnvironment;
+    const reviewedPostScope = postCheckboxScope;
     const allowAllTools = data.get("allowAllTools") === "on";
     if (allowAllTools && !window.confirm(
       "Allow all reviewable tool commands for this run? Commands can access or change files and contact services without individual approval prompts. This is privileged execution, not a sandbox. Organization policy, sensitive/escalated requests, sign-in, publication consent and required checks remain separate. Retries and later jobs require a new opt-in."
@@ -2708,6 +2716,11 @@ form.addEventListener("submit", async (event) => {
     const screenshots = await Promise.all(
       validateSelectedScreenshots().map(fileBase64)
     );
+    if (data.get("allowPostRequests") === "on" &&
+        (reviewedPostEnvironment !== postCheckboxEnvironment || reviewedPostScope !== postCheckboxScope ||
+          allowPostRequestsInput.disabled || !allowPostRequestsInput.checked)) {
+      throw new Error("The POST approval scope changed. Review the current environment and approve it again.");
+    }
     const body = await fetchJson("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2732,6 +2745,7 @@ form.addEventListener("submit", async (event) => {
         testMutationMode: data.get("testMutationMode") ?? "",
         allowPostRequests: !allowPostRequestsInput.disabled && data.get("allowPostRequests") === "on",
         postWriteApprovalConfirmed: !allowPostRequestsInput.disabled && data.get("allowPostRequests") === "on",
+        postBaseApprovalConfirmed: !allowPostRequestsInput.disabled && reviewedPostScope === "base" && data.get("allowPostRequests") === "on",
         allowDevWrites: !allowDevWritesInput.disabled && postCheckboxEnvironment === "dev" && data.get("allowDevWrites") === "on",
         devWriteApprovalConfirmed: !allowDevWritesInput.disabled && postCheckboxEnvironment === "dev" && data.get("allowDevWrites") === "on",
         allowPpeWrites: !allowDevWritesInput.disabled && postCheckboxEnvironment === "ppe" && data.get("allowDevWrites") === "on",

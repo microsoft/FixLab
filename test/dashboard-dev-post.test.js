@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createDevPostTool, createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval } from "../dashboard/dev-post.js";
+import { createDevPostTool, createDevWriteApproval, createPpeWriteApproval, createPostBaseApproval, createPostWriteApproval } from "../dashboard/dev-post.js";
 import { runCopilotSession } from "../dashboard/copilot-session.js";
 import { createRuntimeRequestBridge, runtimeRequestId } from "../dashboard/runtime-requests.js";
 
@@ -53,6 +53,113 @@ function approveOrigins(state, environment = "DEV") {
     state.repository, environment, state.settings.jobId);
   return state.tool();
 }
+
+function approvePostBase(state, environment = "PPE") {
+  const key = environment.toLowerCase();
+  if (!state.profile.environments.includes(environment)) { state.profile.environments.push(environment); }
+  state.postBase = `https://api.shared.example.test/api/${key}/v1`;
+  state.profile.browserAutomation.dataSafety.post ??= {};
+  state.profile.browserAutomation.dataSafety.post[key] = {
+    scope: "api://example-service/access", sessionHelper: "session.mjs", baseUrls: [state.postBase]
+  };
+  state.save();
+  Object.assign(state.settings, {
+    jobId: "11111111-1111-4111-8111-111111111111", allowPostRequests: true, targetEnvironment: environment
+  });
+  state.settings.postWriteApproval = createPostBaseApproval(state.repository, environment, state.settings.jobId);
+  return state.tool();
+}
+
+for (const environment of ["DEV", "SIT", "UAT", "PPE"]) {
+test(`${environment} POST-only approval accepts all scoped paths without granting other methods or shared-host environments`, async (t) => {
+  const state = fixture(t);
+  writeFileSync(state.helper, `export async function withApiToken(options, run) {
+    if (options.environment !== "${environment.toLowerCase()}") { throw new Error("Wrong authentication environment"); }
+    await run("synthetic-value");
+  }\n`);
+  delete state.profile.browserAutomation.dataSafety.devPost;
+  const tool = approvePostBase(state, environment);
+  assert.equal(tool.name, "fixlab_nonproduction_post");
+  assert.equal(tool.parameters.properties.method, undefined);
+  for (const [path, payload] of [
+    ["queries/search", { filters: [] }], ["items/create", { name: "ANY_PPE_RECORD" }],
+    ["items/submit", [{ id: "ordinary-record" }]], ["actions/refresh", undefined]
+  ]) {
+    const result = await tool.handler({ url: `${state.postBase}/${path}`,
+      purpose: "Verify explicitly approved POST.", ...(payload === undefined ? {} : { payload }) });
+    assert.equal(result.method, "POST");
+    assert.equal(result.validationPassed, false);
+    assert.equal(result.responseBodyReturned, false);
+  }
+  assert.equal(state.prompts.length, 0);
+  for (const method of ["GET", "PUT", "PATCH", "DELETE"]) {
+    await assert.rejects(tool.handler({ ...state.args, url: `${state.postBase}/items`, method }),
+      /requires/u);
+  }
+  for (const url of ["https://api.shared.example.test/api/prod/v1/items",
+    `https://api.shared.example.test/api/${environment === "DEV" ? "sit" : "dev"}/v1/items`,
+    `${state.postBase}-other/items`, `${state.postBase}/..%2f..%2fprod/items`,
+    `${state.postBase}/%252e%252e/prod`, "https://other.api.shared.example.test/items",
+    "http://api.shared.example.test/items"]) {
+    await assert.rejects(tool.handler({ ...state.args, url }), /approved .* API bases/u);
+  }
+  assert.equal(state.requests.length, 4);
+  assert.ok(state.requests.every(({ options }) => options.method === "POST" && options.redirect === "manual"));
+});
+}
+
+test("all-POST setup rejects missing, ambiguous or production API bases before approval", (t) => {
+  const state = fixture(t);
+  approvePostBase(state, "SIT");
+  const configuration = state.profile.browserAutomation.dataSafety.post.sit;
+  for (const baseUrls of [
+    [], ["https://api.shared.example.test/api/uat/v1"],
+    ["https://api.uat.example.test/api/sit/v1"],
+    ["https://api.shared.example.test/api/prod/sit"],
+    ["http://api.shared.example.test/api/sit/v1"],
+    ["https://user@api.shared.example.test/api/sit/v1"],
+    ["https://api.shared.example.test/api/sit/v1?anything=true"],
+    ["https://api.shared.example.test/api/sit/%2fprod"],
+    ["https://api.shared.example.test/api/sit/v1/"]
+  ]) {
+    configuration.baseUrls = baseUrls;
+    state.save();
+    assert.throws(() => createPostBaseApproval(state.repository, "SIT", state.settings.jobId),
+      /base URLs|POST API bases/u);
+  }
+  delete configuration.baseUrls;
+  state.save();
+  assert.throws(() => createPostBaseApproval(state.repository, "SIT", state.settings.jobId), /Configure.*baseUrls/u);
+});
+
+test("PPE POST-only approval requires fresh matching job, configuration and execution consent", async (t) => {
+  for (const change of ["job", "environment", "unchecked", "profile", "helper", "removed"]) {
+    const state = fixture(t);
+    const tool = approvePostBase(state);
+    if (change === "job") { state.settings.jobId = "22222222-2222-4222-8222-222222222222"; }
+    if (change === "environment") { state.settings.targetEnvironment = "DEV"; }
+    if (change === "unchecked") { state.settings.allowPostRequests = false; }
+    if (["job", "environment", "unchecked"].includes(change)) {
+      assert.throws(state.tool, /Invalid job-scoped/u);
+      continue;
+    }
+    if (change === "profile") { state.profile.name = "Changed"; }
+    if (change === "helper") { writeFileSync(state.helper, `${readFileSync(state.helper, "utf8")}\n`); }
+    if (change === "removed") { delete state.profile.browserAutomation.dataSafety.post.ppe; }
+    state.save();
+    await assert.rejects(tool.handler({ ...state.args, url: `${state.postBase}/items` }),
+      /changed|not configured/u);
+    assert.equal(state.requests.length, 0);
+  }
+});
+
+test("PPE POST-only approval stops after an unsuccessful request without following redirects", async (t) => {
+  const state = fixture(t, { request: async () => new Response(null, { status: 302 }) });
+  const tool = approvePostBase(state);
+  const args = { ...state.args, url: `${state.postBase}/items` };
+  await assert.rejects(tool.handler(args), /HTTP 302.*Approval is spent/u);
+  await assert.rejects(tool.handler(args), /approval has stopped/u);
+});
 
 test("broad DEV approval supports every write method and any record/path only on exact reviewed origins", async (t) => {
   const state = fixture(t);
@@ -199,11 +306,17 @@ test("PPE origin grants permit CRUD but never accept DEV grants, mixed hosts or 
   assert.equal(state.requests.length, 4);
 });
 
-for (const environment of ["DEV", "PPE"]) {
-test(`native SDK consumes broad ${environment} approval and expires it on executor shutdown`, async (t) => {
+for (const [environment, postOnly] of [["DEV", false], ["PPE", false], ["PPE", true]]) {
+test(`native SDK consumes ${environment} ${postOnly ? "POST-only" : "broad"} approval and expires it on executor shutdown`, async (t) => {
   const state = fixture(t);
   state.args.url = `https://api.${environment.toLowerCase()}.example.test/items`;
-  approveOrigins(state, environment);
+  if (postOnly) {
+    approvePostBase(state, environment);
+    state.args.url = `${state.postBase}/items`;
+  } else {
+    approveOrigins(state, environment);
+  }
+  const args = { ...state.args, ...(postOnly ? {} : { method: "PUT" }) };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = state.settings.request;
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -219,18 +332,18 @@ test(`native SDK consumes broad ${environment} approval and expires it on execut
       async start() {},
       async createSession(options) {
         exposedTool = options.tools[0];
-        assert.equal(exposedTool.name, `fixlab_${environment.toLowerCase()}_write`);
+        assert.equal(exposedTool.name, postOnly ? "fixlab_nonproduction_post" : `fixlab_${environment.toLowerCase()}_write`);
         return {
           rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
           async sendAndWait() {
-            await exposedTool.handler({ ...state.args, method: "PUT" });
+            await exposedTool.handler(args);
           }
         };
       },
       async stop() { return []; }
     }
   });
-  await assert.rejects(exposedTool.handler({ ...state.args, method: "PUT" }), /policy.*shutdown/u);
+  await assert.rejects(exposedTool.handler(args), /policy.*shutdown/u);
   assert.equal(state.requests.length, 1);
 });
 }

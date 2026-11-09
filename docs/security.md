@@ -282,7 +282,7 @@ Credential-sensitive debug logging must be disabled.
 Without current job-scoped approval, every exact URL and complete JSON payload
 receives separate human review, including while Allow all is active. These
 requests are excluded from batch approval and expire after five minutes.
-With checkbox approval, payloads still require the exact configured test-record
+With endpoint-scoped checkbox approval, payloads still require the exact configured test-record
 field/value, credential screening and size limits. Review the endpoint contract:
 it must scope the operation to that test record; the marker alone cannot prove
 the business meaning of other payload fields.
@@ -294,6 +294,25 @@ and credentials never enter results or job history; only status metadata returns
 An HTTP success is not a passed scenario assertion. Existing arbitrary tool
 execution remains privileged: this constrained helper is not an OS network
 sandbox and cannot enforce the contract against an unrelated same-user process.
+
+The dashboard's **Allow all selected-environment POST requests, including writes**
+checkbox uses reviewed `dataSafety.post.<environment>.baseUrls` and the existing authentication
+helper, without an endpoint/test-record list. One explicit job approval authorizes
+POST to any path/record within those exact API bases; it does not authorize PUT, PATCH
+or DELETE. This POST-only grant uses `fixlab_nonproduction_post`, remains
+profile/helper/job-bound and memory-only, and stops after unsuccessful or ambiguous
+attempts. It never follows redirects or overrides explicit read-only modes,
+API-only/unit-only/production policy or browser guards.
+DEV, SIT, UAT and PPE are separately selected, even when they share an API host.
+Base URLs must identify the selected environment in their hostname or path;
+path boundaries and encoded-path checks prevent cross-environment matching.
+Configure each entry with `baseUrls`, `sessionHelper` and `scope`. The helper
+receives the selected `environment` and must authenticate only that environment.
+HTTP clients must send `allowPostRequests`, `postWriteApprovalConfirmed` and
+`postBaseApprovalConfirmed` as `true`, with the exact native dashboard Host/Origin
+and selected non-production environment. Older endpoint-scoped confirmations retain their
+original scope; they do not silently become origin-wide grants. The separate
+all-PPE-write checkbox retains its broader POST/PUT/PATCH/DELETE scope.
 
 A reported text-only non-interactive denial pauses the owned executor without automatic
 retries; approval remains unavailable until its termination is verified.

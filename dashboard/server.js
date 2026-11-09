@@ -44,7 +44,7 @@ import { validateJobFileAccess } from "./runtime-permission-policy.js";
 import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsUnverifiedDraft, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "./workflow-policy.js";
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
-import { createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval, inspectPpeWriteConfiguration, isOriginWriteApproval } from "./dev-post.js";
+import { createDevWriteApproval, createPpeWriteApproval, createPostBaseApproval, createPostWriteApproval, inspectPpeWriteConfiguration, inspectPostBaseConfiguration, isOriginWriteApproval } from "./dev-post.js";
 import { browserConfigurationErrors } from "./repository-setup.js";
 import { applyRepositorySettings, inspectRepositorySettings, localRepository, planRepositorySettings } from "./repository-settings.js";
 import { configuredLinkedApplications, resolveLinkedApplications } from "./linked-applications.js";
@@ -604,7 +604,8 @@ function publicQueue(jobs) {
     setupRecovery: job.setupRecovery ?? [],
     inputTokenLimit: job.inputTokenLimit ?? 0,
     toolApprovalMode: job.toolApprovalMode ?? "ask",
-    postWriteApproved: Boolean(job.postWriteApproval?.revision) && !isOriginWriteApproval(job.postWriteApproval),
+    postWriteApproved: Boolean(job.postWriteApproval?.revision) &&
+      (!isOriginWriteApproval(job.postWriteApproval) || job.postWriteApproval.mode === "post-base"),
     devWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "dev-origin",
     ppeWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "ppe-origin",
     fileAccess: job.fileAccess ?? null,
@@ -1138,6 +1139,7 @@ export function inspectRepository(repository) {
       };
     }
     const ppeWrites = inspectPpeWriteConfiguration(resolvedRepository);
+    const postBases = inspectPostBaseConfiguration(resolvedRepository);
     return {
       repository: resolvedRepository,
       repositoryReady: true,
@@ -1145,6 +1147,8 @@ export function inspectRepository(repository) {
       unitTestsOnly: profile.validation?.liveTestsRequired === false,
       ppeWriteConfigured: ppeWrites.configured,
       ppeWriteSetupError: ppeWrites.error,
+      postBaseEnvironments: postBases.environments,
+      postBaseSetupErrors: postBases.errors,
       playwrightMode: profile.browserAutomation?.mode ?? "browser",
       profilePath,
       environments: configuredValidationEnvironments(profile),
@@ -2434,7 +2438,8 @@ function publicJob(job) {
     } : null,
     inputTokenLimit: job.inputTokenLimit ?? 0,
     toolApprovalMode: job.toolApprovalMode ?? "ask",
-    postWriteApproved: Boolean(job.postWriteApproval?.revision) && !isOriginWriteApproval(job.postWriteApproval),
+    postWriteApproved: Boolean(job.postWriteApproval?.revision) &&
+      (!isOriginWriteApproval(job.postWriteApproval) || job.postWriteApproval.mode === "post-base"),
     devWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "dev-origin",
     ppeWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "ppe-origin",
     budgetExceeded: job.budgetExceeded === true,
@@ -4126,7 +4131,8 @@ export function createDashboardServer({
     if (isOriginWriteApproval(job.postWriteApproval)) {
       configuredTestSynthesis(currentProfile, job.testEvidence.selectedMutationMode ?? "", true, job.targetEnvironment);
       const environment = job.postWriteApproval.environment;
-      prompt += `\nThe user explicitly authorized all ${environment.toUpperCase()} API writes for this job on the reviewed dataSafety.${environment}Write HTTPS origins. Use fixlab_${environment}_write for POST, PUT, PATCH and DELETE without repeat confirmation or endpoint/test-record enumeration. This can change any record accessible to the signed-in account on those origins. The grant binds this job, ${environment.toUpperCase()} and the profile/helper revision, expires with execution, and stops after unsuccessful or ambiguous attempts. No other environments, redirects, retries, shell/browser-write substitutes or browser-guard bypass. Existing authentication is required. Report approved-write evidence; HTTP success alone is not scenario success.`;
+      const postOnly = job.postWriteApproval.mode === "post-base";
+      prompt += `\nThe user explicitly authorized all ${environment.toUpperCase()} ${postOnly ? "POST requests, including writes," : "API writes"} for this job within the reviewed ${postOnly ? `dataSafety.post.${environment}.baseUrls HTTPS API bases` : `dataSafety.${environment}Write HTTPS origins`}. Use ${postOnly ? "fixlab_nonproduction_post for POST only" : `fixlab_${environment}_write for POST, PUT, PATCH and DELETE`} without repeat confirmation or endpoint/test-record enumeration. This can change any record accessible to the signed-in account within that scope. The grant binds this job, ${environment.toUpperCase()} and the profile/helper revision, expires with execution, and stops after unsuccessful or ambiguous attempts. No other ${postOnly ? "methods, " : ""}environments, redirects, retries, shell/browser-write substitutes or browser-guard bypass. Existing authentication is required. Report approved-write evidence; HTTP success alone is not scenario success.`;
     } else if (typeof job.testEvidence.allowPostRequests === "boolean") {
       configuredTestSynthesis(currentProfile, job.testEvidence.selectedMutationMode ?? "",
         job.testEvidence.allowPostRequests, job.targetEnvironment);
@@ -6667,6 +6673,16 @@ export function createDashboardServer({
         sendJson(response, 400, { error: "postWriteApprovalConfirmed must be a boolean." });
         return;
       }
+      if (body.postBaseApprovalConfirmed !== undefined && typeof body.postBaseApprovalConfirmed !== "boolean") {
+        sendJson(response, 400, { error: "postBaseApprovalConfirmed must be a boolean." });
+        return;
+      }
+      if (body.postBaseApprovalConfirmed === true &&
+          (body.allowPostRequests !== true || body.postWriteApprovalConfirmed !== true ||
+            body.allowPpeWrites === true || body.allowDevWrites === true)) {
+        sendJson(response, 400, { error: "All-POST requests require explicit POST-only job confirmation and no other write checkbox." });
+        return;
+      }
       if (body.postWriteApprovalConfirmed === true) {
         if (body.allowPostRequests !== true || runtime !== "copilot") {
           sendJson(response, 400, { error: "Job-scoped POST approval requires the selected POST checkbox and native Copilot runtime." });
@@ -6942,6 +6958,8 @@ export function createDashboardServer({
           postWriteApproval = createDevWriteApproval(resolvedRepository, targetEnvironment, jobId);
         } else if (body.allowPpeWrites === true) {
           postWriteApproval = createPpeWriteApproval(resolvedRepository, targetEnvironment, jobId);
+        } else if (body.postBaseApprovalConfirmed === true) {
+          postWriteApproval = createPostBaseApproval(resolvedRepository, targetEnvironment, jobId);
         } else if (body.postWriteApprovalConfirmed === true) {
           postWriteApproval = createPostWriteApproval(resolvedRepository, targetEnvironment, jobId);
         }
@@ -7062,7 +7080,7 @@ export function createDashboardServer({
         pushLog(job, {
           index: job.nextLogIndex, timestamp: new Date().toISOString(), stream: "dashboard",
           message: isOriginWriteApproval(postWriteApproval)
-            ? `The user explicitly authorized POST/PUT/PATCH/DELETE on reviewed ${postWriteApproval.environment.toUpperCase()} origins for this job, including any record accessible to their account. Approval is revision-bound, memory-only and expires with this executor; other environments and explicit read-only restrictions remain blocked.`
+            ? `The user explicitly authorized ${postWriteApproval.mode === "post-base" ? "POST only within reviewed API bases" : "POST/PUT/PATCH/DELETE on reviewed origins"} in ${postWriteApproval.environment.toUpperCase()} for this job, including any record accessible to their account. Approval is revision-bound, memory-only and expires with this executor; other methods/environments and explicit read-only restrictions remain blocked.`
             : "The user explicitly authorized configured POST writes for this job and selected environment without repeat confirmation. Approval is revision-bound, memory-only and expires with this executor; production and read-only restrictions remain in effect."
         });
       }

@@ -290,6 +290,40 @@ test("POST checkbox explicitly approves this job only and keeps unchecked writes
   await expect(checkbox).not.toBeChecked();
 });
 
+test("POST-base checkbox explicitly confirms all POSTs without granting CRUD or later jobs", async ({ page }) => {
+  const posts = [];
+  await mockChatWorkspace(page, { environments: ["dev", "ppe"], postBaseEnvironments: ["ppe"] });
+  await page.route("**/api/jobs", async (route) => {
+    posts.push(route.request().postDataJSON());
+    await route.fulfill({ contentType: "application/json", status: 202,
+      body: JSON.stringify({ job: { id: "ppe-post-preference", request: "Synthetic PPE POST approval.",
+        mode: "validate-only", status: "running", stages: {}, bugs: [], logs: [], activity: [] },
+      queue: [], history: [] }) });
+  });
+  await openWorkflowControls(page, baseUrl);
+  await page.locator("#target-environment").selectOption("ppe");
+  await page.getByLabel("Allow all PPE POST requests, including writes, for this job", { exact: true }).check();
+  await page.locator("#request").fill("Approve all PPE POST requests for this job.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0].postBaseApprovalConfirmed).toBe(true);
+  expect(posts[0].postWriteApprovalConfirmed).toBe(true);
+  expect(posts[0].allowPostRequests).toBe(true);
+  expect(posts[0].allowPpeWrites).toBe(false);
+  await expect(page.locator("#allow-post-requests")).not.toBeChecked();
+  await page.locator("#request").fill("Run without a new POST approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(2);
+  expect(posts[1].postBaseApprovalConfirmed).toBe(false);
+  await page.locator("#target-environment").selectOption("dev");
+  await page.locator("#allow-post-requests").check();
+  await page.locator("#request").fill("Use endpoint-scoped DEV approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(3);
+  expect(posts[2].postBaseApprovalConfirmed).toBe(false);
+  expect(posts[2].postWriteApprovalConfirmed).toBe(true);
+});
+
 for (const environment of ["dev", "ppe"]) {
 test(`${environment.toUpperCase()} write checkbox is environment-specific, excludes scoped POST and resets consent for every job`, async ({ page }) => {
   const posts = [];
@@ -2307,12 +2341,12 @@ test("dashboard exposes explicit pull-request approval when validation is comple
 });
 
 async function mockChatWorkspace(page, { job = null, queue = [], history = [], environments,
-  profileReady = true, draftOnlyReady = false, ppeWriteConfigured = false } = {}) {
+  profileReady = true, draftOnlyReady = false, ppeWriteConfigured = false, postBaseEnvironments = [] } = {}) {
   await page.route("**/api/status", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify({
       instanceId: "workspace-owner",
-      readiness: { repositoryReady: true, profileReady, draftOnlyReady, ppeWriteConfigured,
+      readiness: { repositoryReady: true, profileReady, draftOnlyReady, ppeWriteConfigured, postBaseEnvironments,
         repository: "C:\\code\\alpha", profileName: "Alpha workspace", environments },
       runtime: { name: "copilot", supportsModelSelection: true, defaultModel: "" },
       job, queue, held: [], history

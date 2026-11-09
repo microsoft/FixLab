@@ -30,6 +30,15 @@ memory-only grant and lifecycle revocation. No other environment or explicit
 read-only contract is expanded; browser guards remain intact. See
 [DEV/PPE write configuration](security.md#broad-dev-and-ppe-api-writes).
 
+Legacy feature-specific browser guards are repaired through the separate
+interactive `fixlab setup-queries` operation. It requires a selected,
+profile-approved non-production browser read scope. Planning does not change
+files; `--yes` authorizes only reviewed query-policy/adapter changes and focused
+offline guard tests. It does not issue business API requests, grant runtime
+permissions, change product source or authorize writes. Both runtimes receive
+the same setup contract. Guard changes require a fresh reviewed validation job;
+validation-only jobs keep configuration read-only.
+
 PPE has an independent `dataSafety.ppeWrite` configuration, per-job confirmation
 and `fixlab_ppe_write` tool with the same CRUD methods and grant lifecycle.
 DEV grants never authorize PPE or other environments.

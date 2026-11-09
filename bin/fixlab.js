@@ -44,6 +44,7 @@ import { runStructuredCommand } from "./structured-command.js";
 import {
   applyWorktreeSetup,
   browserConfigurationErrors,
+  buildQuerySetupPrompt,
   planWorktreeSetup,
   REPOSITORY_PROMPT_NAMES
 } from "../dashboard/repository-setup.js";
@@ -92,6 +93,7 @@ Usage:
   fixlab prepare [repository] [--yes]
   fixlab doctor [repository] [--runtime <agency|copilot>]
   fixlab setup-playwright [repository] [--yes]
+  fixlab setup-queries [repository] --environment <name> [--yes] [--runtime <agency|copilot>] [--model <model>]
   fixlab authenticate [repository] [--yes]
   fixlab linked-api-proof [repository] [--authenticate|--proof] [--yes]
   fixlab portal-api-proof [repository] [--authenticate|--proof] --yes
@@ -115,6 +117,8 @@ Commands:
   doctor    Check required tools and repository configuration.
   setup-playwright
             Plan or install Playwright; API-only profiles need no browser.
+  setup-queries
+            Review or repair verified read-only query coverage in repository adapters.
   authenticate
             Plan or run the repository-owned browser or API authentication command.
   linked-api-proof
@@ -1170,6 +1174,52 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   return result.status ?? 1;
 }
 
+function setupQueries(args) {
+  const parsed = parseRuntimeArguments(args);
+  if (parsed.error) { throw new Error(parsed.error); }
+  let repositoryArgument;
+  let environment;
+  let approved = false;
+  for (let index = 0; index < parsed.args.length; index += 1) {
+    const value = parsed.args[index];
+    if (value === "--environment" && environment === undefined &&
+        parsed.args[index + 1] && !parsed.args[index + 1].startsWith("-")) {
+      environment = parsed.args[++index];
+    } else if (value === "--yes" && !approved) {
+      approved = true;
+    } else if (!value.startsWith("-") && repositoryArgument === undefined) {
+      repositoryArgument = value;
+    } else {
+      throw new Error("Usage: fixlab setup-queries [repository] --environment <name> [--yes] [--runtime <agency|copilot>] [--model <model>]");
+    }
+  }
+  const repository = resolveRepository(repositoryArgument);
+  const { profile, error } = loadProfile(repository);
+  if (error) { throw new Error(`Cannot review query setup because ${error}.`); }
+  const selectedEnvironment = validateTargetEnvironment(environment ?? "", configuredValidationEnvironments(profile)).toLowerCase();
+  const prompt = buildQuerySetupPrompt({ environment: selectedEnvironment, approved });
+  const evidence = configuredTestSynthesis(profile, "", undefined, selectedEnvironment);
+  if (profile.browserAutomation?.dataSafety?.productionAllowed !== false ||
+      evidence.apiOnly || evidence.unitTestsOnly || evidence.productionDatabaseReadOnly ||
+      !["non-production-read-only", "non-production-approved"].includes(evidence.source)) {
+    throw new Error("Query setup requires an existing approved non-production browser read scope; it cannot override API-only, unit-only, synthetic-only or production policy.");
+  }
+  if (!findExecutable(parsed.runtime)) {
+    throw new Error(`Cannot review query setup because ${parsed.runtime} is unavailable. Install and authenticate the selected runtime first.`);
+  }
+  console.log(`FixLab query setup: ${approved ? "reviewed repair" : "plan only"} (${selectedEnvironment})`);
+  const result = spawnSync(parsed.runtime, [
+    ...(parsed.runtime === "agency" ? ["copilot"] : []),
+    "--plugin-dir", packageRoot, "--agent", "fixlab:fixlab",
+    ...(parsed.runtime === "copilot" ? copilotModelArguments(parsed.model) : []),
+    "--interactive", prompt
+  ], { cwd: repository, stdio: "inherit", shell: process.platform === "win32" });
+  if (result.error) {
+    console.error(`Query setup runtime could not start: ${result.error.message}`);
+  }
+  return result.status ?? 1;
+}
+
 function parseRunArguments(args) {
   let repositoryArgument;
   let targetEnvironment = "";
@@ -1794,6 +1844,10 @@ async function main(args) {
       return 1;
     }
     return onboard(parsed);
+  }
+
+  if (command === "setup-queries") {
+    return setupQueries(rest);
   }
 
   if (command === "init") {

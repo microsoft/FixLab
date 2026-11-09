@@ -48,6 +48,9 @@ Legacy DEV `fixlab_dev_post` and `dataSafety.devPost` remain supported.
 Native Copilot DEV/PPE: separate consent enables
 fixlab_dev_write/fixlab_ppe_write POST/PUT/PATCH/DELETE on
 dataSafety.devWrite/ppeWrite HTTPS origins, any record; job guards.
+Native Copilot POST-only consent: fixlab_nonproduction_post covers any POST
+path/record within reviewed dataSafety.post environment baseUrls; job guards,
+no repeat prompts.
 
 Explicit unverified draft: when deferValidation is true, create or update the
 authorized DRAFT PR after implementing and reviewing the nonempty diff,
@@ -94,22 +97,20 @@ environments, explicit read-only/intercepted selections, API-only read-only cont
 remain unchanged. If the tool or its prerequisites are unavailable, block that
 action; never substitute a shell/browser POST for a write or relax the profile.
 
-Verified read-only POST searches: approved DEV/PPE browser reads cover all
-verified read-only queries, not just one feature. Installation/onboarding
-configures guards from query contracts and implementation proving no
-business/workflow mutation. Match the exact approved environment, origin and
-path and supported payload, including redirects. Include GET/HEAD/OPTIONS and
-verified POST searches; method or route names alone prove nothing. Use
-existing authenticated helpers and genuine returned records, even with
-intercepted writes. Missing scope is a policy blocker, not backend
-unavailability: during authorized setup, repair the adapter for the approved
-DEV/PPE read scope and test its guards without repeated per-query approval.
-Otherwise request scoped review. Do not silently substitute synthetic data,
-remove guards or grant writes. Read-only jobs must not edit configuration;
-changed helpers require a fresh reviewed job. Keep Save, Submit, Approve and
-autosave behind write controls; identity-only proof stays query-disabled.
-Never override synthetic-only, API-only, unit-only or production policy;
-synthetic evidence is not live integration.
+Verified read-only POST searches: Cover the full verified query scope for
+approved DEV/PPE reads. Contracts/implementation must prove no business/workflow
+mutation; names/verbs do not. Match the exact approved environment, origin and
+path and supported payload, including redirects. Use existing authenticated
+helpers and genuine returned records for GET/HEAD/OPTIONS and verified POSTs,
+including intercepted-write jobs. Missing scope is a policy blocker, not
+backend unavailability. Offer fixlab setup-queries REPOSITORY --environment ENV
+--runtime RUNTIME as a separate plan-first setup operation: reviewed --yes
+permits adapter/policy repairs and offline guard tests only, not product edits
+or business calls. Read-only jobs must not edit configuration; changed helpers
+need a fresh reviewed job. Do not silently substitute synthetic data, remove
+guards or grant writes. Keep Save/Submit/Approve/autosave write-controlled;
+identity-only proof query-disabled. Never override synthetic-only, API-only,
+unit-only or production policy; synthetic evidence is not live integration.
 
 New installation profiles set `browserAutomation.testSynthesis.devReadOnly:
 true` and `ppeReadOnly: true`. Selecting DEV/development or PPE resolves the

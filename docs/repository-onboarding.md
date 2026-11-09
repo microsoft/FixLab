@@ -190,6 +190,30 @@ implementation and payload rather than the verb or route name. Once that read
 scope is approved, no per-query human confirmation is required. Preserve
 identity-only authentication/proof defaults and all business-write controls.
 
+For an existing adapter that still permits only a feature-specific subset, run
+the dedicated query-setup operation in the application checkout:
+
+```shell
+fixlab setup-queries REPOSITORY --environment dev --runtime copilot
+fixlab setup-queries REPOSITORY --environment dev --runtime copilot --yes
+```
+
+The first invocation starts an interactive, read-only setup review. It inventories
+the full verified query scope from contracts and implementation and reports the
+exact policy/adapter files and proposed offline guard tests. After reviewing that
+plan, `--yes` authorizes only the setup repair and focused guard tests. Existing
+adapters must consume the shared query policy; adding one profile path alone is
+not sufficient. No business API calls, authentication, business writes, product
+source changes or PR operations are authorized. Runtime permissions remain
+interactive and independent. An existing approved non-production browser read
+scope is required; API-only, unit-only, synthetic-only and production policies
+cannot be expanded by this command.
+
+Finish setup before starting a fresh reviewed validation job. Do not repair
+configuration inside a validation-only job or reuse stale helper/write approvals.
+This operation does not turn all POSTs into reads or replace the separate
+POST/DEV/PPE write-approval flow.
+
 Use `defaultDataSource: "synthetic-intercepted"` with
 `mutationMode: "intercepted"` when Playwright should fulfill reads locally and
 capture mutation intent without changing an external record. Repositories may

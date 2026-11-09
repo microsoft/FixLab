@@ -66,6 +66,7 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /fixlab init/);
   assert.match(result.stdout, /fixlab prepare/);
   assert.match(result.stdout, /fixlab authenticate/);
+  assert.match(result.stdout, /fixlab setup-queries/);
   assert.match(result.stdout, /fixlab exec/);
   assert.match(result.stdout, /fixlab validate/);
   assert.match(result.stdout, /fixlab dashboard/);
@@ -79,6 +80,106 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /FIXLAB_RUNTIME/);
   assert.match(result.stdout, /127\.0\.0\.1:4317/);
   assert.match(result.stdout, /docs\/troubleshooting\.md/);
+});
+
+function querySetupFixture(t) {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-query-setup-"));
+  t.after(() => rmSync(repository, { recursive: true, force: true }));
+  assert.equal(run(["init", repository], repository).status, 0);
+  const path = join(repository, ".github", "fixlab", "repository-profile.json");
+  const profile = JSON.parse(readFileSync(path, "utf8"));
+  profile.environments = ["DEV", "SIT", "PPE", "Test"];
+  profile.browserAutomation.testSynthesis = {
+    defaultDataSource: "non-production-read-only", mutationMode: "none"
+  };
+  const save = () => writeFileSync(path, `${JSON.stringify(profile, null, 2)}\n`);
+  save();
+  const sentinel = join(repository, "product-source.txt");
+  writeFileSync(sentinel, "preserve product source");
+  const bin = join(repository, "bin");
+  mkdirSync(bin);
+  for (const runtime of ["agency", "copilot"]) {
+    const executable = join(bin, process.platform === "win32" ? `${runtime}.cmd` : runtime);
+    writeFileSync(executable, process.platform === "win32"
+      ? "@echo off\r\necho RUNTIME_ARGS:%*\r\n"
+      : "#!/bin/sh\nprintf 'RUNTIME_ARGS:%s\\n' \"$*\"\n");
+    if (process.platform !== "win32") { chmodSync(executable, 0o755); }
+  }
+  return { repository, path, profile, save, sentinel, bin,
+    environment: { PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}` } };
+}
+
+test("query setup separates interactive planning from approved repair in both runtimes", (t) => {
+  const f = querySetupFixture(t);
+  const previous = readFileSync(f.path, "utf8");
+  for (const runtime of ["agency", "copilot"]) {
+    for (const approved of [false, true]) {
+      const result = run(["setup-queries", f.repository, "--environment", "DEV",
+        "--runtime", runtime, ...(approved ? ["--yes"] : [])], f.repository, f.environment);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /--plugin-dir .* --agent fixlab:fixlab/u);
+      assert.match(result.stdout, /--interactive FixLab query setup (?:PLAN|APPLY) for the selected dev environment/u);
+      assert.match(result.stdout, approved
+        ? /The user approved this setup operation only/
+        : /PLAN ONLY: read and report/);
+      assert.match(result.stdout, /ALL read-only queries across the approved API scope/u);
+      assert.match(result.stdout, /Updating only the profile or agent instructions is not a completed repair/u);
+      assert.match(result.stdout, /Do not contact a business API/u);
+      assert.match(result.stdout, /fresh reviewed job/u);
+      assert.doesNotMatch(result.stdout, /--allow-all|--allow-tool|--add-dir|--no-ask-user|--autopilot|--session-id/u);
+      assert.equal(readFileSync(f.path, "utf8"), previous);
+      assert.equal(readFileSync(f.sentinel, "utf8"), "preserve product source");
+    }
+  }
+  const testEnvironment = run(["setup-queries", f.repository, "--environment", "Test",
+    "--runtime", "copilot"], f.repository, f.environment);
+  assert.equal(testEnvironment.status, 0, testEnvironment.stderr);
+  assert.match(testEnvironment.stdout, /selected test environment/u);
+});
+
+test("query setup rejects unreviewed environments, malformed options and stricter policies before launch", (t) => {
+  const f = querySetupFixture(t);
+  for (const args of [
+    [], ["--environment"], ["--environment", "production"],
+    ["--environment", "unknown"], ["--environment", "DEV", "--environment", "SIT"],
+    ["--environment", "DEV", "--yes", "--yes"], ["--environment", "DEV", "--allow-all-tools"],
+    ["--environment", "DEV", "another-repository"]
+  ]) {
+    const result = run(["setup-queries", f.repository, "--runtime", "copilot", ...args],
+      f.repository, f.environment);
+    assert.equal(result.status, 1, JSON.stringify(args));
+    assert.doesNotMatch(result.stdout, /RUNTIME_ARGS:/u);
+    assert.match(result.stderr, /Usage:|non-production|profile environments/u);
+  }
+  const original = JSON.stringify(f.profile);
+  for (const change of ["api", "unit", "production", "synthetic"]) {
+    Object.assign(f.profile, JSON.parse(original));
+    if (change === "api") { f.profile.browserAutomation.mode = "api"; }
+    if (change === "unit") { f.profile.validation.liveTestsRequired = false; }
+    if (change === "production") { f.profile.browserAutomation.dataSafety.productionAllowed = true; }
+    if (change === "synthetic") {
+      Object.assign(f.profile.browserAutomation.testSynthesis, {
+        defaultDataSource: "synthetic-intercepted", mutationMode: "intercepted", devReadOnly: false
+      });
+    }
+    f.save();
+    const result = run(["setup-queries", f.repository, "--environment", "DEV", "--yes",
+      "--runtime", "copilot"], f.repository, f.environment);
+    assert.equal(result.status, 1, change);
+    assert.doesNotMatch(result.stdout, /RUNTIME_ARGS:/u);
+    assert.match(result.stderr, /existing approved non-production browser read scope/u);
+  }
+});
+
+test("query setup propagates runtime failure without reporting the adapter ready", (t) => {
+  const f = querySetupFixture(t);
+  const executable = join(f.bin, process.platform === "win32" ? "copilot.cmd" : "copilot");
+  writeFileSync(executable, process.platform === "win32"
+    ? "@echo off\r\nexit /b 7\r\n" : "#!/bin/sh\nexit 7\n");
+  const result = run(["setup-queries", f.repository, "--environment", "DEV", "--yes",
+    "--runtime", "copilot"], f.repository, f.environment);
+  assert.equal(result.status, 7);
+  assert.doesNotMatch(result.stdout, /setup ready|onboarding is ready/u);
 });
 
 test("direct shared-mode bug fixing requires dashboard-owned branch acquisition", () => {

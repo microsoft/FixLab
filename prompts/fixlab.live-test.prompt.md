@@ -10,22 +10,20 @@ Playwright journey on the developer or registered-runner machine. Capture
 sanitized screenshots, API assertions, logs, cleanup, and the exact observable
 result.
 
-Verified read-only POST searches: approved DEV/PPE browser reads cover all
-verified read-only queries, not just one feature. Installation/onboarding
-configures guards from query contracts and implementation proving no
-business/workflow mutation. Match the exact approved environment, origin and
-path and supported payload, including redirects. Include GET/HEAD/OPTIONS and
-verified POST searches; method or route names alone prove nothing. Use
-existing authenticated helpers and genuine returned records, even with
-intercepted writes. Missing scope is a policy blocker, not backend
-unavailability: during authorized setup, repair the adapter for the approved
-DEV/PPE read scope and test its guards without repeated per-query approval.
-Otherwise request scoped review. Do not silently substitute synthetic data,
-remove guards or grant writes. Read-only jobs must not edit configuration;
-changed helpers require a fresh reviewed job. Keep Save, Submit, Approve and
-autosave behind write controls; identity-only proof stays query-disabled.
-Never override synthetic-only, API-only, unit-only or production policy;
-synthetic evidence is not live integration.
+Verified read-only POST searches: Cover the full verified query scope for
+approved DEV/PPE reads. Contracts/implementation must prove no business/workflow
+mutation; names/verbs do not. Match the exact approved environment, origin and
+path and supported payload, including redirects. Use existing authenticated
+helpers and genuine returned records for GET/HEAD/OPTIONS and verified POSTs,
+including intercepted-write jobs. Missing scope is a policy blocker, not
+backend unavailability. Offer fixlab setup-queries REPOSITORY --environment ENV
+--runtime RUNTIME as a separate plan-first setup operation: reviewed --yes
+permits adapter/policy repairs and offline guard tests only, not product edits
+or business calls. Read-only jobs must not edit configuration; changed helpers
+need a fresh reviewed job. Do not silently substitute synthetic data, remove
+guards or grant writes. Keep Save/Submit/Approve/autosave write-controlled;
+identity-only proof query-disabled. Never override synthetic-only, API-only,
+unit-only or production policy; synthetic evidence is not live integration.
 
 For `browserAutomation.mode: "api"`, use `APIRequestContext` without a frontend,
 browser binary, screenshot or video. Enforce the profile's approved origins,

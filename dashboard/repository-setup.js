@@ -6,6 +6,29 @@ export const SETUP_PROFILE_PATH = join(".github", "fixlab", "repository-profile.
 export const REPOSITORY_PROMPT_NAMES = ["bugfix", "intake", "diagnose", "reproduce", "fix", "validate", "live-test", "pr", "summary"]
   .map((name) => `fixlab.${name}.prompt.md`);
 
+export function buildQuerySetupPrompt({ environment, approved = false }) {
+  if (typeof environment !== "string" || !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(environment) ||
+      /(?:^|[._-])(?:prod|prd|production)(?:[._-]|$)/u.test(environment) ||
+      typeof approved !== "boolean") {
+    throw new Error("Query setup requires an explicitly selected non-production environment and boolean approval.");
+  }
+  return [
+    `FixLab query setup ${approved ? "APPLY" : "PLAN"} for the selected ${environment} environment.`,
+    "This is a dedicated repository setup operation, not a product bug-fix or validation job. Do not start a dashboard/job, change branches, commit, push or publish a PR.",
+    "Read repository instructions, the FixLab profile, existing browser/auth guards and their tests. Preserve unrelated work and existing authentication helpers.",
+    "Inventory ALL read-only queries across the approved API scope, not only the reported feature. Verify each from its API contract AND implementation, including supported payloads, redirects and absence of business/workflow mutation. Route names and HTTP verbs alone are not evidence.",
+    "Use one repository-owned query policy shared by browser guards and API helpers. Reuse an existing catalog when available. Include verified POST searches alongside GET/HEAD/OPTIONS, bound to the exact selected environment, API origin, base path and supported payload. Upgrade existing adapters as well as new setup; remove feature-specific drift, not safety controls.",
+    "Review legacy readOnlyPostPaths and any hard-coded URL lists or feature-sized limits in the actual adapter. Updating only the profile or agent instructions is not a completed repair. Do not introduce wildcards or permit arbitrary POSTs.",
+    "Keep real POST/PUT/PATCH/DELETE writes behind the existing separately approved write tools. Neither query setup nor Allow all tools grants writes. Keep Save, Submit, Approve and autosave blocked; identity-only proof stays query-disabled.",
+    "Do not contact a business API, perform authentication, inspect/copy browser state or credentials, or send business-data writes during setup. Never broaden another environment, production, API-only, unit-only or synthetic-only policy.",
+    approved
+      ? "The user approved this setup operation only. Before editing, show the exact proposed setup files and verified query scope. Modify only the repository-owned query policy, browser/API adapters and focused guard tests needed for that scope. Preserve product source and existing unrelated tests. If the read scope or proposed changes exceed this authorization, stop for a new scoped review. Normal runtime permissions still apply."
+      : "PLAN ONLY: read and report the exact setup files, verified query scope, missing coverage and proposed offline test commands. Do not create, edit or delete files, install dependencies, or execute setup/validation commands. Ask the user to review this plan, then rerun fixlab setup-queries with the same environment and --yes to apply it.",
+    "For an approved repair, run focused offline tests against the actual adapters: all verified query routes, unsupported payloads, same-origin other-environment paths, redirects, unapproved writes, and the separately approved write path. Do not enable writes to make a read test pass.",
+    "Finish with actual changed files and test results or exact unresolved prerequisites. Never claim setup ready from a profile entry alone. Policy/helper changes require a fresh reviewed job; do not resume an executor with stale approvals or claim browser validation passed."
+  ].join(" ");
+}
+
 export function localRepository(value) {
   if (typeof value !== "string" || value.length > 2048 || !isAbsolute(value)) {
     throw new Error("Choose an existing local Git repository using its absolute folder path.");

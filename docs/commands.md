@@ -439,8 +439,20 @@ revision-bound; it expires on stop, hold, completion or restart. No browser guar
 is disabled and no production, API-only or explicit read-only restriction is
 waived. See [POST configuration and approval](security.md#individually-confirmed-non-production-post).
 
+With reviewed `dataSafety.post.<environment>.baseUrls`, the POST checkbox offers
+**all selected-environment POST requests, including writes**, using those
+API bases and the existing helper, separately for DEV, SIT, UAT or PPE.
+It requires no endpoint/test-record list or repeated confirmation, but authorizes
+POST only. Other methods require the separate broader write approval. Old
+endpoint-scoped API clients do not inherit this wider scope.
+
 A missing allowlist entry is a policy blocker, not an unavailable backend.
-Request a narrow configuration review; do not disable the guard, allow all POSTs,
+Offer `fixlab setup-queries REPOSITORY --environment ENV --runtime copilot`
+for a separate plan-first review of the full verified query scope. After the
+user reviews the proposed files and offline tests, `--yes` authorizes the scoped
+policy/adapter repair, not product changes, live API calls or business writes.
+See [query setup](repository-onboarding.md) for setup boundaries.
+Do not disable the guard, allow all POSTs,
 use another client to bypass it, or silently substitute synthetic records.
 Read-only jobs cannot edit configuration; approved changes need a fresh reviewed
 context/job. Save, Submit, Approve and autosave retain their write controls.
