@@ -6,7 +6,7 @@ Open your application checkout in a signed-in Copilot session and paste:
 
 ```text
 Install or reuse FixLab and onboard this repository with --runtime copilot.
-Follow https://github.com/MonaDevAI/FixLab/blob/main/docs/FIXLAB-SETUP.md
+Follow https://github.com/microsoft/FixLab/blob/main/docs/FIXLAB-SETUP.md
 Ask me for missing setup details; do not guess paths, commands or environments.
 Review the profile and changes with me, then run Doctor.
 Ask before starting or reusing the matching dashboard and show its local URL.

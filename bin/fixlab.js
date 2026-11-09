@@ -62,7 +62,7 @@ const profileRelativePath = join(
 const promptNames = REPOSITORY_PROMPT_NAMES;
 const vscodeAgentName = "fixlab-autofix.agent.md";
 const troubleshootingUrl =
-  "https://github.com/MonaDevAI/FixLab/blob/main/docs/troubleshooting.md";
+  "https://github.com/microsoft/FixLab/blob/main/docs/troubleshooting.md";
 
 function printTroubleshooting() {
   console.error(`Troubleshooting: ${troubleshootingUrl}`);

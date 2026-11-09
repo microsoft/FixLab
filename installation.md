@@ -57,12 +57,16 @@ reopen the terminal.
 
 ## 2. Install FixLab
 
+FixLab is now hosted at [`microsoft/FixLab`](https://github.com/microsoft/FixLab).
+The repository transfer does not update existing installations; rerun the
+installation command below when you want to update your installed copy.
+
 If public GitHub access is restricted, use an
 [organization-approved package](docs/installation.md#enterprise-managed-github-accounts)
 instead; do not bypass enterprise policy. Otherwise:
 
 ```powershell
-npm install --global github:MonaDevAI/FixLab
+npm install --global github:microsoft/FixLab
 fixlab --help
 ```
 

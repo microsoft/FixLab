@@ -53,7 +53,7 @@ Get-Command fixlab -ErrorAction SilentlyContinue
 Install FixLab:
 
 ```powershell
-npm install --global github:MonaDevAI/FixLab
+npm install --global github:microsoft/FixLab
 ```
 
 The global prefix must be on the user `PATH`. A common Windows user-level npm

@@ -22,7 +22,7 @@ checkout, and paste:
 ```text
 Install or reuse FixLab, register its MCP server, and onboard this repository
 with --runtime copilot. Follow FIXLAB-SETUP.md if supplied; otherwise use:
-https://github.com/MonaDevAI/FixLab/blob/main/docs/installation.md
+https://github.com/microsoft/FixLab/blob/main/docs/installation.md
 Review the real profile and setup plan with me before each change.
 Ask me for missing setup details; do not guess paths or settings.
 Use Microsoft Edge by default for required browser validation. Review feed
@@ -148,7 +148,7 @@ customer data in prompts, source, logs, or durable caches.
 See the [security model](docs/security.md).
 
 Install from GitHub until npm/marketplace publication is available; consult
-[GitHub releases](https://github.com/MonaDevAI/FixLab/releases) for published
+[GitHub releases](https://github.com/microsoft/FixLab/releases) for published
 versions. A default-branch install can contain changes newer than a release.
 
 ## Contributing

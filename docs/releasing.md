@@ -8,7 +8,7 @@ FixLab uses GitHub Actions for continuous integration and tagged releases.
 2. Enable GitHub Actions with read access to repository contents.
 3. Create an `npm` environment and require the desired reviewers.
 4. Configure npm trusted publishing for:
-   - Repository: `MonaDevAI/FixLab`
+   - Repository: `microsoft/FixLab`
    - Workflow: `.github/workflows/release.yml`
    - Environment: `npm`
 5. Confirm that the npm organization owns the `@fixlab` scope.
@@ -36,7 +36,7 @@ It publishes `@fixlab/cli` only when `NPM_PUBLISH_ENABLED` is explicitly set to
 
 As of `v0.7.3`, the GitHub release is published, npm publication remains
 disabled, and the generated GitHub release has no attached `.tgz` asset.
-Install the current CLI directly from `github:MonaDevAI/FixLab`.
+Install the current CLI directly from `github:microsoft/FixLab`.
 
 ## Publish through the GitHub Copilot plugin marketplace
 
@@ -51,7 +51,7 @@ external GitHub source by adding an entry like this to
   "name": "fixlab",
   "source": {
     "source": "github",
-    "repo": "MonaDevAI/FixLab"
+    "repo": "microsoft/FixLab"
   },
   "description": "Evidence-backed defect diagnosis, repair, and validation for React and .NET repositories.",
   "version": "0.7.4",
@@ -59,8 +59,8 @@ external GitHub source by adding an entry like this to
     "name": "MonaDevAI",
     "url": "https://github.com/MonaDevAI"
   },
-  "homepage": "https://github.com/MonaDevAI/FixLab",
-  "repository": "https://github.com/MonaDevAI/FixLab",
+  "homepage": "https://github.com/microsoft/FixLab",
+  "repository": "https://github.com/microsoft/FixLab",
   "keywords": [
     "testing",
     "validation",
@@ -84,14 +84,14 @@ Before opening the marketplace pull request:
 3. Verify discovery with
    `copilot --plugin-dir . plugin list`.
 4. Install the GitHub-hosted release with
-   `copilot plugin install MonaDevAI/FixLab`.
+   `copilot plugin install microsoft/FixLab`.
 5. Run a non-destructive smoke prompt through
    `copilot --agent fixlab:fixlab`.
 6. Include the validation results, supported operating systems, required local
    tools, and the security and data-handling boundaries in the pull request.
 
 Marketplace publication is independent of merging changes into
-`MonaDevAI/FixLab`. Until the separate `github/copilot-plugins` pull request is
+`microsoft/FixLab`. Until the separate `github/copilot-plugins` pull request is
 accepted, users must install from the FixLab repository. After that marketplace
 change is merged, users install FixLab with:
 

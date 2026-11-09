@@ -13,9 +13,9 @@ Open Copilot in the target checkout and paste:
 
 ```text
 Onboard the actual repository with --runtime copilot. Follow:
-https://github.com/MonaDevAI/FixLab/blob/main/docs/FIXLAB-SETUP.md
+https://github.com/microsoft/FixLab/blob/main/docs/FIXLAB-SETUP.md
 If unavailable, use the manual installation guide:
-https://github.com/MonaDevAI/FixLab/blob/main/docs/installation.md
+https://github.com/microsoft/FixLab/blob/main/docs/installation.md
 Inspect first, show the plan, and ask before changes or when details are missing.
 Reuse compatible installed tools and preserve application code and edits.
 Resolve npm/Yarn and NuGet feed authentication separately using approved
@@ -42,8 +42,8 @@ Show the plan and ask before applying changes.
 ## If the guide is unavailable
 
 The file is optional. Follow FixLab's
-[first-installation steps](https://github.com/MonaDevAI/FixLab/blob/main/installation.md)
-or [detailed manual setup](https://github.com/MonaDevAI/FixLab/blob/main/docs/installation.md#recommended-path-install-then-run).
+[first-installation steps](https://github.com/microsoft/FixLab/blob/main/installation.md)
+or [detailed manual setup](https://github.com/microsoft/FixLab/blob/main/docs/installation.md#recommended-path-install-then-run).
 Do not substitute an unrelated application's installation guide or repeatedly
 request a missing attachment. Keep the same review and authentication safeguards.
 
@@ -82,7 +82,7 @@ Inspect `Get-Command fixlab` and `fixlab --help`. Reuse a compatible approved
 installation. If absent, request approval before:
 
 ```powershell
-npm install --global github:MonaDevAI/FixLab
+npm install --global github:microsoft/FixLab
 fixlab --help
 ```
 
@@ -520,8 +520,8 @@ publish, or stop unrelated resources as part of setup.
 
 ## References
 
-- [FixLab installation](https://github.com/MonaDevAI/FixLab/blob/main/installation.md)
-- [FixLab detailed setup](https://github.com/MonaDevAI/FixLab/blob/main/docs/installation.md)
+- [FixLab installation](https://github.com/microsoft/FixLab/blob/main/installation.md)
+- [FixLab detailed setup](https://github.com/microsoft/FixLab/blob/main/docs/installation.md)
 - [Azure Artifacts Credential Provider](https://github.com/microsoft/artifacts-credprovider)
 - [Playwright persistent contexts](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-persistent-context)
 - [Microsoft Entra supported browsers](https://learn.microsoft.com/en-us/entra/identity/conditional-access/concept-conditional-access-conditions#supported-browsers)

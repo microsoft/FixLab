@@ -71,9 +71,9 @@ test("reviewed setup defaults to Edge and protects private authentication state"
   const guide = read("docs/FIXLAB-SETUP.md");
   const pasteOnlyPrompt = guide.match(/## Option 1: paste one prompt[\s\S]*?```text\r?\n([\s\S]*?)```/u)?.[1];
   assert.ok(pasteOnlyPrompt, "the paste-only setup prompt must be available");
-  assert.ok(pasteOnlyPrompt.includes("https://github.com/MonaDevAI/FixLab/blob/main/docs/FIXLAB-SETUP.md"),
+  assert.ok(pasteOnlyPrompt.includes("https://github.com/microsoft/FixLab/blob/main/docs/FIXLAB-SETUP.md"),
     "the prompt must locate its guide without an attachment");
-  assert.ok(pasteOnlyPrompt.includes("https://github.com/MonaDevAI/FixLab/blob/main/docs/installation.md"),
+  assert.ok(pasteOnlyPrompt.includes("https://github.com/microsoft/FixLab/blob/main/docs/installation.md"),
     "the prompt must include a manual fallback");
   for (const instruction of [
     "Default to Microsoft Edge",

@@ -2,7 +2,7 @@
 param(
     [string]$Repository = (Get-Location).Path,
     [string]$NodeVersion = "",
-    [string]$Source = "github:MonaDevAI/FixLab",
+    [string]$Source = "github:microsoft/FixLab",
     [string]$NvmRoot = "",
     [switch]$InstallNode,
     [switch]$Yes

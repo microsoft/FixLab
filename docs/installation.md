@@ -79,7 +79,7 @@ First-run onboarding may create scaffolding without `--yes`; review and approve
 those files first. Once your supported runtime is installed and signed in:
 
 ```powershell
-npm install --global github:MonaDevAI/FixLab
+npm install --global github:microsoft/FixLab
 fixlab onboard C:\source\application --runtime copilot
 ```
 
@@ -259,7 +259,7 @@ installation commands, profiles or redistributed packages.
 
 | Action | Machine or repository changes |
 | --- | --- |
-| `npm install --global github:MonaDevAI/FixLab` | Installs FixLab, its dashboard/plugin/templates/docs, npm dependencies, and `fixlab` / `fixlab-mcp` launchers in the global npm prefix |
+| `npm install --global github:microsoft/FixLab` | Installs FixLab, its dashboard/plugin/templates/docs, npm dependencies, and `fixlab` / `fixlab-mcp` launchers in the global npm prefix |
 | SDK dependency | Includes the Copilot SDK's bundled dashboard runtime, not a standalone authenticated Copilot CLI or Agency installation |
 | `fixlab init` | Adds missing profile, prompts, and custom agent under the application's `.github`; preserves existing files |
 | `fixlab prepare --yes` | Executes configured restore commands; review the plan for their actual effects |
@@ -289,7 +289,7 @@ FixLab is not currently published to the public npm registry. Install the
 public GitHub repository with npm:
 
 ```powershell
-npm install --global github:MonaDevAI/FixLab
+npm install --global github:microsoft/FixLab
 fixlab --help
 ```
 
@@ -311,7 +311,7 @@ fallback steps below without requesting the file again.
    and ask before installing them.
 3. Reuse an approved FixLab installation. If installation or an update is
    needed, propose this command and ask for approval before executing it:
-   npm install --global github:MonaDevAI/FixLab
+   npm install --global github:microsoft/FixLab
    Verify fixlab --help afterward. Do not silently uninstall anything.
 4. Inspect the real repository layout and existing profile. Propose the
    onboarding plan and profile/scaffolding changes. Do not assume the
@@ -353,7 +353,7 @@ a separate FixLab Marketplace extension or VSIX.
    an approved installation, or review and run:
 
 ```powershell
-npm install --global github:MonaDevAI/FixLab
+npm install --global github:microsoft/FixLab
 fixlab --help
 fixlab init
 ```
@@ -401,8 +401,8 @@ were Copilot slash commands; ask Copilot to execute them.
    requested operation:
 
 ```powershell
-npm install --global github:MonaDevAI/FixLab
-copilot plugin install MonaDevAI/FixLab
+npm install --global github:microsoft/FixLab
+copilot plugin install microsoft/FixLab
 fixlab --help
 ```
 
@@ -447,7 +447,7 @@ see [permission troubleshooting](troubleshooting.md#a-validation-command-is-deni
 Existing users normally update without uninstalling. Ask Copilot to run:
 
 ```powershell
-npm install --global github:MonaDevAI/FixLab
+npm install --global github:microsoft/FixLab
 copilot plugin update fixlab
 ```
 
@@ -455,7 +455,7 @@ Restart Copilot afterward. A running dashboard still uses its loaded code:
 review its active jobs and request a controlled restart separately. Do not
 stop an existing app or dashboard merely because installation completed.
 An unmerged PR is not included in a default-branch install; test its reviewed
-CLI commit with `npm install --global "github:MonaDevAI/FixLab#<reviewed-commit>"`.
+CLI commit with `npm install --global "github:microsoft/FixLab#<reviewed-commit>"`.
 The package version alone may not distinguish GitHub commits.
 
 ### Chat with an existing dashboard from Copilot
@@ -645,7 +645,7 @@ Direct GitHub repository plugin installation is supported for development and
 pre-release verification:
 
 ```powershell
-copilot plugin install MonaDevAI/FixLab
+copilot plugin install microsoft/FixLab
 ```
 
 GitHub Copilot CLI warns that direct repository plugin installs are deprecated.

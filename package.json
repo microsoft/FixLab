@@ -3,13 +3,13 @@
   "version": "0.7.4",
   "description": "Copilot-powered CLI and plugin for evidence-backed React and .NET defect validation.",
   "license": "MIT",
-  "homepage": "https://github.com/MonaDevAI/FixLab#readme",
+  "homepage": "https://github.com/microsoft/FixLab#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MonaDevAI/FixLab.git"
+    "url": "git+https://github.com/microsoft/FixLab.git"
   },
   "bugs": {
-    "url": "https://github.com/MonaDevAI/FixLab/issues"
+    "url": "https://github.com/microsoft/FixLab/issues"
   },
   "type": "module",
   "bin": {
