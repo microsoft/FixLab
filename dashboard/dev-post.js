@@ -48,7 +48,10 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
     }
     for (const base of configuration.baseUrls) {
       const url = new URL(base);
-      const labels = [...url.hostname.split(/[.-]/u), ...url.pathname.split("/")];
+      const labels = [...url.hostname.split(/[.-]/u), ...url.pathname.split("/")].map((value) => {
+        const label = value.toLowerCase();
+        return label === "development" ? "dev" : label;
+      });
       if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash ||
           url.href.replace(/\/$/u, "") !== base || !safeRuntimeText(base, 1000) ||
           !/^\/[A-Za-z0-9._~/-]*$/u.test(url.pathname) ||

@@ -166,8 +166,9 @@ PPE uses its own **Allow all PPE API writes** choice, `fixlab_ppe_write` tool an
 `https://api.ppe.example.test`. PPE grants never inherit DEV configuration or
 consent. Neither choice enables broad SIT/UAT or production writes.
 For future native PPE jobs only, the dashboard preselects this choice after
-the existing origin/helper configuration checks pass. Users can uncheck it;
-explicit read-only/intercepted selections suppress it. Identity-bound,
+the existing origin/helper configuration checks pass. Users can uncheck it.
+POST-scope readiness changes clear scoped POST consent without resetting that opt-out.
+Explicit read-only/intercepted selections suppress it. Identity-bound,
 user-authorized MCP `job-start` targeting PPE applies the same default and
 accepts `allowPpeWrites: false` to opt out. A scoped POST selection also takes
 precedence. The server revalidates configuration at grant creation and use;
@@ -304,8 +305,10 @@ profile/helper/job-bound and memory-only, and stops after unsuccessful or ambigu
 attempts. It never follows redirects or overrides explicit read-only modes,
 API-only/unit-only/production policy or browser guards.
 DEV, SIT, UAT and PPE are separately selected, even when they share an API host.
-Base URLs must identify the selected environment in their hostname or path;
-path boundaries and encoded-path checks prevent cross-environment matching.
+Base URLs must identify the selected environment in their hostname or path.
+Environment labels are compared case-insensitively, with `development` treated
+as DEV; conflicting environment labels are rejected in either location.
+Path boundaries and encoded-path checks prevent cross-environment matching.
 Configure each entry with `baseUrls`, `sessionHelper` and `scope`. The helper
 receives the selected `environment` and must authenticate only that environment.
 HTTP clients must send `allowPostRequests`, `postWriteApprovalConfirmed` and

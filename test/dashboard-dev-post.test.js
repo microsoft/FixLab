@@ -132,6 +132,35 @@ test("all-POST setup rejects missing, ambiguous or production API bases before a
   assert.throws(() => createPostBaseApproval(state.repository, "SIT", state.settings.jobId), /Configure.*baseUrls/u);
 });
 
+test("POST API bases normalize environment labels before rejecting conflicting destinations", (t) => {
+  for (const [environment, accepted, rejected] of [
+    ["PPE", ["https://api.shared.example.test/api/PPE/v1"], [
+      "https://api.ppe.example.test/api/SIT/v1",
+      "https://api.development.example.test/api/ppe/v1",
+      "https://api.ppe.example.test/api/Development/v1"
+    ]],
+    ["DEV", ["https://api.development.example.test/api/DEV/v1",
+      "https://api.shared.example.test/api/Development/v1"], [
+      "https://api.development.example.test/api/PPE/v1"
+    ]]
+  ]) {
+    const state = fixture(t);
+    approvePostBase(state, environment);
+    const configuration = state.profile.browserAutomation.dataSafety.post[environment.toLowerCase()];
+    for (const base of accepted) {
+      configuration.baseUrls = [base];
+      state.save();
+      assert.doesNotThrow(() => createPostBaseApproval(state.repository, environment, state.settings.jobId), base);
+    }
+    for (const base of rejected) {
+      configuration.baseUrls = [base];
+      state.save();
+      assert.throws(() => createPostBaseApproval(state.repository, environment, state.settings.jobId),
+        /POST API bases/u, base);
+    }
+  }
+});
+
 test("PPE POST-only approval requires fresh matching job, configuration and execution consent", async (t) => {
   for (const change of ["job", "environment", "unchecked", "profile", "helper", "removed"]) {
     const state = fixture(t);

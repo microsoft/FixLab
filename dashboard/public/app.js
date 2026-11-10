@@ -189,9 +189,11 @@ function updatePostRequestsOption() {
   const scope = repositoryReadiness?.postBaseEnvironments?.includes(environment) ? "base" : "endpoint";
   if (postCheckboxEnvironment !== key || postCheckboxScope !== scope) {
     allowPostRequestsInput.checked = false;
+    postCheckboxScope = scope;
+  }
+  if (postCheckboxEnvironment !== key) {
     allowDevWritesInput.checked = key === "ppe" && repositoryReadiness?.ppeWriteConfigured === true;
     postCheckboxEnvironment = key;
-    postCheckboxScope = scope;
   }
   allowDevWritesInput.disabled = !available || !["dev", "ppe"].includes(environment);
   document.querySelector("#origin-writes-label").textContent =

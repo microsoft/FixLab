@@ -385,6 +385,45 @@ test(`${environment.toUpperCase()} write checkbox is environment-specific, exclu
 });
 }
 
+test("PPE POST scope refreshes reset POST consent without restoring opted-out broad writes", async ({ page }) => {
+  const posts = [];
+  const postBaseEnvironments = [];
+  await mockChatWorkspace(page, { environments: ["dev", "ppe"], ppeWriteConfigured: true, postBaseEnvironments });
+  await page.route("**/api/jobs", async (route) => {
+    posts.push(route.request().postDataJSON());
+    await route.fulfill({ contentType: "application/json", status: 202,
+      body: JSON.stringify({ job: { id: "ppe-scope-refresh", request: "Synthetic PPE validation.",
+        mode: "validate-only", status: "running", stages: {}, bugs: [], logs: [], activity: [] },
+      queue: [], history: [] }) });
+  });
+  await openWorkflowControls(page, baseUrl);
+  await page.locator("#target-environment").selectOption("ppe");
+  const broad = page.locator("#allow-dev-writes");
+  const scoped = page.locator("#allow-post-requests");
+  await expect(broad).toBeChecked();
+  await broad.uncheck();
+  await scoped.check();
+  postBaseEnvironments.push("ppe");
+  await expect(page.locator("#post-writes-label")).toHaveText(
+    "Allow all PPE POST requests, including writes, for this job");
+  await expect(broad).not.toBeChecked();
+  await expect(scoped).not.toBeChecked();
+  await expect(scoped).toBeEnabled();
+  await scoped.check();
+  postBaseEnvironments.length = 0;
+  await expect(page.locator("#post-writes-label")).toHaveText(
+    "Allow POST writes for this job in the selected environment");
+  await expect(broad).not.toBeChecked();
+  await expect(scoped).not.toBeChecked();
+  await page.locator("#request").fill("Validate PPE without restoring write approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0].allowPpeWrites).toBe(false);
+  expect(posts[0].ppeWriteApprovalConfirmed).toBe(false);
+  expect(posts[0].allowPostRequests).toBe(false);
+  expect(posts[0].postBaseApprovalConfirmed).toBe(false);
+});
+
 test("configured PPE writes default on for future jobs, preserve opt-out and never select other environments", async ({ page }) => {
   const posts = [];
   await mockChatWorkspace(page, { environments: ["dev", "sit", "uat", "ppe"], ppeWriteConfigured: true });
