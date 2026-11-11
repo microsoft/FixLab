@@ -373,6 +373,13 @@ and selected non-production environment. Older endpoint-scoped confirmations ret
 original scope; they do not silently become origin-wide grants. The separate
 all-PPE-write checkbox retains its broader POST/PUT/PATCH/DELETE scope.
 
+Identity-bound connected `job-start` requests may supply the same explicit POST
+and Allow-all confirmations without a browser Origin. The existing loopback
+host, operation, instance, repository, current-job and confirmed-user checks
+apply and are rechecked after the bounded request body. This creates only the
+requested fresh job consent; it cannot approve a pending native permission,
+recover a grant, expand an API base or override a read-only selection.
+
 A reported text-only non-interactive denial pauses the owned executor without automatic
 retries; approval remains unavailable until its termination is verified.
 

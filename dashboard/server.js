@@ -6677,8 +6677,8 @@ export function createDashboardServer({
       if (toolApprovalMode === "allow-all") {
         const expectedOrigin = `http://${DASHBOARD_HOST}:${server.address().port}`;
         if (request.headers.host !== new URL(expectedOrigin).host ||
-            request.headers.origin !== expectedOrigin) {
-          sendJson(response, 403, { error: "Allow all requires the dashboard's exact loopback host and origin." });
+            (request.headers.origin !== expectedOrigin && !request.verifyConversation)) {
+          sendJson(response, 403, { error: "Allow all requires the dashboard's exact loopback host and a same-origin or identity-bound request." });
           return;
         }
         if (body.allowAllConfirmed !== true) {
@@ -6732,8 +6732,8 @@ export function createDashboardServer({
         }
         const expectedOrigin = `http://${DASHBOARD_HOST}:${server.address().port}`;
         if (request.headers.host !== new URL(expectedOrigin).host ||
-            request.headers.origin !== expectedOrigin) {
-          sendJson(response, 403, { error: "POST write approval requires the dashboard's exact loopback host and origin." });
+            (request.headers.origin !== expectedOrigin && !request.verifyConversation)) {
+          sendJson(response, 403, { error: "POST write approval requires the dashboard's exact loopback host and a same-origin or identity-bound request." });
           return;
         }
       }

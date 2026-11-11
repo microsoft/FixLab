@@ -446,6 +446,11 @@ It requires no endpoint/test-record list or repeated confirmation, but authorize
 POST only. Other methods require the separate broader write approval. Old
 endpoint-scoped API clients do not inherit this wider scope.
 
+Connected `job-start` supports these explicit POST confirmations together with
+`toolApprovalMode: "allow-all"` and `allowAllConfirmed: true`. It uses the current
+instance/repository/job identity rather than a browser Origin. Native permission
+decisions and human authentication remain separate.
+
 A missing allowlist entry is a policy blocker, not an unavailable backend.
 Offer `fixlab setup-queries REPOSITORY --environment ENV --runtime copilot`
 for a separate plan-first review of the full verified query scope. After the

@@ -1983,6 +1983,70 @@ test("new DEV/PPE portal defaults use real reads only in their environments and 
   assert.equal(configuredTestSynthesis(profile, "", undefined, "dev").unitTestsOnly, true);
 });
 
+test("connected starts accept explicitly confirmed all-POST and Allow all for selected lower environments", async () => {
+  const repository = createGitRepository();
+  const profile = validProfile();
+  profile.environments = ["dev", "sit", "uat"];
+  profile.browserAutomation.dataSafety.post = Object.fromEntries(profile.environments.map((environment) => [
+    environment, {
+      scope: "api://example-service/access", sessionHelper: "post-session.mjs",
+      baseUrls: [`https://api.shared.example.test/api/${environment}/v1`]
+    }
+  ]));
+  writeFileSync(join(repository, "post-session.mjs"),
+    'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  const launches = [];
+  const { dashboard, url } = await startDashboard(repository, (input) => {
+    launches.push(input);
+    return { completion: new Promise(() => {}) };
+  }, undefined, { runtime: "copilot" });
+  const base = { repository, port: Number(new URL(url).port) };
+  const start = async (parameters = {}, confirmed = true) => {
+    const state = await dashboardConversation(base);
+    return dashboardControl({
+      ...base, instanceId: state.instanceId, jobId: state.job?.id ?? null,
+      operation: "job-start", confirmed,
+      parameters: {
+        request: "Synthetic approved lower-environment live scenarios.", mode: "validate-only",
+        targetEnvironment: "dev", allowPostRequests: true,
+        postWriteApprovalConfirmed: true, postBaseApprovalConfirmed: true,
+        toolApprovalMode: "allow-all", allowAllConfirmed: true, runAllUiScenarios: true,
+        ...parameters
+      }
+    });
+  };
+  try {
+    await assert.rejects(start({}, false), /explicit user authorization/u);
+    for (const parameters of [
+      { allowAllConfirmed: false }, { postWriteApprovalConfirmed: false },
+      { postBaseApprovalConfirmed: "yes" }, { allowPostRequests: false },
+      { targetEnvironment: "production" }, { testMutationMode: "none" },
+      { testMutationMode: "intercepted" }
+    ]) {
+      await assert.rejects(start(parameters));
+    }
+    assert.equal(launches.length, 0);
+    for (const environment of profile.environments) {
+      await start({ targetEnvironment: environment });
+      const state = (await jsonRequest(url, "/api/job")).body;
+      const job = state.queue.at(-1) ?? state.job;
+      assert.equal(job.targetEnvironment, environment);
+      assert.equal(job.postWriteApproved, true);
+      assert.equal(job.toolApprovalMode, "allow-all");
+      assert.equal(job.runAllUiScenarios, true);
+    }
+    assert.equal(launches.length, 1, "queued grants never alter the active executor");
+    assert.equal(launches[0].postWriteApproval.mode, "post-base");
+    assert.equal(launches[0].postWriteApproval.environment, "dev");
+    assert.equal(launches[0].toolApprovalMode, "allow-all");
+    assert.equal(launches[0].allowPostRequests, true);
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test("PPE POST-only approval uses reviewed API bases without granting other methods or surviving recovery", async () => {
   const repository = createGitRepository();
   const profile = validProfile();
