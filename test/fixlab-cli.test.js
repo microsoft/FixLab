@@ -22,6 +22,7 @@ import {
   startKeepAwake,
   stopKeepAwake
 } from "../bin/keep-awake.js";
+import { buildQuerySetupPrompt } from "../dashboard/repository-setup.js";
 
 const cli = fileURLToPath(new URL("../bin/fixlab.js", import.meta.url));
 
@@ -83,7 +84,7 @@ test("help lists supported commands", () => {
 });
 
 function querySetupFixture(t) {
-  const repository = mkdtempSync(join(tmpdir(), "fixlab-query-setup-"));
+  const repository = mkdtempSync(join(tmpdir(), "fixlab query setup-"));
   t.after(() => rmSync(repository, { recursive: true, force: true }));
   assert.equal(run(["init", repository], repository).status, 0);
   const path = join(repository, ".github", "fixlab", "repository-profile.json");
@@ -98,11 +99,17 @@ function querySetupFixture(t) {
   writeFileSync(sentinel, "preserve product source");
   const bin = join(repository, "bin");
   mkdirSync(bin);
+  const probe = join(bin, "runtime-probe.cjs");
+  writeFileSync(probe, [
+    "const args = process.argv.slice(2);",
+    "console.log('RUNTIME_ARGS:' + args.join(' '));",
+    "console.log('RUNTIME_ARGV:' + JSON.stringify(args));"
+  ].join("\n"));
   for (const runtime of ["agency", "copilot"]) {
     const executable = join(bin, process.platform === "win32" ? `${runtime}.cmd` : runtime);
     writeFileSync(executable, process.platform === "win32"
-      ? "@echo off\r\necho RUNTIME_ARGS:%*\r\n"
-      : "#!/bin/sh\nprintf 'RUNTIME_ARGS:%s\\n' \"$*\"\n");
+      ? `@echo off\r\n"${process.execPath}" "${probe}" %*\r\n`
+      : `#!/bin/sh\n"${process.execPath}" "${probe}" "$@"\n`);
     if (process.platform !== "win32") { chmodSync(executable, 0o755); }
   }
   return { repository, path, profile, save, sentinel, bin,
@@ -119,6 +126,11 @@ test("query setup separates interactive planning from approved repair in both ru
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stdout, /--plugin-dir .* --agent fixlab:fixlab/u);
       assert.match(result.stdout, /--interactive FixLab query setup (?:PLAN|APPLY) for the selected dev environment/u);
+      const argv = JSON.parse(result.stdout.split(/\r?\n/u)
+        .find((line) => line.startsWith("RUNTIME_ARGV:")).slice("RUNTIME_ARGV:".length));
+      assert.deepEqual(argv.slice(argv.indexOf("--interactive")), [
+        "--interactive", buildQuerySetupPrompt({ environment: "dev", approved })
+      ]);
       assert.match(result.stdout, approved
         ? /The user approved this setup operation only/
         : /PLAN ONLY: read and report/);

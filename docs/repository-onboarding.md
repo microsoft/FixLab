@@ -200,7 +200,9 @@ fixlab setup-queries REPOSITORY --environment dev --runtime copilot --yes
 
 The first invocation starts an interactive, read-only setup review. It inventories
 the full verified query scope from contracts and implementation and reports the
-exact policy/adapter files and proposed offline guard tests. After reviewing that
+exact policy/adapter files and proposed offline guard tests. On Windows, the
+launcher quotes the generated arguments so both runtimes receive the complete
+setup prompt as one argument. After reviewing that
 plan, `--yes` authorizes only the setup repair and focused guard tests. Existing
 adapters must consume the shared query policy; adding one profile path alone is
 not sufficient. No business API calls, authentication, business writes, product

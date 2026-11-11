@@ -49,6 +49,7 @@ import {
   REPOSITORY_PROMPT_NAMES
 } from "../dashboard/repository-setup.js";
 import { runValidationGate } from "./validation-gate-client.js";
+import { quoteWindowsArgument } from "../dashboard/windows-executor.js";
 import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
@@ -1210,12 +1211,15 @@ function setupQueries(args) {
     throw new Error(`Cannot review query setup because ${parsed.runtime} is unavailable. Install and authenticate the selected runtime first.`);
   }
   console.log(`FixLab query setup: ${approved ? "reviewed repair" : "plan only"} (${selectedEnvironment})`);
-  const result = spawnSync(parsed.runtime, [
+  const runtimeArgs = [
     ...(parsed.runtime === "agency" ? ["copilot"] : []),
     "--plugin-dir", packageRoot, "--agent", "fixlab:fixlab",
     ...(parsed.runtime === "copilot" ? copilotModelArguments(parsed.model) : []),
     "--interactive", prompt
-  ], { cwd: repository, stdio: "inherit", shell: process.platform === "win32" });
+  ];
+  const result = spawnSync(parsed.runtime,
+    process.platform === "win32" ? runtimeArgs.map(quoteWindowsArgument) : runtimeArgs,
+    { cwd: repository, stdio: "inherit", shell: process.platform === "win32" });
   if (result.error) {
     console.error(`Query setup runtime could not start: ${result.error.message}`);
   }
