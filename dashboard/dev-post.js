@@ -172,7 +172,7 @@ export function isOriginWriteApproval(approval) {
     approval?.mode === "post-base";
 }
 
-export function createNonProductionPostTool({ repository, targetEnvironment, mutationMode,
+export function createNonProductionPostAccess({ repository, targetEnvironment, mutationMode,
   selectedMutationMode = "", allowPostRequests, postWriteApproval, jobId, isReady, ask,
   request = fetch, now = Date.now }) {
   if (allowPostRequests !== undefined && typeof allowPostRequests !== "boolean") {
@@ -184,6 +184,8 @@ export function createNonProductionPostTool({ repository, targetEnvironment, mut
   const originWrites = isOriginWriteApproval(postWriteApproval);
   const postBases = postWriteApproval?.mode === "post-base";
   const allMethods = originWrites && !postBases;
+  const ppeJourney = allMethods && environment === "ppe";
+  const methods = [...(ppeJourney ? ["GET"] : []), "POST", "PUT", "PATCH", "DELETE"];
   const label = environment.toUpperCase();
   const operation = allMethods ? `${label} write` : "POST";
   if (jobScoped &&
@@ -202,6 +204,7 @@ export function createNonProductionPostTool({ repository, targetEnvironment, mut
   }
   const approvedRevision = postWriteApproval?.revision;
   let approvalStopped = false;
+  let inFlight = false;
   if (!["dev", "sit", "uat", "ppe"].includes(environment) || selectedMutationMode ||
       (!jobConsent && (environment !== "dev" || mutationMode !== "approved-write"))) {
     return null;
@@ -213,18 +216,18 @@ export function createNonProductionPostTool({ repository, targetEnvironment, mut
     }
   };
   if (!jobConsent && !planAt()) { return null; }
-  return {
+  const tool = {
     name: allMethods ? `fixlab_${environment}_write` :
       !jobConsent && environment === "dev" ? "fixlab_dev_post" : "fixlab_nonproduction_post",
     description: originWrites
-      ? `Send ${allMethods ? "a POST, PUT, PATCH or DELETE" : "any POST, including writes,"} to any path/record within the configured ${label} HTTPS ${postBases ? "API bases" : "origins"}, using existing authentication. The user explicitly approved ${allMethods ? "broad writes" : "all POST requests only"} for this job; no endpoint/test-record list or repeat confirmation is needed. Approval is job/profile/helper-bound and expires with execution. No other ${allMethods ? "" : "methods, "}environments, redirects, retries, credentials or response bodies. A real write is not a passed scenario assertion.`
+      ? `Send ${allMethods ? methods.join(", ") : "any POST, including writes,"} to any path/record within the configured ${label} HTTPS ${postBases ? "API bases" : "origins"}, using existing authentication. The user explicitly approved ${allMethods ? "broad writes" : "all POST requests only"} for this job; no endpoint/test-record list or repeat confirmation is needed. Approval is job/profile/helper-bound and expires with execution. No other ${allMethods ? "" : "methods, "}environments, redirects, retries, credentials or response bodies. A real write is not a passed scenario assertion.`
       : `Send one ${label} POST using its configured endpoint/test-record allowlist and existing authentication helper. ${jobScoped ? "The user approved this job's configured writes through the POST checkbox; no repeat confirmation is needed. Approval is bound to this job and the reviewed profile/helper revision." : "The complete URL and JSON payload require individual human confirmation, even with Allow all."} Missing setup blocks the action, not unrelated work. No redirects, retries, credentials or response bodies. This is a real write, not intercepted evidence.`,
     skipPermission: true,
     parameters: {
       type: "object",
       properties: {
         url: { type: "string", maxLength: 1000 },
-        ...(allMethods ? { method: { type: "string", enum: ["POST", "PUT", "PATCH", "DELETE"] } } : {}),
+        ...(allMethods ? { method: { type: "string", enum: methods } } : {}),
         payload: originWrites
           ? { anyOf: [{ type: "object", additionalProperties: true }, { type: "array", items: {} }] }
           : { type: "object", additionalProperties: true },
@@ -233,7 +236,20 @@ export function createNonProductionPostTool({ repository, targetEnvironment, mut
       required: ["url", "purpose", ...(allMethods ? ["method"] : originWrites ? [] : ["payload"])],
       additionalProperties: false
     },
-    async handler(args) {
+    handler: (args) => send(args, request)
+  };
+  async function send(args, dispatch) {
+    if (inFlight) {
+      throw new Error(`${operation} already has an in-flight attempt; inspect its result before another action.`);
+    }
+    inFlight = true;
+    try {
+      return await sendApproved(args, dispatch);
+    } finally {
+      inFlight = false;
+    }
+  }
+  async function sendApproved(args, dispatch) {
       if (process.env.DEBUG || process.env.PWDEBUG || process.env.NODE_DEBUG) {
         throw new Error(`${operation} requires credential-sensitive debug logging to be disabled.`);
       }
@@ -258,7 +274,8 @@ export function createNonProductionPostTool({ repository, targetEnvironment, mut
       }
       const method = allMethods ? args?.method : "POST";
       if (!args || Object.keys(args).some((key) => !["url", "payload", "purpose", ...(allMethods ? ["method"] : [])].includes(key)) ||
-          (allMethods && !["POST", "PUT", "PATCH", "DELETE"].includes(method)) ||
+          (allMethods && !methods.includes(method)) ||
+          (method === "GET" && args.payload !== undefined) ||
           (!(originWrites && args.payload === undefined) &&
             (!args.payload || typeof args.payload !== "object" || (!originWrites && Array.isArray(args.payload)))) ||
           !safeRuntimeText(args.purpose, 200) || !args.purpose.trim()) {
@@ -330,14 +347,16 @@ export function createNonProductionPostTool({ repository, targetEnvironment, mut
             throw new Error(`${operation} approval/authentication is no longer valid.`);
           }
           try {
-            const response = await request(url, {
+            const response = await dispatch(url, {
               method, redirect: "manual", signal: AbortSignal.timeout(15000),
               headers: { Accept: "application/json", "Content-Type": "application/json",
                 Authorization: `Bearer ${value}` },
               body: payload
             });
             result = { environment: label, method, status: response.status,
-              outcome: "response-received", source: "non-production-approved", mutationMode: "approved-write",
+              outcome: "response-received",
+              source: method === "GET" ? "non-production-read-only" : "non-production-approved",
+              mutationMode: method === "GET" ? "none" : "approved-write",
               validationPassed: false, responseBodyReturned: false, automaticRetry: false };
             await response.body?.cancel();
           } catch {
@@ -362,8 +381,24 @@ export function createNonProductionPostTool({ repository, targetEnvironment, mut
         throw new Error(`${operation} returned HTTP ${result.status}. Approval is spent; no redirect or automatic retry was made.`);
       }
       return result;
-    }
+  }
+  return {
+    tool,
+    revoke: () => { approvalStopped = jobScoped; },
+    browserPost: jobScoped && approvedRevision ? (args, dispatch) => {
+      if (allMethods) {
+        return send({ ...args, method: "POST" }, dispatch);
+      }
+      return send(args, dispatch);
+    } : null,
+    browserRequest: jobScoped && approvedRevision && ppeJourney
+      ? (args, dispatch) => send({ ...args, method: args?.method ?? "POST" }, dispatch)
+      : null
   };
+}
+
+export function createNonProductionPostTool(settings) {
+  return createNonProductionPostAccess(settings)?.tool ?? null;
 }
 
 export const createDevPostTool = createNonProductionPostTool;

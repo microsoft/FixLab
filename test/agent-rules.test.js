@@ -13,6 +13,23 @@ import {
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 
+test("full-page portal evidence guidance stays aligned without requiring browser artifacts for API-only jobs", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
+    assert.match(readFileSync(join(root, entryPoint), "utf8"), /PORTAL_SCREENSHOT_GUIDANCE/u);
+  }
+  for (const entryPoint of [
+    "dashboard/workflow-policy.js", "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
+    ".github/agents/fixlab.agent.md", "prompts/fixlab.live-test.prompt.md"
+  ]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/\s+/gu, " ");
+    assert.match(text, /page\.screenshot\(\{ path, fullPage: true \}\)/u, entryPoint);
+    assert.match(text, /[Mm]ask sensitive regions/u, entryPoint);
+    assert.match(text, /API-only and unit-test-only runs require no browser screenshot/u, entryPoint);
+  }
+});
+
 test("safe recovery and scoped DEV/PPE/SIT/UAT POST guidance stay aligned across execution surfaces", () => {
   const root = join(testDirectory, "..");
   for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {

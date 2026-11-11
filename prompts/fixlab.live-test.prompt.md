@@ -10,6 +10,11 @@ Playwright journey on the developer or registered-runner machine. Capture
 sanitized screenshots, API assertions, logs, cleanup, and the exact observable
 result.
 
+For portal evidence, use `page.screenshot({ path, fullPage: true })`, not a
+viewport-only or element screenshot. Mask sensitive regions first; never capture
+credentials or sign-in screens. Close-ups may supplement the full-page evidence.
+API-only and unit-test-only runs require no browser screenshot.
+
 Verified read-only POST searches: Cover the full verified query scope for
 approved DEV/PPE reads. Contracts/implementation must prove no business/workflow
 mutation; names/verbs do not. Match the exact approved environment, origin and

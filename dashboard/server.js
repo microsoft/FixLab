@@ -39,9 +39,9 @@ import { createSessionRegistry } from "./sessions.js";
 import { inspectBrowserProfileOwnership } from "./browser-ownership.js";
 import { canonicalExecutionRepository, createExecutorLease } from "./executor-lease.js";
 import { spawnWindowsExecutor } from "./windows-executor.js";
-import { createRuntimeRequestBridge, MAX_RUNTIME_FRAME_BYTES, recordedSourceEditReview, safeRuntimeText, sourceEditAuthorization, validateRuntimeUsage, validateToolApprovalMode } from "./runtime-requests.js";
+import { createRuntimeRequestBridge, MAX_RUNTIME_FRAME_BYTES, recordedSourceEditReview, runtimeConversationQuestion, safeRuntimeText, sourceEditAuthorization, validateRuntimeUsage, validateToolApprovalMode } from "./runtime-requests.js";
 import { validateJobFileAccess } from "./runtime-permission-policy.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsUnverifiedDraft, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "./workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsUnverifiedDraft, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "./workflow-policy.js";
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { createDevWriteApproval, createPpeWriteApproval, createPostBaseApproval, createPostWriteApproval, inspectPpeWriteConfiguration, inspectPostBaseConfiguration, isOriginWriteApproval } from "./dev-post.js";
@@ -1267,6 +1267,11 @@ export function buildJobPrompt({
     ? "- This local API reads a PRODUCTION database under an explicit read-only exception. Run the required portal-backed API gate and its assertReadOnlyDatabase permission check before business reads. Require a database-enforced read-only identity; GET alone does not prove safety. Use only the approved loopback HTTPS API, never a deployed production URL or a different database. Do not write, change database settings or permissions, bypass guards, or fall back to synthetic data. Label evidence FIXLAB_TEST|production-read-only|none|...; never describe these reads as non-production."
     : apiOnly
     ? "- Use only allowlisted read-only API operations and real approved data for live validation. No synthetic fallback, redirected request outside the allowlist, or business-data write is authorized."
+    : testEvidence.allowPostRequests === true
+    ? `- Use the selected ${targetEnvironment} backend for real business reads and explicitly approved write scenarios. A POST method alone does not distinguish a read-only query from a mutation.
+- Use only the current mediated tool/private browser relay within its reviewed endpoint/API-base/origin scope and existing authentication. Job-scoped consent avoids repeat confirmation only for that scope; without it, each write still requires exact individual confirmation.
+- Do not intercept an authorized mutation merely because the profile's default is synthetic or read-only. Report actual FIXLAB_TEST evidence after the real action; approval and HTTP success alone are not passed scenario assertions.
+- Keep other origins, explicit read-only/intercepted selections and production restrictions intact. Missing authentication, configuration or request-policy approval blocks dependent scenarios, not a synthetic substitute for live write proof.`
     : targetEnvironment &&
     testEvidence.source === "non-production-read-only"
       ? `- Use the selected ${targetEnvironment} backend and API as the primary business-data source. Keep all backend access read-only and intercept every mutating request.
@@ -1343,10 +1348,12 @@ ${apiOnly && useDeployedBackend ? "useDeployedBackend=true: use the configured d
 ${uiScenarioGuidance}
 ${environmentGuidance}
 ${testDataGuidance}
-- No Save, Submit, Approve, autosave or external write is authorized by this request or interception selector. Profile safety remains authoritative; writes require separate native approval.
+${testEvidence.allowPostRequests === true
+  ? "- Save, Submit, Approve, autosave and other writes require the current mediated native approval and its exact scope. Use the private browser relay only when available; do not intercept an authorized write or bypass other guards."
+  : "- No Save, Submit, Approve, autosave or external write is authorized by this request or interception selector. Profile safety remains authoritative; writes require separate native approval."}
 ${videoGuidance}
 ${manualLocalhostGuidance}
-- Browser journeys require a non-sensitive screenshot in repository-owned test-results; API-only runs retain sanitized assertions instead. Preserve exact assertions, counts, errors, traces and paths. Never fabricate results or claim intercepted payloads prove backend writes.
+- ${PORTAL_SCREENSHOT_GUIDANCE}
 - Run verbose commands through fixlab exec --stage live-test -- <command> [args...]; quote '--' in Windows PowerShell. Keep compact results and bounded failure diagnostics. Never reuse cached live-browser, authentication or external-data results.
 - Continue independent safe steps after unrelated failures, never across failed prerequisites. Mark required full regression deferred, not passed.
 - Do not delegate one continuous journey or rescan the repository; batch reads and bound output.
@@ -1433,7 +1440,7 @@ ${readOnly ? "" : "- Prefix FixLab-created pull-request titles with FLAB: follow
 ${readOnly ? "" : CONCISE_PR_GUIDANCE}
 ${readOnly ? "" : PR_LEARNING_GUIDANCE}
 - Start only the applications defined by the repository profile, then execute the repository-defined live test against the allowed required system or environment from that profile. Do not invent or hardcode environment choices.
-- For every Playwright browser live test, save at least one non-sensitive screenshot under the test's repository-owned test-results directory so the dashboard can display the browser evidence. API-only journeys preserve sanitized API assertion evidence instead.
+- ${PORTAL_SCREENSHOT_GUIDANCE}
 - ${playwrightOnly ? "Collect evidence for required setup, authentication readiness, application startup, the focused Playwright result, skipped gates, blockers, and remaining risks." : "Collect evidence for diagnosis or surface inspection, the effective diff, review, local validation, application startup, live testing, skipped gates, and remaining risks."}
 - Human interaction is limited to authentication, unsafe-data approval, deployment or pull-request approval, and genuine blockers that cannot be resolved from repository evidence.
 - When one of those human actions is required, emit FIXLAB_STAGE|stage|blocked|exact action needed, emit blocked outcomes for affected bugs when applicable, mark later stages skipped because of the blocker, and exit. The dashboard will collect user input and resume this same session.
@@ -2431,6 +2438,9 @@ function publicJob(job) {
     permissionRequest: job.permissionRequest ?? null,
     browserBlocker: job.browserBlocker ?? null,
     runtimeRequests: job.runtimeRequests ?? [],
+    executionState: job.runtimeRequests?.length
+      ? job.runtimeRequests[0].kind === "question" ? "waiting-for-input" : "waiting-for-permission"
+      : job.permissionRequest ? "waiting-for-permission" : job.status,
     fileAccess: job.fileAccess ?? null,
     sourceEditReview: job.sourceEditReview ? {
       ...recordedSourceEditReview(job.sourceEditReview),
@@ -4132,7 +4142,7 @@ export function createDashboardServer({
       configuredTestSynthesis(currentProfile, job.testEvidence.selectedMutationMode ?? "", true, job.targetEnvironment);
       const environment = job.postWriteApproval.environment;
       const postOnly = job.postWriteApproval.mode === "post-base";
-      prompt += `\nThe user explicitly authorized all ${environment.toUpperCase()} ${postOnly ? "POST requests, including writes," : "API writes"} for this job within the reviewed ${postOnly ? `dataSafety.post.${environment}.baseUrls HTTPS API bases` : `dataSafety.${environment}Write HTTPS origins`}. Use ${postOnly ? "fixlab_nonproduction_post for POST only" : `fixlab_${environment}_write for POST, PUT, PATCH and DELETE`} without repeat confirmation or endpoint/test-record enumeration. This can change any record accessible to the signed-in account within that scope. The grant binds this job, ${environment.toUpperCase()} and the profile/helper revision, expires with execution, and stops after unsuccessful or ambiguous attempts. No other ${postOnly ? "methods, " : ""}environments, redirects, retries, shell/browser-write substitutes or browser-guard bypass. Existing authentication is required. Report approved-write evidence; HTTP success alone is not scenario success.`;
+      prompt += `\nThe user explicitly authorized all ${environment.toUpperCase()} ${postOnly ? "POST requests, including writes," : "API writes"} for this job within the reviewed ${postOnly ? `dataSafety.post.${environment}.baseUrls HTTPS API bases` : `dataSafety.${environment}Write HTTPS origins`}. Use ${postOnly ? "fixlab_nonproduction_post for POST only" : `fixlab_${environment}_write for ${environment === "ppe" ? "GET, " : ""}POST, PUT, PATCH and DELETE`} without repeat confirmation or endpoint/test-record enumeration. This can change any record accessible to the signed-in account within that scope. The grant binds this job, ${environment.toUpperCase()} and the profile/helper revision, expires with execution, and stops after unsuccessful or ambiguous attempts. No other ${postOnly ? "methods, " : ""}environments, redirects, retries, shell/browser-write substitutes or browser-guard bypass. Existing authentication is required. Report approved-write evidence; HTTP success alone is not scenario success.`;
     } else if (typeof job.testEvidence.allowPostRequests === "boolean") {
       configuredTestSynthesis(currentProfile, job.testEvidence.selectedMutationMode ?? "",
         job.testEvidence.allowPostRequests, job.targetEnvironment);
@@ -4668,11 +4678,7 @@ export function createDashboardServer({
     let question = null;
     let workspaceReview = null;
     if (job?.runtimeRequests?.length) {
-      question = {
-        kind: "runtime-input",
-        message: "Copilot is waiting for a live response in this dashboard's browser panel. Review the exact native request there. Connected conversation replies cannot approve or answer it.",
-        actions: []
-      };
+      question = runtimeConversationQuestion(job.runtimeRequests[0]);
     } else if (job?.permissionRequest) {
       question = { kind: "permission", message: job.permissionRequest.preflight
         ? "Pre-launch folder review is pending. Ask the user for the exact required external folder, then use permission-review and a separate explicit permission-approve bound to this job and request. Review alone grants nothing."
@@ -4705,7 +4711,8 @@ export function createDashboardServer({
       controlProtocol: 1,
       ppeWriteConfigured: runtime === "copilot" && inspectPpeWriteConfiguration(resolvedRepository).configured,
       job: job ? {
-        id: job.id, status: job.status, canResume: job.canResume, canComment: job.canComment,
+        id: job.id, status: job.status, executionState: job.executionState,
+        canResume: job.canResume, canComment: job.canComment,
         canReviewPermissions: job.canReviewPermissions,
         runtimeDirectoryGrants: job.runtimeDirectoryGrants,
         permissionRequest: job.permissionRequest ? {
@@ -5815,7 +5822,7 @@ export function createDashboardServer({
         });
         return;
       }
-      if (currentJob.permissionRequest || currentJob.runtimeRequests?.length) {
+      if (currentJob.permissionRequest) {
         sendJson(response, 409, {
           error: "Runtime permission is unresolved. Use the scoped permission review; a comment or workflow approval cannot grant runtime access."
         });
@@ -5872,6 +5879,41 @@ export function createDashboardServer({
         return;
       }
       const action = body.action ?? "continue";
+      if (action === "answer") {
+        const pending = currentJob.runtimeRequests?.[0];
+        if (!connectedReply || !running || !activeHandle?.respondToRuntimeRequest ||
+            !pending || body.requestId !== pending.id ||
+            runtimeConversationQuestion(pending).responseChannel !== "conversation") {
+          sendJson(response, 409, { error: "Answer only the current live question using its exact request ID. Native permissions and sensitive questions require the dashboard; read status again." });
+          return;
+        }
+        if (typeof body.details !== "string" || body.validationIntent !== undefined ||
+            body.reviewedWorkspace !== undefined || body.scope !== undefined || body.recover !== undefined) {
+          sendJson(response, 400, { error: "A live question answer cannot change validation, workspace or permission scope." });
+          return;
+        }
+        try {
+          const choice = pending.choices.indexOf(body.details);
+          activeHandle.respondToRuntimeRequest(pending.id, {
+            action: "answer",
+            ...(choice >= 0 ? { choice } : { answer: body.details })
+          });
+          pushLog(currentJob, {
+            index: currentJob.nextLogIndex,
+            timestamp: new Date().toISOString(),
+            stream: "dashboard",
+            message: "The user answered the live runtime question. The answer is not copied into dashboard logs or history."
+          });
+          sendJson(response, 200, conversation());
+        } catch (error) {
+          sendJson(response, 400, { error: error.message });
+        }
+        return;
+      }
+      if (currentJob.runtimeRequests?.length || body.requestId !== undefined) {
+        sendJson(response, 409, { error: "A live question or permission decision is pending or changed. Read status; use answer with the exact question request ID, or review native permissions in the dashboard. Comments and retries cannot answer or approve it." });
+        return;
+      }
       if (currentJob.permissionRequest) {
         sendJson(response, 409, { error: "Runtime permission is unresolved; use the scoped permission review." });
         return;

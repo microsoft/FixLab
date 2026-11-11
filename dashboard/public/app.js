@@ -3105,7 +3105,7 @@ async function retryLiveTest() {
         details:
           activeJob?.mode === "playwright-only"
             ? "Retry only the browser-validation prerequisite and focused Playwright journey using the retained same-job script, selected environment and existing authentication. Do not retry an unchanged profile lock, copy browser state, delete a script still needed for continuation, change product source, or perform PR work. Report unavailable browser prerequisites as blocked and non-browser stages as skipped."
-            : "Reuse the repository-profile-defined browser authentication and all completed diagnosis, fix, review, and local validation evidence. Rerun only the blocked Playwright live-test gate using the profile-defined browser and test command, save at least one non-sensitive screenshot under the profile-defined working directory's test-results folder, emit the terminal live-test result, and continue to pull-request creation. Do not skip the live-test or PR stage."
+            : "Reuse the repository-profile-defined browser authentication and all completed diagnosis, fix, review, and local validation evidence. Rerun only the blocked Playwright live-test gate using the profile-defined browser and test command, save at least one non-sensitive screenshot using page.screenshot({ path, fullPage: true }) under the profile-defined working directory's test-results folder after masking sensitive regions, emit the terminal live-test result, and continue to pull-request creation. Do not skip the live-test or PR stage."
       })
     });
     jobInputMessage.textContent =

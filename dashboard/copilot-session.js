@@ -13,7 +13,8 @@ import {
 } from "./runtime-requests.js";
 import { createRuntimePermissionPolicy, validateJobFileAccess } from "./runtime-permission-policy.js";
 import { createPublicationPermissions, publicationCommand } from "./publication-permissions.js";
-import { createNonProductionPostTool } from "./dev-post.js";
+import { createNonProductionPostAccess } from "./dev-post.js";
+import { clearBrowserPostEnvironment, startBrowserPostBridge } from "./browser-post.js";
 
 export function extensionLaunchProvider(bootstrap) {
   return {
@@ -55,6 +56,7 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
     return response.json();
   }
 }) {
+  clearBrowserPostEnvironment();
   let allowAllTools = validateToolApprovalMode(config.toolApprovalMode) === "allow-all";
   const inputTokenLimit = config.inputTokenLimit ?? 0;
   if (!Number.isSafeInteger(inputTokenLimit) || inputTokenLimit < 0) {
@@ -85,7 +87,7 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
     error.code = "INPUT_TOKEN_LIMIT";
     return error;
   };
-  const devPost = createNonProductionPostTool({
+  const postAccess = createNonProductionPostAccess({
     repository: config.repository, targetEnvironment: config.targetEnvironment, ask,
     mutationMode: config.testMutationMode,
     selectedMutationMode: config.selectedTestMutationMode,
@@ -108,7 +110,7 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
     extensionSdkPath: config.extensionSdkPath,
     streaming: true,
     additionalDirectories: config.additionalDirs,
-    ...(devPost ? { tools: [devPost] } : {}),
+    ...(postAccess ? { tools: [postAccess.tool] } : {}),
     ...(config.model ? { model: config.model } : {}),
     ...(config.model === "hydrafusion" ? { enableExperimentalMode: true } : {}),
     onPermissionRequest: async (request) => {
@@ -219,10 +221,19 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
       return { answer: response.answer, wasFreeform: response.wasFreeform };
     }
   };
+  let browserPost;
   try {
     onUsage({ ...usage });
     if (inputTokenLimit > 0 && usage.inputTokens >= inputTokenLimit) {
       throw budgetError();
+    }
+    if (postAccess?.browserPost) {
+      browserPost = await startBrowserPostBridge({
+        send: postAccess.browserRequest ?? postAccess.browserPost,
+        serializeRequests: Boolean(postAccess.browserRequest),
+        revoke: postAccess.revoke, jobId: config.sessionId,
+        environment: config.targetEnvironment.toLowerCase()
+      });
     }
     await client.start();
     const session = config.resume
@@ -284,7 +295,12 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
       throw budgetError();
     }
     const interrupted = await Promise.race([
-      session.sendAndWait({ prompt: config.prompt }, 24 * 60 * 60 * 1000).then(() => false),
+      session.sendAndWait({ prompt: config.prompt + (browserPost
+        ? "\nBrowser POST integration: a private job-bound relay is inherited by runtime child processes. In a reviewed Node/Playwright business-request guard, import process.env.FIXLAB_BROWSER_POST_HELPER and call forwardApprovedBrowserPost(route, { environment: the selected environment, purpose: a non-sensitive test purpose }). It uses the same configured endpoint/test-record or API-base approval, authentication helper and failure revocation as the POST tool. Never print or persist FIXLAB_BROWSER_POST_* values. Do not copy tokens or browser state. Keep authentication, read-only query guards and unapproved mutations separate. Inherit the executor environment when starting the reviewed runner; do not create approval contract files. Response data stays private in browser memory; report only sanitized status and focused assertions. HTTP success alone does not prove persistence." +
+          (postAccess.browserRequest
+            ? " This PPE job also supports complete read/write browser journeys through forwardApprovedBrowserRequest from the same helper: GET, POST, PUT, PATCH and DELETE only on the exact reviewed dataSafety.ppeWrite origins. Route only approved PPE business requests through it, not identity, portal assets or unrelated APIs. Concurrent browser requests are serialized without replay. Use actual response data privately for scenario and persistence assertions; do not stop at HTTP status or claim all scenarios passed without running them. Preserve configured read-only and authentication guards outside this explicit grant."
+            : "")
+        : "") }, 24 * 60 * 60 * 1000).then(() => false),
       budget.then(() => true)
     ]);
     if (interrupted || budgetReached) {
@@ -294,9 +310,13 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
     policyReady = false;
     permissions.clear();
     publication.clear();
-    const errors = await client.stop();
-    if (errors.length > 0) {
-      throw new Error("Copilot runtime shutdown failed; owned process containment must complete before resuming.");
+    try {
+      await browserPost?.close();
+    } finally {
+      const errors = await client.stop();
+      if (errors.length > 0) {
+        throw new Error("Copilot runtime shutdown failed; owned process containment must complete before resuming.");
+      }
     }
   }
 }

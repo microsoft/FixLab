@@ -9,7 +9,7 @@ export function validateToolApprovalMode(value = "ask") {
   return value;
 }
 const secret = /authorization|bearer\s|(?:password|passwd|secret|token|cookie|api[_-]?key)\s*["':=]|(?:gh[pousr]_|github_pat_|eyJ)[A-Za-z0-9_-]{16,}|https?:\/\/[^/\s]+:[^/\s]+@|[?&](?:sig|code|key|access_token|client_secret)=|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
-const credentialQuestion = /(?:enter|provide|paste|type|share|input|tell|send|copy|what is|what's).{0,80}(?:password|verification code|one.time code|MFA code|access token|cookie|secret)/i;
+const credentialQuestion = /\b(?:password|passphrase|passwd|passcode|credential|verification\s+code|one[ -]time\s+(?:code|password)|(?:MFA|2FA|security|recovery|backup)\s+code|OTP|TOTP|PIN|(?:access|refresh|id|session|authentication)\s*[_-]?\s*token|API\s*[_-]?\s*key|private\s*[_-]?\s*key|client\s*[_-]?\s*secret|cookie|secret)s?\b/i;
 const credentialPath = /(?:^|[\\/])(?:\.auth|\.edge-profile|\.ssh|\.aws|\.azure|\.env(?:\.[^\\/]*)?|credentials(?:\.[^\\/]*)?)(?:[\\/]|$)/i;
 const permissionBlockReasons = {
   unsupported: "The runtime supplied an unsupported or incomplete request.",
@@ -149,7 +149,7 @@ export function runtimeQuestionPrompt(request) {
   if (!safeRuntimeText(request?.question, 4000) ||
       credentialQuestion.test(request.question) ||
       !Array.isArray(choices) || choices.length > 20 ||
-      choices.some((choice) => !safeRuntimeText(choice, 1000))) {
+      choices.some((choice) => !safeRuntimeText(choice, 1000) || credentialQuestion.test(choice))) {
     throw new Error("Copilot requested sensitive, unsupported or oversized input. Complete authentication in the normal browser; never enter credentials in FixLab.");
   }
   if (choices.length === 0 && request.allowFreeform === false) {
@@ -165,6 +165,39 @@ export function runtimeQuestionPrompt(request) {
   };
 }
 
+export function runtimeConversationQuestion(request) {
+  const canAnswer = request.kind === "question" &&
+    [request.details, ...request.choices].every((value) =>
+      safeRuntimeText(value, 4000) && !credentialQuestion.test(value) && !/https?:\/\//i.test(value));
+  if (canAnswer) {
+    return {
+      kind: "runtime-question",
+      requestId: request.id,
+      message: request.details,
+      choices: [...request.choices],
+      allowFreeform: request.allowFreeform,
+      responseChannel: "conversation",
+      actions: ["answer"]
+    };
+  }
+  const reasons = (request.blockedReasons ?? []).map((reason) => permissionBlockReasons[reason]).filter(Boolean);
+  return {
+    kind: "runtime-input",
+    requestId: request.id,
+    message: request.kind === "question"
+      ? "Copilot is waiting for input containing details reserved for the dashboard. Review and answer the exact question in its browser panel; no answer or approval is inferred."
+      : `Copilot is waiting for a native permission decision in the dashboard's browser panel. ${reasons.join(" ")} ${
+        request.canRecover === true
+          ? "Deny and request safe recovery is available there; it denies this operation without granting access or replaying it."
+          : "Review the exact request there; connected conversation replies cannot grant runtime permissions."
+      }`,
+    ...(reasons.length ? { blockedReasons: [...request.blockedReasons] } : {}),
+    canRecover: request.canRecover === true,
+    responseChannel: "dashboard",
+    actions: []
+  };
+}
+
 export function createRuntimeRequestBridge({ send, onChange }) {
   const pending = new Map();
   const publish = () => onChange([...pending.values()]);
@@ -177,6 +210,8 @@ export function createRuntimeRequestBridge({ send, onChange }) {
           !safeRuntimeText(value.title, 200) || !safeRuntimeText(value.details) ||
           !Array.isArray(value.choices) || value.choices.length > 20 ||
           value.choices.some((choice) => !safeRuntimeText(choice, 1000)) ||
+          (value.kind === "question" &&
+            [value.details, ...value.choices].some((text) => credentialQuestion.test(text))) ||
           typeof value.canApprove !== "boolean" ||
           typeof value.allowFreeform !== "boolean" ||
           (value.perAction !== undefined &&

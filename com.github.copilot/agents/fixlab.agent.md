@@ -143,6 +143,12 @@ live/browser instructions. Mark local-stack and live-test skipped using
 `validation.liveTestsDeferredReason`, never passed; retain required local gates,
 PR approvals and CI/merge policies. Do not claim integration coverage.
 
+Portal browser evidence must use `page.screenshot({ path, fullPage: true })` to
+capture the full page, not only the viewport or an element. Mask sensitive regions
+before capture; never include credentials or sign-in screens. Close-ups may
+supplement, not replace, the full-page screenshot. API-only and unit-test-only
+runs require no browser screenshot.
+
 When `browserAutomation.mode` is `api`, validate the backend with Playwright
 `APIRequestContext`, not a frontend or browser. This overrides browser-only
 startup, screenshots, video and profile-lock requirements, not safety gates.
@@ -406,6 +412,11 @@ reuse its existing PR and preserve uncommitted work. A changed fingerprint
 requires a new review. Folder permissions and human authentication remain
 separate approvals. The dashboard cannot inject questions into an idle,
 unconnected Copilot session; read status when the user requests progress.
+For a live `runtime-question` with `responseChannel=conversation`, send the
+user's exact answer or offered choice as `details`, using `action=answer` and
+that question's `requestId`. Continue the same executor, not a retry or new job.
+Native permissions and private questions remain dashboard-only; neither an
+answer nor recovery guidance grants access or establishes passed validation.
 
 Honor user-selected scoped iteration: full regression is explicitly deferred,
 not passed; for strict ready publication, PR readiness stays blocked. Draft publication

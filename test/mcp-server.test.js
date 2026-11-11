@@ -152,6 +152,36 @@ test("MCP dashboard bridge is asynchronous, explicit and bound to repository, in
     assert.equal(replyCount, 1);
     assert.equal(received.validationIntent, "scoped");
     assert.equal(received.jobId, state.job.id);
+    state.job.status = "running";
+    state.question = {
+      kind: "runtime-question", requestId: "question-a", responseChannel: "conversation",
+      message: "Which test scope?", choices: ["Focused"], actions: ["answer"]
+    };
+    const answered = await call("fixlab_dashboard_reply", {
+      ...args, instanceId: state.instanceId, jobId: state.job.id, confirmed: true,
+      action: "answer", requestId: "question-a", details: "Focused"
+    });
+    assert.equal(answered.result.isError, false);
+    assert.equal(received.requestId, "question-a");
+    assert.equal(received.action, "answer");
+    const beforeStale = replyCount;
+    for (const change of [
+      { requestId: "old-question" }, { validationIntent: "scoped" }, { reviewedWorkspace: {} }
+    ]) {
+      const rejected = await call("fixlab_dashboard_reply", {
+        ...args, instanceId: state.instanceId, jobId: state.job.id, confirmed: true,
+        action: "answer", requestId: "question-a", details: "Focused", ...change
+      });
+      assert.match(rejected.error.message, /request ID/);
+    }
+    state.question = { kind: "runtime-input", requestId: "permission-a", responseChannel: "dashboard", actions: [] };
+    const permission = await call("fixlab_dashboard_reply", {
+      ...args, instanceId: state.instanceId, jobId: state.job.id, confirmed: true,
+      action: "answer", requestId: "permission-a", details: "Allow"
+    });
+    assert.match(permission.error.message, /permissions.*dashboard/);
+    assert.equal(replyCount, beforeStale);
+    state.question = null;
     const controlled = await call("fixlab_dashboard_control", {
       ...args, instanceId: state.instanceId, jobId: state.job.id, confirmed: true,
       operation: "permission-review",

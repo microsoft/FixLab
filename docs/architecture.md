@@ -11,6 +11,17 @@ Native runtime request classification supplies redacted, reason-specific
 diagnostics. Eligible blocked operations expose **Deny and request safe recovery**:
 the runtime receives a rejection with fixed recovery feedback, not a permission
 grant or automatic replay. Existing stage evidence remains authoritative.
+Connected status distinguishes `executionState` from the retained job outcome:
+`waiting-for-input` and `waiting-for-permission` are not active validation.
+Non-sensitive native questions expose their exact request ID, question and
+choices. An explicitly confirmed `answer` reply is bound to the current
+instance, job and first pending request and continues that executor, without
+restarting stages or copying the answer into logs/history. Questions containing
+URLs remain dashboard-only so redacted destinations cannot be blindly approved.
+Credential-entry requests, including API keys, refresh tokens and PINs, are
+rejected before either input channel, including direct question transport.
+Native permissions stay in the browser panel; connected status exposes only
+fixed reason codes and recovery guidance, never commands, diffs or grant buttons.
 Separately, `fixlab_nonproduction_post` mediates DEV/PPE/SIT/UAT writes through each
 environment's existing authentication helper and exact endpoint/test-record
 allowlist. The off-by-default job-start checkbox authorizes configured writes
@@ -21,6 +32,21 @@ Allow all and batch approval do not grant writes. This native dashboard capabili
 does not expand API-only/read-only or other-environment contracts. See the
 [security model](security.md#individually-confirmed-non-production-post) for configuration
 and the privileged-execution boundary.
+
+Reviewed Playwright business-request guards can use the current native executor's
+private browser POST relay. The runner imports `FIXLAB_BROWSER_POST_HELPER` from
+its inherited environment and calls `forwardApprovedBrowserPost`. The relay
+shares the POST tool's authorization, authentication helper and failure
+revocation; no separate approval file or browser token is used. It exists only
+with fresh configured job consent and closes on executor shutdown. Bounded API
+responses return privately to the browser, never to the model or dashboard
+history; status metadata alone does not establish a passed scenario.
+Broad PPE-origin jobs also expose `forwardApprovedBrowserRequest` for GET and
+CRUD through that same authentication and grant. This supports load/save/reload
+journeys without narrowing PPE to reads or treating every POST as a write.
+Browser requests are serialized; failed/ambiguous attempts revoke the shared
+grant without retrying pending actions. Other environment/POST-only scopes
+remain unchanged.
 
 For broader DEV validation, the separate **Allow all DEV API writes for this job**
 checkbox exposes `fixlab_dev_write` for POST/PUT/PATCH/DELETE on exact reviewed

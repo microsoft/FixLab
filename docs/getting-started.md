@@ -44,6 +44,22 @@ Follow the conversation and **Run details**. When **Action needed** appears,
 read the blocker, supply the missing information, and use **Resume FixLab**
 when offered. Review runtime permission requests separately.
 
+Connected Copilot status shows whether execution is waiting for input or
+permission. For a non-sensitive live question, answer through the host's
+question UI; the reply targets that exact question in the same executor.
+Do not use retry or comments as an answer. Native permissions and questions
+whose details must remain private still require the dashboard browser panel.
+When offered, **Deny and request safe recovery** rejects the blocked operation
+and lets Copilot try existing reviewed tests/helpers; it does not grant access.
+
+For complete PPE scenarios, select PPE and use the reviewed **Allow all PPE API
+writes** option. Its configured PPE origins and existing authentication support
+both GET reads and POST actions, plus PUT/PATCH/DELETE when the journey needs
+them. Reviewed browser guards use `forwardApprovedBrowserRequest` for that
+business traffic. A read-only/intercepted selection or narrower POST grant
+remains narrower. Missing configuration or sign-in blocks dependent scenarios;
+requesting all scenarios never marks unexecuted ones as passed.
+
 For browser sign-in, open **Connections**, use **Check status** or
 **Connect Playwright**, and complete sign-in/MFA in the browser. Never paste
 credentials into chat. Backend-only jobs use their configured authentication.
@@ -53,6 +69,10 @@ credentials into chat. Backend-only jobs use their configured authentication.
 In **Run details**, check the changed source/branch, tests, browser/API evidence,
 and any PR link. Failed, blocked, skipped, or pending checks are not passes.
 Synthetic checks do not prove the real backend works.
+
+Portal browser evidence uses full-page Playwright screenshots (`fullPage: true`),
+with sensitive regions masked. Close-ups are additional evidence, not a substitute.
+API-only and unit-test-only jobs do not require browser screenshots.
 
 Fix-and-validate may produce an authorized draft PR while validation continues.
 Validate-only produces findings and evidence, not a new PR.

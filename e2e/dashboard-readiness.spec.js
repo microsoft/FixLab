@@ -16,6 +16,12 @@ const { createDashboardServer } = await import(
 const { createRuntimeRequestBridge, runtimePermissionPrompt, runtimeQuestionPrompt } = await import(
   pathToFileURL(join(packageRoot, "dashboard", "runtime-requests.js")).href
 );
+const { createNonProductionPostAccess, createPostWriteApproval, createPpeWriteApproval } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "dev-post.js")).href
+);
+const { forwardApprovedBrowserPost, forwardApprovedBrowserRequest, startBrowserPostBridge } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "browser-post.js")).href
+);
 let repository;
 let dashboard;
 let baseUrl;
@@ -37,6 +43,148 @@ async function availablePort() {
   await new Promise((resolve) => probe.close(resolve));
   return port;
 }
+
+test("reviewed browser POST guard consumes the live job grant without a separate contract", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-browser-post-e2e-"));
+  const jobId = randomUUID();
+  const url = "https://api.dev.example.test/items";
+  let bridge;
+  try {
+    mkdirSync(join(root, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(root, "session.mjs"),
+      'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+    writeFileSync(join(root, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      environments: ["dev"],
+      browserAutomation: {
+        testSynthesis: { defaultDataSource: "non-production-approved", mutationMode: "approved-write" },
+        dataSafety: {
+          productionAllowed: false,
+          post: { dev: { scope: "api://example-service/access", sessionHelper: "session.mjs",
+            actions: [{ url, testRecord: { field: "name", value: "FIXLAB_TEST_001" } }] } }
+        }
+      }
+    }));
+    const access = createNonProductionPostAccess({
+      repository: root, targetEnvironment: "dev", allowPostRequests: true, jobId,
+      postWriteApproval: createPostWriteApproval(root, "dev", jobId),
+      isReady: () => true, ask() { throw new Error("Approved browser POST must not prompt again"); }
+    });
+    const writes = [];
+    bridge = await startBrowserPostBridge({
+      send: access.browserPost, revoke: access.revoke, jobId, environment: "dev",
+      async request(target, options) {
+        expect(target).toBe(url);
+        expect(options.redirect).toBe("manual");
+        expect(options.headers.Authorization).toBe("Bearer synthetic-value");
+        writes.push(JSON.parse(options.body));
+        return new Response('{"id":"synthetic-record"}', {
+          status: 201, headers: { "content-type": "application/json" }
+        });
+      }
+    });
+    const metadata = [];
+    await page.route("https://api.dev.example.test/**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: `<button id="save">Save</button><output id="result"></output>
+            <script>document.getElementById("save").onclick = async () => {
+              const response = await fetch("/items", { method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: "FIXLAB_TEST_001", enabled: false }) });
+              document.getElementById("result").textContent = (await response.json()).id;
+            };</script>`
+        });
+        return;
+      }
+      metadata.push(await forwardApprovedBrowserPost(route, {
+        environment: "dev", purpose: "Verify the approved synthetic browser record."
+      }));
+    });
+    await page.goto("https://api.dev.example.test/");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("#result")).toHaveText("synthetic-record");
+    expect(writes).toEqual([{ name: "FIXLAB_TEST_001", enabled: false }]);
+    expect(metadata[0].validationPassed).toBe(false);
+    expect(metadata[0].responseBodyReturned).toBe(false);
+  } finally {
+    await bridge?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("PPE browser journey loads, saves and reloads through the same approved read/write grant", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-ppe-journey-e2e-"));
+  const jobId = randomUUID();
+  const origin = "https://api.ppe.example.test";
+  let bridge;
+  try {
+    mkdirSync(join(root, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(root, "session.mjs"),
+      'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+    writeFileSync(join(root, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      environments: ["ppe"],
+      browserAutomation: {
+        testSynthesis: { defaultDataSource: "non-production-approved", mutationMode: "approved-write" },
+        dataSafety: {
+          productionAllowed: false,
+          ppeWrite: { scope: "api://example-service/access", sessionHelper: "session.mjs", origins: [origin] }
+        }
+      }
+    }));
+    const access = createNonProductionPostAccess({
+      repository: root, targetEnvironment: "PPE", allowPostRequests: true, jobId,
+      postWriteApproval: createPpeWriteApproval(root, "PPE", jobId),
+      isReady: () => true, ask() { throw new Error("Approved PPE journeys must not prompt again"); }
+    });
+    let name = "original";
+    const methods = [];
+    bridge = await startBrowserPostBridge({
+      send: access.browserRequest, serializeRequests: true,
+      revoke: access.revoke, jobId, environment: "ppe",
+      async request(target, options) {
+        expect(target).toBe(`${origin}/records`);
+        expect(options.redirect).toBe("manual");
+        expect(options.headers.Authorization).toBe("Bearer synthetic-value");
+        methods.push(options.method);
+        if (options.method === "POST") { name = JSON.parse(options.body).name; }
+        return new Response(JSON.stringify({ name }), {
+          status: options.method === "POST" ? 201 : 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    });
+    await page.route(`${origin}/`, (route) => route.fulfill({
+      contentType: "text/html",
+      body: `<button id="save" disabled>Save</button><output id="result"></output>
+        <script>
+          const result = document.getElementById("result");
+          const save = document.getElementById("save");
+          async function read() { return (await fetch("/records")).json(); }
+          Promise.all([read(), read()]).then(([record]) => {
+            result.textContent = record.name; save.disabled = false;
+          });
+          save.onclick = async () => {
+            await fetch("/records", { method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: "saved" }) });
+            result.textContent = (await read()).name;
+          };
+        </script>`
+    }));
+    await page.route(`${origin}/records`, (route) => forwardApprovedBrowserRequest(route, {
+      environment: "PPE", purpose: "Verify the approved PPE load/save/reload journey."
+    }));
+    await page.goto(`${origin}/`);
+    await expect(page.locator("#result")).toHaveText("original");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("#result")).toHaveText("saved");
+    expect(methods).toEqual(["GET", "GET", "POST", "GET"]);
+  } finally {
+    await bridge?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function executor({ onOutput }) {
   onOutput(

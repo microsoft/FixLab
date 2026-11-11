@@ -44,7 +44,7 @@ const tools = [
   },
   {
     name: "fixlab_dashboard_status",
-    description: "Read compact status and any pending recovery question from an existing loopback dashboard. Ask the user using the host's question UI; never assume approval. Does not start or modify jobs.",
+    description: "Read compact status, waiting state and any pending question from an existing loopback dashboard. Ask the user using the host's question UI; never assume approval. Safe live questions include a requestId for an explicit answer; native permissions and sensitive questions stay in the dashboard. Does not start or modify jobs.",
     inputSchema: {
       type: "object",
       properties: { repository: { type: "string" }, port: { type: "integer", minimum: 1, maximum: 65535 } },
@@ -54,7 +54,7 @@ const tools = [
   },
   {
     name: "fixlab_dashboard_reply",
-    description: "Submit the user's explicit answer to the exact dashboard instance and same job returned by status. Never infer confirmed=true. For workspace reuse, review the diff with the user and send the approved branch/fingerprint. Cannot grant runtime permissions or bypass authentication or required gates. Read status again after conflicts.",
+    description: "Submit the user's explicit answer to the exact dashboard instance and same job returned by status. For a live runtime-question with responseChannel=conversation, use action=answer, its requestId and the user's exact answer or offered choice as details; this continues the same executor without retrying. Never infer confirmed=true. For workspace reuse, review the diff with the user and send the approved branch/fingerprint. Cannot grant runtime permissions or bypass authentication or required gates. Read status again after conflicts.",
     inputSchema: {
       type: "object",
       properties: {
@@ -62,7 +62,8 @@ const tools = [
         port: { type: "integer", minimum: 1, maximum: 65535 },
         instanceId: { type: "string" }, jobId: { type: "string" },
         confirmed: { type: "boolean", const: true },
-        action: { type: "string", enum: ["comment", "continue", "retry", "skip", "manual-pass", "manual-fail"] },
+        action: { type: "string", enum: ["answer", "comment", "continue", "retry", "skip", "manual-pass", "manual-fail"] },
+        requestId: { type: "string", description: "Exact live question requestId from status, required only for action=answer." },
         details: { type: "string", minLength: 1, maxLength: 10000 },
         validationIntent: { type: "string", enum: ["scoped", "full", "affected"] },
         reviewedWorkspace: {

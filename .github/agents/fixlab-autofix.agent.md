@@ -150,6 +150,12 @@ live/browser instructions. Mark local-stack and live-test skipped using
 `validation.liveTestsDeferredReason`, never passed; retain required local gates,
 PR approvals and CI/merge policies. Do not claim integration coverage.
 
+Portal browser evidence must use `page.screenshot({ path, fullPage: true })` to
+capture the full page, not only the viewport or an element. Mask sensitive regions
+before capture; never include credentials or sign-in screens. Close-ups may
+supplement, not replace, the full-page screenshot. API-only and unit-test-only
+runs require no browser screenshot.
+
 When `browserAutomation.mode` is `api`, validate the backend with Playwright
 `APIRequestContext`, not a frontend or browser. This overrides browser-only
 startup, screenshots, video and profile-lock requirements, not safety gates.

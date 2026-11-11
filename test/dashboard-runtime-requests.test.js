@@ -5,6 +5,7 @@ import {
   createRuntimeRequestBridge,
   MAX_RUNTIME_REQUESTS,
   PERMISSION_RECOVERY_GUIDANCE,
+  runtimeConversationQuestion,
   runtimePermissionPrompt,
   runtimeQuestionPrompt,
   validateRuntimeUsage
@@ -33,6 +34,44 @@ function fixture() {
   });
   return { bridge, sent, permission, get requests() { return requests; } };
 }
+
+test("connected blockers distinguish answerable questions from private questions and permission recovery", () => {
+  const question = {
+    ...runtimeQuestionPrompt({ question: "Which test scope?", choices: ["Focused", "Full"] }),
+    id: randomUUID()
+  };
+  const view = runtimeConversationQuestion(question);
+  assert.equal(view.kind, "runtime-question");
+  assert.equal(view.requestId, question.id);
+  assert.equal(view.message, "Which test scope?");
+  assert.deepEqual(view.choices, ["Focused", "Full"]);
+  assert.deepEqual(view.actions, ["answer"]);
+  for (const request of [
+    { ...question, details: "Allow GET https://private.example.test/path?" },
+    { ...question, choices: ["https://private.example.test/path"] },
+    { ...question, details: "Enter the verification code" },
+    ...["Enter your API key", "Enter your refresh token", "Enter your PIN",
+      "API key?", "Refresh token required to continue:", "PIN?", "API keys?", "Refresh tokens:", "Passcode?", "Credentials:"]
+      .map((details) => ({ ...question, details }))
+  ]) {
+    const hidden = runtimeConversationQuestion(request);
+    assert.equal(hidden.responseChannel, "dashboard");
+    assert.deepEqual(hidden.actions, []);
+    assert.doesNotMatch(JSON.stringify(hidden), /private\.example|verification code/);
+    if (!request.details.includes("https:") && !request.choices.some((value) => value.includes("https:"))) {
+      assert.throws(() => fixture().bridge.receive(request), /invalid/);
+    }
+  }
+  const blocked = runtimeConversationQuestion({
+    ...runtimePermissionPrompt({ kind: "write", fileName: "test.js", diff: 'const token = "private-sentinel";' }),
+    id: randomUUID()
+  });
+  assert.equal(blocked.kind, "runtime-input");
+  assert.deepEqual(blocked.blockedReasons, ["sensitive-content"]);
+  assert.equal(blocked.canRecover, true);
+  assert.match(blocked.message, /Deny and request safe recovery/);
+  assert.doesNotMatch(JSON.stringify(blocked), /private-sentinel|test\.js/);
+});
 
 test("blocked permission diagnostics distinguish causes without exposing original details", () => {
   for (const [request, expected] of [
@@ -359,6 +398,13 @@ test("runtime input rejects credential collection and malformed choices", () => 
     { question: "Please enter your password" },
     { question: "What is your password?" },
     { question: "Paste your MFA code" },
+    ...["Enter your API key", "Enter your refresh token", "Enter your PIN",
+      "Provide your API_key", "Paste your refresh_token", "Tell me your client secret",
+      "Send your private key", "Enter\nyour PIN", "Provide your one-time password",
+      "Your API key is required; paste it below.", `Enter ${"a".repeat(100)} then your refresh token`,
+      "API key?", "Refresh token required to continue:", "PIN?", "API keys?", "Refresh tokens:", "Passcode?", "Credentials:"]
+      .map((question) => ({ question })),
+    { question: "Choose an option", choices: ["Enter your API key"] },
     { question: "Choose", choices: ["x".repeat(1001)] },
     { question: "Choose", choices: new Array(21).fill("Option") },
     { question: "Choose", choices: [], allowFreeform: false },

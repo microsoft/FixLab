@@ -20,6 +20,7 @@ import { dirname, join, parse } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
 import test from "node:test";
 import {
+  formatJobStatus,
   parseNaturalChatCommand,
   runChat
 } from "../dashboard/chat.js";
@@ -2310,6 +2311,9 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
   const approvedField = `${environment}WriteApproved`;
   const profile = validProfile();
   profile.environments = ["dev", "sit", "uat", "ppe"];
+  if (environment === "ppe") {
+    profile.browserAutomation.testSynthesis.ppeReadOnly = true;
+  }
   profile.browserAutomation.dataSafety[`${environment}Write`] = {
     scope: "api://example-service/access", sessionHelper: "dev-session.mjs",
     origins: [`https://api.${environment}.example.test`]
@@ -2328,7 +2332,8 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
       method: "POST",
       headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
       body: JSON.stringify({ request: `Synthetic approved broad ${environment} writes.`, mode: "validate-only",
-        targetEnvironment: environment, [writeField]: true, [confirmField]: true, ...changes })
+        targetEnvironment: environment, [writeField]: true, [confirmField]: true,
+        runAllUiScenarios: environment === "ppe", ...changes })
     });
     for (const changes of [
       { [writeField]: "yes" }, { [writeField]: null }, { [writeField]: false },
@@ -2353,6 +2358,18 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
     assert.equal(launches[0].postWriteApproval.jobId, created.body.job.id);
     assert.equal(launches[0].allowPostRequests, true);
     assert.match(launches[0].prompt, new RegExp(`fixlab_${environment}_write.*POST, PUT, PATCH and DELETE`, "u"));
+    if (environment === "ppe") {
+      assert.equal(created.body.job.runAllUiScenarios, true);
+      assert.match(launches[0].prompt, /run every repository-defined Playwright\/UI scenario/);
+      assert.match(launches[0].prompt, /Do not intercept an authorized mutation/);
+      assert.doesNotMatch(launches[0].prompt, /Keep all backend access read-only and intercept every mutating request/);
+      const browserPrompt = buildJobPrompt({
+        request: "Run all PPE scenarios.", mode: "playwright-only", runAllUiScenarios: true,
+        targetEnvironment: "ppe", testEvidence: created.body.job.testEvidence
+      });
+      assert.match(browserPrompt, /Save, Submit, Approve, autosave and other writes require the current mediated native approval/);
+      assert.doesNotMatch(browserPrompt, /No Save, Submit, Approve/);
+    }
     const queued = await post();
     assert.equal(queued.body.queue[0][approvedField], true);
     const held = await jsonRequest(running.url, "/api/jobs/hold", {
@@ -2859,6 +2876,10 @@ test("live native prompts require current instance/job/request, exact browser or
     const conversation = (await jsonRequest(url, "/api/conversation")).body;
     assert.equal(conversation.question.kind, "runtime-input");
     assert.deepEqual(conversation.question.actions, []);
+    assert.equal(conversation.job.executionState, "waiting-for-permission");
+    assert.equal(conversation.question.requestId, id);
+    assert.equal(conversation.question.responseChannel, "dashboard");
+    assert.doesNotMatch(JSON.stringify(conversation.question), /npm test/);
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal((await jsonRequest(url, "/api/job")).body.job.status, "running", "human wait suspends idle timeout");
     const valid = {
@@ -2883,6 +2904,13 @@ test("live native prompts require current instance/job/request, exact browser or
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "continue", details: "Do not use as approval." })
     })).response.status, 409);
+    assert.equal((await jsonRequest(url, "/api/conversation/reply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repository: realpathSync(repository), instanceId: state.instanceId,
+        jobId: created.body.job.id, requestId: id, confirmed: true, action: "answer", details: "Allow"
+      })
+    })).response.status, 409, "a question answer cannot approve a native permission");
     assert.equal(sent.length, 0);
     assert.equal((await post(valid)).response.status, 200);
     assert.equal(sent[0].action, "allow");
@@ -2908,6 +2936,104 @@ test("live native prompts require current instance/job/request, exact browser or
     await dashboard.close();
     assert.equal(sent.at(-1).action, "cancel");
     assert.throws(() => bridge.respond(questionId, { action: "answer", choice: 0 }), /stale/);
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("connected live answers are exact, single-use and continue only the same executor without logging answers", async () => {
+  const repository = createGitRepository();
+  let bridge;
+  let launches = 0;
+  const sent = [];
+  const questionId = randomUUID();
+  const { dashboard, url } = await startDashboard(repository, ({ onRuntimeRequests, onOutput }) => {
+    launches++;
+    onOutput("stdout", "FIXLAB_STAGE|diagnosis|passed|Retained diagnosis.\n");
+    bridge = createRuntimeRequestBridge({ send: (value) => sent.push(value), onChange: onRuntimeRequests });
+    bridge.receive({
+      ...runtimeQuestionPrompt({
+        question: "Which reviewed test scope?",
+        choices: ["Focused answer sentinel", "Full"], allowFreeform: false
+      }),
+      id: questionId
+    });
+    return {
+      completion: new Promise(() => {}),
+      respondToRuntimeRequest: (id, decision) => bridge.respond(id, decision),
+      terminate: () => bridge.cancel()
+    };
+  }, undefined, { runtime: "copilot" });
+  const post = (body, origin) => jsonRequest(url, "/api/conversation/reply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
+    body: JSON.stringify(body)
+  });
+  try {
+    const created = await jsonRequest(url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Synthetic live question handoff.", mode: "validate-only" })
+    });
+    const args = { repository: realpathSync(repository), port: Number(new URL(url).port) };
+    const state = await dashboardConversation(args);
+    assert.equal(state.job.executionState, "waiting-for-input");
+    assert.equal(state.job.status, "running");
+    assert.equal(state.question.kind, "runtime-question");
+    assert.equal(state.question.requestId, questionId);
+    assert.deepEqual(state.question.actions, ["answer"]);
+    assert.match(formatJobStatus((await jsonRequest(url, "/api/job")).body.job), /waiting-for-input.*\n[\s\S]*Action needed: Which reviewed test scope/);
+    assert.equal(state.question.message, "Which reviewed test scope?");
+    const reply = {
+      ...args, instanceId: state.instanceId, jobId: created.body.job.id,
+      requestId: questionId, confirmed: true, action: "answer", details: "Focused answer sentinel"
+    };
+    for (const change of [
+      { instanceId: randomUUID() }, { jobId: randomUUID() }, { repository: tmpdir() },
+      { requestId: randomUUID() }, { requestId: undefined }, { confirmed: false },
+      { action: "comment" }, { action: "retry" }, { action: "allow" }
+    ]) {
+      const result = await post({ ...reply, ...change });
+      assert.equal(result.response.status, 409, JSON.stringify(change));
+    }
+    assert.equal((await post(reply, url)).response.status, 403);
+    for (const change of [
+      { details: "An unavailable choice" }, { validationIntent: "scoped" },
+      { scope: "all-tools" }, { recover: true }, { reviewedWorkspace: {} }
+    ]) {
+      assert.equal((await post({ ...reply, ...change })).response.status, 400, JSON.stringify(change));
+    }
+    await assert.rejects(dashboardConversation({ ...reply, requestId: randomUUID() }, true), /request ID/);
+    assert.equal(sent.length, 0);
+    const answered = await dashboardConversation(reply, true);
+    assert.equal(answered.question, null);
+    assert.equal(answered.job.executionState, "running");
+    assert.equal(answered.job.stages.diagnosis.status, "passed");
+    assert.equal(launches, 1);
+    assert.deepEqual(sent, [{
+      type: "response", id: questionId, action: "answer",
+      answer: "Focused answer sentinel", wasFreeform: false
+    }]);
+    assert.equal((await post(reply)).response.status, 409);
+    const freeformId = randomUUID();
+    bridge.receive({ ...runtimeQuestionPrompt({ question: "What is the remaining symptom?" }), id: freeformId });
+    assert.equal((await post({ ...reply, requestId: freeformId, details: "password=private-sentinel" })).response.status, 400);
+    const freeform = await post({ ...reply, requestId: freeformId, details: "Freeform symptom sentinel" });
+    assert.equal(freeform.response.status, 200);
+    assert.equal(sent.at(-1).wasFreeform, true);
+    bridge.receive({
+      ...runtimeQuestionPrompt({ question: "Allow GET https://private.example.test/path?" }),
+      id: randomUUID()
+    });
+    const hidden = await dashboardConversation(args);
+    assert.equal(hidden.question.responseChannel, "dashboard");
+    assert.doesNotMatch(JSON.stringify(hidden), /private\.example/);
+    assert.equal((await post({ ...reply, requestId: hidden.question.requestId })).response.status, 409);
+    const snapshot = readFileSync(join(dirname(createCacheContext(repository).cachePath), "dashboard-jobs.json"), "utf8");
+    const job = (await jsonRequest(url, "/api/job")).body.job;
+    assert.doesNotMatch(snapshot, /Focused answer sentinel|Freeform symptom sentinel|Which reviewed test scope|private\.example/);
+    assert.doesNotMatch(JSON.stringify(job.logs), /Focused answer sentinel|Freeform symptom sentinel/);
+    assert.equal(job.pendingInputCount, 0);
   } finally {
     await dashboard.close();
     rmSync(repository, { recursive: true, force: true });
@@ -8803,6 +8929,11 @@ test("browser-only instructions are bounded and retain request, policy and execu
   const full = buildJobPrompt({
     request, mode: "fix-and-validate", targetEnvironment: "dev"
   });
+  for (const prompt of [browser, full]) {
+    assert.match(prompt, /page\.screenshot\(\{ path, fullPage: true \}\)/u);
+    assert.match(prompt, /Mask sensitive regions before capture/u);
+    assert.match(prompt, /API-only and unit-test-only runs require no browser screenshot/u);
+  }
   assert.ok(browser.length < full.length * 0.6, `${browser.length} must be less than 60% of ${full.length}`);
   assert.ok(browser.length < 9500);
   assert.ok(browser.endsWith(request));
