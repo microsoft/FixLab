@@ -41,7 +41,7 @@ import { canonicalExecutionRepository, createExecutorLease } from "./executor-le
 import { spawnWindowsExecutor } from "./windows-executor.js";
 import { createRuntimeRequestBridge, MAX_RUNTIME_FRAME_BYTES, recordedSourceEditReview, runtimeConversationQuestion, safeRuntimeText, sourceEditAuthorization, validateRuntimeUsage, validateToolApprovalMode } from "./runtime-requests.js";
 import { validateJobFileAccess } from "./runtime-permission-policy.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsUnverifiedDraft, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "./workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsUnverifiedDraft, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, SCENARIO_VALIDATION_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "./workflow-policy.js";
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { createDevWriteApproval, createPpeWriteApproval, createPostBaseApproval, createPostWriteApproval, inspectPpeWriteConfiguration, inspectPostBaseConfiguration, isOriginWriteApproval } from "./dev-post.js";
@@ -1257,12 +1257,16 @@ export function buildJobPrompt({
     : runAllUiScenarios
     ? `- After implementation and non-browser validation are complete, run every repository-defined Playwright/UI scenario at the end, not only the focused defect journey.
 - Start the required applications once when safe, preserve each scenario result, and attach non-sensitive screenshot evidence for the complete UI run.`
-    : "- Run the smallest repository-defined Playwright journey that proves the selected behavior.";
+    : "";
   const environmentGuidance = targetEnvironment
     ? `- The user selected ${targetEnvironment} as the validation environment. Use exactly that repository-approved environment for profile-defined application startup and Playwright live testing.
 - Do not silently fall back to local or another environment. If ${targetEnvironment} is unavailable, unauthenticated, or cannot be used safely, block the affected stage with the exact prerequisite.
 - Focused tests, type-checks, and builds still run locally unless the repository profile explicitly defines otherwise.`
     : "- No environment override was selected. Use the repository profile's safe default and never select production.";
+  const scenarioGuidance = !apiOnly && !testEvidence.unitTestsOnly && !skipLiveTests && !unverifiedDraft
+    ? SCENARIO_VALIDATION_GUIDANCE : "";
+  const syntheticFallbackAllowed = testEvidence.enabled !== false &&
+    testEvidence.mutationMode === "intercepted" && testEvidence.selectedMutationMode !== "none";
   const testDataGuidance = testEvidence.productionDatabaseReadOnly
     ? "- This local API reads a PRODUCTION database under an explicit read-only exception. Run the required portal-backed API gate and its assertReadOnlyDatabase permission check before business reads. Require a database-enforced read-only identity; GET alone does not prove safety. Use only the approved loopback HTTPS API, never a deployed production URL or a different database. Do not write, change database settings or permissions, bypass guards, or fall back to synthetic data. Label evidence FIXLAB_TEST|production-read-only|none|...; never describe these reads as non-production."
     : apiOnly
@@ -1274,11 +1278,12 @@ export function buildJobPrompt({
 - Keep other origins, explicit read-only/intercepted selections and production restrictions intact. Missing authentication, configuration or request-policy approval blocks dependent scenarios, not a synthetic substitute for live write proof.`
     : targetEnvironment &&
     testEvidence.source === "non-production-read-only"
-      ? `- Use the selected ${targetEnvironment} backend and API as the primary business-data source. Keep all backend access read-only and intercept every mutating request.
+      ? `- Use the selected ${targetEnvironment} backend and API as the primary business-data source. Keep all backend access read-only and ${testEvidence.mutationMode === "intercepted" && testEvidence.selectedMutationMode !== "none" ? "intercept every mutating request" : "prevent unauthorized mutations"}.
 - Do not fulfill or intercept business-data reads while the selected backend is available and returns safe records that can prove the required assertions.
-- If the selected backend is unreachable, authentication or backend service access prevents the read, or it returns no safe records capable of exercising the required behavior, preserve that exact backend limitation and then fall back to synthetic-intercepted data for the focused UI journey. A query allowlist rejection is not a backend limitation and must not trigger this fallback.
+${syntheticFallbackAllowed ? `- If the selected backend is unreachable, authentication or backend service access prevents the read, or it returns no safe records capable of exercising the required behavior, preserve that exact backend limitation and then fall back to synthetic-intercepted data for the focused UI journey. A query allowlist rejection is not a backend limitation and must not trigger this fallback.
 - Do not replace an expected empty-state assertion with synthetic data. Use fallback only when records are required to exercise the reported behavior and the selected backend cannot supply them.
 - When fallback occurs, emit a FIXLAB_ACTIVITY line explaining why, intercept all mutations, and emit FIXLAB_TEST with source synthetic-intercepted and mutation mode intercepted. A synthetic pass proves the UI behavior only; do not claim the selected backend or its data was validated.`
+    : "- This run does not permit synthetic interception. Preserve unavailable-data/access diagnostics, block only dependent scenarios, and continue independent approved scenarios without changing the selected data policy."}`
       : "- Use the configured test data source and mutation mode. For synthetic-intercepted tests, fulfill business-data reads locally, intercept every mutating request, and assert the intended request count and payload without changing an external record.";
   const videoGuidance = apiOnly
     ? "- Preserve sanitized API assertion results, not browser screenshots, videos or credential-bearing traces."
@@ -1340,12 +1345,12 @@ ${apiOnly && useDeployedBackend ? "useDeployedBackend=true: use the configured d
 - Skip source diagnosis, separate reproduction, implementation, diff review and unrelated non-browser gates. The diagnosis, reproduce, fix, review, and pr stages must be explicitly skipped unless their own required prerequisite fails.
 - Do not edit files other than job-owned transient Playwright journeys and runner evidence. Do not commit, push, create or update pull requests, or change repository configuration.
 - Never overwrite pre-existing tests.
-- Batch-read profile, browser config, fixture and nearest test; prefer an existing journey or retained script. Inspect implementation only for missing selectors/prerequisites.
-- Use one parameterized deterministic Playwright script and repository runner, not per-row/field model round-trips.
-- Keep the same-job script/results through retries/waits; change only failing steps. Never delete running artifacts. Remove transient source after execution/continuations; permanent coverage needs authorization.
-- Preserve human-entered values; never replay stale snapshots/successful mutations. Do not copy browser state or credentials; human-controlled sign-in/MFA.
-- Do not reinstall dependencies that are already available. Run only minimum setup required by the repository profile: verify browser authentication, required applications and the focused Playwright journey. State files alone do not prove sign-in.
+- Batch-read profile/config/nearest fixture; prefer an existing journey or retained script. Read only needed selectors.
+- Keep the same-job script/results through retries; fix only failing steps. Never delete running artifacts. Clean transient source after continuations; permanent tests need approval.
+- Preserve human input; never replay stale values or mutations. Do not copy browser state or credentials; human sign-in/MFA.
+- Do not reinstall dependencies that are already available. Run only minimum setup required by the repository profile: verify browser authentication, apps and focused Playwright journey. State files alone do not prove sign-in.
 ${uiScenarioGuidance}
+${scenarioGuidance}
 ${environmentGuidance}
 ${testDataGuidance}
 ${testEvidence.allowPostRequests === true
@@ -1355,10 +1360,8 @@ ${videoGuidance}
 ${manualLocalhostGuidance}
 - ${PORTAL_SCREENSHOT_GUIDANCE}
 - Use fixlab exec --stage live-test -- <command>; quote '--' in PowerShell. Bound diagnostics; no cached browser/auth/external-data results.
-- Continue independent safe work, never across failed prerequisites. Full regression deferred is not passed.
-- Do not delegate one continuous journey or rescan; batch reads.
-- Missing decisions/auth/access block affected stages only. Use native questions; never infer approval, waive policy or collect credentials.
-- Finish with exact passed/failed assertions, skipped gates, blockers and risks before task_complete.
+- Ask native questions only for missing decisions/auth/access; never infer approval or collect credentials.
+- Finish with assertion results, skipped gates, blockers and risks before task_complete.
 
 Request:
 ${request}`;
@@ -1402,12 +1405,13 @@ ${!readOnly && !unverifiedDraft ? AUTONOMOUS_RECOVERY_GUIDANCE : ""}
 ${setupRecovery.length ? `Offline setup diagnostics to repair when needed for this task:\n${JSON.stringify(setupRecovery)}` : ""}
 - Reproduce on an approved app; start a stack only for changed code. Deployed baselines never prove unpublished fixes.
 - New worktree: plan \`fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME\`; add \`--yes\` after scoped setup approval. Copy only declared \`worktreeSetup.files\`. Never copy credentials or browser state; do not retry unchanged approvals or grant blanket path access. Missing prerequisites block dependent checks. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration.
-- Inspect git status and effective diff; search task-relevant symbols and files, not the whole repository.
-- Reuse this job/session context. Do not reread unchanged files, repeat diagnosis, reinstall available dependencies or rerun broad checks without new evidence.
+- Inspect git status and effective diff; search task-relevant symbols and files only.
+- Reuse this job/session context. Do not reread unchanged files or reinstall available dependencies; repeat checks only for new evidence.
 - Treat commit changes and repository-profile or instruction changes as invalidation boundaries.
 ${readOnly ? "" : requestGuidance}
 ${readOnly ? "" : pullRequestGuidance}
 ${uiScenarioGuidance}
+${scenarioGuidance}
 ${environmentGuidance}
 ${videoGuidance}
 ${manualLocalhostGuidance}
@@ -1415,9 +1419,8 @@ ${readOnly ? "" : branchNamingGuidance}
 - ${readOnly ? "Do not edit files other than job-owned transient Playwright journeys and runner evidence. Do not create commits, push branches, create pull requests, or update pull requests." : "Make the smallest complete change that resolves the request. Make no code change when the evidence shows none is required."}
 ${readOnly ? "" : ENGINEERING_SUMMARY_GUIDANCE}
 ${readOnly ? TRANSIENT_PLAYWRIGHT_GUIDANCE : ""}
-- Autonomously complete the lifecycle without asking the user to direct routine engineering steps.
 ${readOnly ? "" : `- Saved delivery workflow: ${unverifiedDraft ? "explicit unverified draft; local and live checks are deferred, not passed" : efficient ? `efficient; focused checks before the ${workflow.publication === "ready" ? "ready-for-review" : "draft"} PR, broader checks only by saved preference or explicit selection` : "strict; all applicable configured gates remain required for full validation and ready publication"}. This recorded job policy takes precedence over the product default.`}
-- Use fixlab_dashboard_control for user-authorized dashboard operations. Read status first and bind its instance and current job. Do not ask again for routine steps already authorized; ask only for missing decisions or required approvals. For "test this PR", verify the assigned checkout matches the PR source commit, then start playwright-only using the repository's Playwright configuration, selected environment and human-controlled authentication. Do not change code or use another checkout's evidence. Normal guards apply.
+- Use fixlab_dashboard_control for user-authorized dashboard operations, bound to fresh instance/job status. Do not ask again for routine steps already authorized. For "test this PR", verify the checkout matches the PR source commit; use playwright-only with the repository's Playwright configuration and human sign-in. No code/PR edits, other-checkout evidence or guard bypass. Ask only for missing decisions/permissions.
 - For a connected host conversation, use fixlab_dashboard_status and fixlab_dashboard_reply to surface a recovery question using the host's question UI and submit only the user's explicit answer to the same instance and job. Never infer approval. Honor user-selected scoped iteration: full regression is explicitly deferred, not passed${allowsDraftIntegrationDeferral({ mode, workflow, manualLocalhostTest, runAllUiScenarios, testEvidence }) ? "; draft publication follows verified local checks; full integration remains unverified" : efficient ? "; publication follows the saved efficient workflow and explicitly required gates" : ", and PR readiness stays blocked"}. Continue independent safe checks after unrelated failures without bypassing dependencies. Reviewed workspace reuse must preserve the current branch, uncommitted work and existing PR; a changed fingerprint requires a new review. Runtime permissions and human authentication remain separate approvals.
 - For known external-folder prerequisites, offer permissionPreflight before executor launch; it only opens review, never grants access. Use reviewed component path-to-gate policies for change-aware validation; unknown paths, full-validation paths, explicit full coverage, and previously executed gates retain their required checks.
 - Do not delete or edit transient test artifacts while validation is discovering or executing them; wait for owned validation to finish before cleanup.
@@ -1427,9 +1430,8 @@ ${readOnly ? "" : `- Saved delivery workflow: ${unverifiedDraft ? "explicit unve
 - Add \`--reuse\` only for deterministic local validation when command, arguments, Git state, working directory, profile, and stage are unchanged. Never reuse startup, health, authentication, Playwright or live-environment validation, external-data checks, dependency installation, deployments, or mutating commands.
 - Do not skip Playwright merely because an unrelated non-browser test, build, or backend startup is failed or blocked. If frontend startup, authentication, safe data, and the selected browser journey are independently ready, run the live-test gate and preserve the other blocker separately.
 - Use local-stack only for profile-defined application startup and health. Do not mark local-stack failed because a separate test, type-check, lint, or production build reports unrelated baseline diagnostics; preserve that exact validation limitation separately and continue browser execution when startup is healthy.
-- Before browser execution, synthesize the smallest focused Playwright scenario and measurable assertions from the reported behavior and expected outcome when an equivalent repository-owned scenario does not already exist.
 - Treat a synthesized Playwright scenario as a transient validation artifact by default. Remove its source file and any validation-only configuration edits before diff review, commit, push, or pull-request creation.
-- Do not add a newly generated authenticated test such as \`*.auth.spec.ts\` to the product change unless the user explicitly requests permanent browser-test coverage or repository instructions require that exact persisted test.
+- Do not add a newly generated authenticated test such as \`*.auth.spec.ts\` unless permanent coverage is explicitly requested or required by repository instructions.
 - Existing repository-owned Playwright tests may be changed only when the reported product behavior directly requires that regression update; do not broaden the pull request to repair unrelated or stale browser journeys.
 ${testDataGuidance}
 ${readOnly ? "" : unverifiedDraft ? UNVERIFIED_DRAFT_GUIDANCE : efficient ? efficientWorkflowGuidance(workflow) : `- After focused regression, transient-artifact cleanup and diff review, commit/push the authorized checkpoint and create or update a draft pull request before remaining independent validation completes.
@@ -1439,11 +1441,10 @@ ${readOnly ? "" : unverifiedDraft ? UNVERIFIED_DRAFT_GUIDANCE : efficient ? effi
 ${readOnly ? "" : "- Prefix FixLab-created pull-request titles with FLAB: followed by a concise description of the coding change. Format the body with the repository's PR template, clear Markdown sections for the problem, changes, validation and risks, and accurate validation checkboxes."}
 ${readOnly ? "" : CONCISE_PR_GUIDANCE}
 ${readOnly ? "" : PR_LEARNING_GUIDANCE}
-- Start only the applications defined by the repository profile, then execute the repository-defined live test against the allowed required system or environment from that profile. Do not invent or hardcode environment choices.
+- Start only applications defined by the repository profile; run its repository-defined live test in the approved environment. Do not invent or hardcode environment choices.
 - ${PORTAL_SCREENSHOT_GUIDANCE}
-- ${playwrightOnly ? "Collect evidence for required setup, authentication readiness, application startup, the focused Playwright result, skipped gates, blockers, and remaining risks." : "Collect evidence for diagnosis or surface inspection, the effective diff, review, local validation, application startup, live testing, skipped gates, and remaining risks."}
-- Human interaction is limited to authentication, unsafe-data approval, deployment or pull-request approval, and genuine blockers that cannot be resolved from repository evidence.
-- When one of those human actions is required, emit FIXLAB_STAGE|stage|blocked|exact action needed, emit blocked outcomes for affected bugs when applicable, mark later stages skipped because of the blocker, and exit. The dashboard will collect user input and resume this same session.
+- ${playwrightOnly ? "Collect evidence for required setup, authentication readiness, application startup, the focused Playwright result, skipped gates, blockers, and remaining risks." : "Record diagnosis, diff/review, local checks, startup/live evidence, skipped gates, blockers and risks."}
+- For authentication, unsafe-data approval, deployment/PR approval or irreducible blockers, finish independent safe checks before waiting. Emit FIXLAB_STAGE|stage|blocked|exact action needed for affected stages/bugs, skip dependents, and exit for same-session input.
 - Keep stage messages and retained logs concise. Summarize relevant command evidence and preserve exact errors, but do not feed unbounded raw output back into prompts.
 - Keep all execution local unless the repository profile and existing authorization explicitly require an allowed external action.
 - Do not create an empty pull request. When every bug is external, no-change, expected, duplicate, or already-fixed, explicitly skip the fix and pr stages and explain the per-bug outcomes.
@@ -3337,7 +3338,48 @@ function ownedTreeRunning(child) {
   }
 }
 
-function spawnOwnedShell(configuration, retainDescendants = false) {
+export function createAuthenticationDiagnostics() {
+  const signatures = [
+    { reason: "authentication-required", pattern: /AADSTS(?:50058|50076|50079|50158|53003)|interaction_required|login_required/iu,
+      message: "Complete the repository's human-controlled sign-in/MFA or resolve its managed access restriction. Do not retry unattended or bypass authentication." },
+    { reason: "browser-profile-busy", pattern: /ProcessSingleton|SingletonLock|(?:profile|user data directory).{0,80}(?:already in use|is busy)/iu,
+      message: "The configured browser profile is busy. Wait for its owned session to close; do not take over another browser or copy browser state." },
+    { reason: "missing-dependency", pattern: /Cannot find (?:module|package)|ERR_MODULE_NOT_FOUND|(?:node|npm|npx).{0,40}not recognized/iu,
+      message: "Inspect the configured helper and missing repository dependencies. Use the approved repository restore command only when needed, then rerun the failed prerequisite." },
+    { reason: "browser-unavailable", pattern: /Executable doesn't exist|playwright install/iu,
+      message: "The configured browser executable is unavailable. Verify the repository's browser/channel and use its approved browser setup; preserve existing sessions." },
+    { reason: "configuration-error", pattern: /No tests found|Project.{0,100}not found|Cannot find.{0,40}(?:config|configuration)/iu,
+      message: "Check the configured working directory, test/config paths and selected project against the repository. Repair only authorized setup or job-owned transient journeys." },
+    { reason: "timeout", pattern: /TimeoutError|Timeout.{0,80}exceeded|ETIMEDOUT/iu,
+      message: "The authentication prerequisite timed out. Inspect application health and the repository's sign-in prerequisite before retrying; retain the failed outcome." }
+  ];
+  const detected = new Set();
+  const tails = new Map();
+  return {
+    observe(stream, chunk) {
+      const output = chunk.toString("utf8");
+      for (let offset = 0; offset < output.length; offset += 4096) {
+        const text = (tails.get(stream) ?? "") + output.slice(offset, offset + 4096);
+        for (const signature of signatures) {
+          if (signature.pattern.test(text)) {
+            detected.add(signature.reason);
+          }
+        }
+        tails.set(stream, text.slice(-256));
+      }
+    },
+    failure() {
+      const signature = signatures.find((candidate) => detected.has(candidate.reason));
+      tails.clear();
+      return signature ? { reason: signature.reason, message: signature.message } : {
+        reason: "unknown",
+        message: "Inspect the repository-owned authentication helper locally for the exact failure. Private helper output was not retained; do not retry an unchanged failure."
+      };
+    }
+  };
+}
+
+function spawnOwnedShell(configuration, retainDescendants = false, onOutput = null) {
   if (process.platform === "win32") {
     const executable = process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe";
     const containment = spawnWindowsExecutor({
@@ -3356,8 +3398,12 @@ function spawnOwnedShell(configuration, retainDescendants = false) {
     containment.child.stdin.on("error", (error) => {
       containment.child.emit("fixlab-input-error", error);
     });
-    containment.child.stdout.resume();
-    containment.child.stderr.resume();
+    for (const stream of ["stdout", "stderr"]) {
+      if (onOutput) {
+        containment.child[stream].on("data", (chunk) => onOutput(stream, chunk));
+      }
+      containment.child[stream].resume();
+    }
     return containment.child;
   }
   const child = spawn(configuration.command, {
@@ -3365,8 +3411,14 @@ function spawnOwnedShell(configuration, retainDescendants = false) {
     env: { ...process.env, ...configuration.environment, BROWSER: "none" },
     shell: true,
     detached: true,
-    stdio: retainDescendants ? ["pipe", "ignore", "ignore"] : "ignore"
+    stdio: onOutput ? [retainDescendants ? "pipe" : "ignore", "pipe", "pipe"]
+      : retainDescendants ? ["pipe", "ignore", "ignore"] : "ignore"
   });
+  if (onOutput) {
+    for (const stream of ["stdout", "stderr"]) {
+      child[stream].on("data", (chunk) => onOutput(stream, chunk));
+    }
+  }
   child.stdin?.on("error", (error) => {
     child.emit("fixlab-input-error", error);
   });
@@ -7407,10 +7459,11 @@ export function createDashboardServer({
       const authenticationJob = currentJob;
       const startAuthentication = (proving = false) => {
       const proofIdentity = proving ? authenticationProofIdentity(configuration, authenticationJob) : null;
+      const diagnostics = createAuthenticationDiagnostics();
       const child = spawnOwnedShell({ ...configuration,
         environment: { ...configuration.environment,
           FIXLAB_TARGET_ENVIRONMENT: apiProof ? "local" : authenticationJob?.targetEnvironment ?? "local" },
-        command: proving ? configuration.proofCommand : configuration.command });
+        command: proving ? configuration.proofCommand : configuration.command }, false, diagnostics.observe);
       playwrightConnection.handle = child;
       child.once("fixlab-input-error", (error) => {
         playwrightConnection.lastResult = {
@@ -7467,15 +7520,17 @@ export function createDashboardServer({
             proofError = error.message;
           }
         }
+        const failure = code === 0 ? null : diagnostics.failure();
         playwrightConnection.lastResult = {
           ok: code === 0 && !proofError,
+          ...(failure ? { reason: failure.reason } : {}),
           message:
             code === 0
               ? proofError || (proving ? "Repository-owned authenticated browser proof passed." :
                 "Authentication helper completed; sign-in remains unverified without a repository-owned proofCommand.")
               : `Playwright authentication exited with code ${code ?? "unknown"}${
                   signal ? ` (${signal})` : ""
-                }.`,
+                }. ${failure.message}`,
           finishedAt: new Date().toISOString()
         };
         playwrightConnection.handle = null;

@@ -13,6 +13,32 @@ import {
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 
+test("scenario-first validation and independent recovery stay aligned across browser entry points", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
+    assert.match(readFileSync(join(root, entryPoint), "utf8"), /SCENARIO_VALIDATION_GUIDANCE/u, entryPoint);
+  }
+  for (const entryPoint of [
+    "dashboard/workflow-policy.js", "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
+    ".github/agents/fixlab.agent.md", "prompts/fixlab.live-test.prompt.md"
+  ]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/\s+/gu, " ");
+    for (const contract of [
+      /Scenario-first validation/u, /expected-versus-observed assertions/u,
+      /not a setup check, sign-in or screenshot alone/u,
+      /repair its syntax\/selectors/u, /approved synthetic\/intercepted data/u,
+      /discoverable \.spec file in a job-owned folder/u,
+      /configured testDir; honor testMatch\/project/u, /Verify --list before execution/u,
+      /report file path, runner command and assertion results/u,
+      /label synthetic UI coverage separately/u,
+      /Finish independent scenarios before asking/u,
+      /never use another checkout to prove an unpublished fix/u,
+      /explicitly deferred checks keep their contracts/u
+    ]) { assert.match(text, contract, entryPoint); }
+  }
+});
+
 test("full-page portal evidence guidance stays aligned without requiring browser artifacts for API-only jobs", () => {
   const root = join(testDirectory, "..");
   for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {

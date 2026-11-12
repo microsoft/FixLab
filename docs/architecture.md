@@ -7,6 +7,31 @@ installation and usage guides.
 
 FixLab separates orchestration from repository-specific behavior.
 
+When browser validation is enabled, scenario execution is the goal: run the real
+application with expected-versus-observed assertions, not only setup, sign-in or
+a screenshot. Use live data first where permitted, then profile-approved
+synthetic/intercepted data when suitable safe records or backend access are
+unavailable. Preserve the live limitation and label synthetic UI coverage
+separately. Explicit no-interception selections cannot use this fallback.
+Continue independently runnable scenarios despite unrelated PR/build/setup
+blockers, without substituting another checkout as proof of unpublished code.
+API-only, unit-only and explicitly deferred validation retain their contracts.
+
+Generated journeys are actual discoverable `.spec` files in a job-owned folder
+under the selected Playwright configuration's `testDir`, respecting its
+`testMatch` and project selection. Verify discovery with the approved runner's
+`--list` before execution, then run the selected file/project and report its
+relative path, runner command and assertion results. Discovery alone is not
+scenario success. Preserve same-job scripts through retries; existing transient
+cleanup and product-PR exclusion rules still apply.
+
+Authentication helper output is classified transiently into fixed reason codes
+and recovery guidance for missing dependencies/browser executables, busy
+profiles, sign-in/access restrictions, configuration errors, timeouts or unknown
+failures. Raw output is never returned, logged or persisted. Both dashboard and
+connected tools expose the safe reason; this neither retries authentication nor
+grants permissions or changes browser ownership.
+
 Native runtime request classification supplies redacted, reason-specific
 diagnostics. Eligible blocked operations expose **Deny and request safe recovery**:
 the runtime receives a rejection with fixed recovery feedback, not a permission

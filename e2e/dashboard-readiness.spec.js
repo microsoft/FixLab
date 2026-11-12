@@ -301,6 +301,37 @@ test.afterAll(async () => {
   rmSync(repository, { recursive: true, force: true });
 });
 
+test("browser authentication failure exposes actionable recovery without private helper output", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-auth-diagnostic-e2e-"));
+  const profileDirectory = join(root, ".github", "fixlab");
+  mkdirSync(profileDirectory, { recursive: true });
+  const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+  profile.browserAutomation.authentication = {
+    required: true, command: "node auth-failure.cjs", statusPaths: ["ready.json"]
+  };
+  writeFileSync(join(profileDirectory, "repository-profile.json"), JSON.stringify(profile));
+  writeFileSync(join(root, "auth-failure.cjs"),
+    "process.stderr.write('Error: No tests found; private-browser-auth-sentinel'); process.exitCode = 1;");
+  const instance = createDashboardServer({
+    repository: root, packageRoot, executor, browserOwnership: () => null, browserOpener() {}
+  });
+  try {
+    const url = (await instance.listen({ port: await availablePort() })).url;
+    await openWorkflowControls(page, url);
+    expect((await page.request.post(`${url}/api/playwright/connect`)).status()).toBe(202);
+    await expect.poll(async () => (await (await page.request.get(`${url}/api/playwright/status`)).json()).running)
+      .toBe(false);
+    await page.locator("#playwright-check").click();
+    await expect(page.locator("#playwright-guidance")).toContainText("configured working directory");
+    await expect(page.locator("#playwright-status")).toHaveText("Not connected");
+    await expect(page.locator("#playwright-connect")).toBeEnabled();
+    await expect(page.locator("body")).not.toContainText("private-browser-auth-sentinel");
+  } finally {
+    await instance.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("unit-only dashboard starts from the default form without React warm-up or live options", async ({ page }) => {
   const directory = mkdtempSync(join(tmpdir(), "fixlab-unit-form-"));
   const profileDirectory = join(directory, ".github", "fixlab");

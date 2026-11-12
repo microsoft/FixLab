@@ -25,6 +25,19 @@ pre-existing tests or change configuration, credentials or browser state.
 Normal runtime permissions, prior denials, managed policy, human sign-in and
 data-safety controls still apply; this grants no runtime access or business writes.
 
+Scenario-first validation: execute the requested feature journey with
+expected-versus-observed assertions, not a setup check, sign-in or screenshot alone.
+Write/reuse one parameterized deterministic Playwright script as a discoverable .spec
+file in a job-owned folder under configured testDir; honor testMatch/project; repair its syntax/selectors.
+Verify --list before execution; report file path, runner command and assertion results.
+Try permitted live reads first; if unavailable or no safe records, use approved
+synthetic/intercepted data only under profile/mutation policy and label synthetic UI coverage separately.
+Preserve live blockers; no fake HTML, sign-in or guard bypass.
+Continue independent scenarios despite unrelated PR/build/setup blockers;
+never use another checkout to prove an unpublished fix.
+Finish independent scenarios before asking for dependent prerequisites.
+API-only, unit-only and explicitly deferred checks keep their contracts.
+
 Prefer reviewable repository-owned transient tests and configured runner commands
 over oversized inline scripts. Keep credentials inside existing reviewed
 authentication helpers. After a denial, never replay, encode, conceal, split or

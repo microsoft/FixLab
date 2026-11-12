@@ -53,7 +53,7 @@ import { quoteWindowsArgument } from "../dashboard/windows-executor.js";
 import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, SCENARIO_VALIDATION_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "../dashboard/workflow-policy.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -1091,6 +1091,9 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
       profile.browserAutomation?.mode !== "api" ? [READ_ONLY_POST_GUIDANCE] : []),
     ...(request && profile.validation?.liveTestsRequired !== false &&
       profile.browserAutomation?.mode !== "api" ? [PORTAL_SCREENSHOT_GUIDANCE] : []),
+    ...(request && !choices.deferValidation && !choices.skipLiveTests &&
+      profile.validation?.liveTestsRequired !== false &&
+      profile.browserAutomation?.mode !== "api" ? [SCENARIO_VALIDATION_GUIDANCE] : []),
     ...(request ? [componentRetrievalGuidance(profile, request)] : []),
     ...(profile.validation?.liveTestsRequired === false ? [UNIT_TEST_ONLY_GUIDANCE] : []),
     ...(readOnly ? [TRANSIENT_PLAYWRIGHT_GUIDANCE] : []),

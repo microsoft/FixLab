@@ -31,6 +31,7 @@ import {
   buildJobPrompt,
   createCacheContext,
   createCopilotExecutor,
+  createAuthenticationDiagnostics,
   createDashboardServer,
   configuredTestSynthesis,
   createProcessCompletion,
@@ -59,6 +60,37 @@ const packageRoot = new URL("..", import.meta.url).pathname.replace(
   /^\/([A-Za-z]:)/,
   "$1"
 );
+
+test("authentication diagnostics classify split output without retaining private helper details", () => {
+  const cases = [
+    ["Cannot find module 'private-helper-path'", "missing-dependency"],
+    ["Executable doesn't exist at private-browser-path", "browser-unavailable"],
+    ["ProcessSingleton: browser profile is busy", "browser-profile-busy"],
+    ["AADSTS53003: private identity and challenge", "authentication-required"],
+    ["Error: No tests found", "configuration-error"],
+    ["TimeoutError: private page locator timed out", "timeout"],
+    ["Unrecognized private authentication failure", "unknown"]
+  ];
+  for (const [output, reason] of cases) {
+    const diagnostics = createAuthenticationDiagnostics();
+    diagnostics.observe("stdout", Buffer.from("private-token-sentinel\n"));
+    const middle = Math.floor(output.length / 2);
+    diagnostics.observe("stderr", Buffer.from(output.slice(0, middle)));
+    diagnostics.observe("stderr", Buffer.from(output.slice(middle)));
+    const result = diagnostics.failure();
+    assert.equal(result.reason, reason);
+    assert.doesNotMatch(JSON.stringify(result), /private-|AADSTS53003|ProcessSingleton/);
+    assert.ok(result.message.length > 20);
+  }
+  const diagnostics = createAuthenticationDiagnostics();
+  diagnostics.observe("stdout", Buffer.from("Cannot find "));
+  diagnostics.observe("stderr", Buffer.from("module: unrelated stream"));
+  assert.equal(diagnostics.failure().reason, "unknown", "streams must not create a false diagnostic");
+  diagnostics.observe("stderr", Buffer.from("\nAADSTS53003: restricted"));
+  diagnostics.observe("stdout", Buffer.from("module 'private-dependency'"));
+  assert.equal(diagnostics.failure().reason, "authentication-required",
+    "access restrictions must not be hidden behind dependency diagnostics");
+});
 
 test("engineering summary validates detail fields, redacts sensitive text and rejects unsafe paths", () => {
   const detail = {
@@ -5117,6 +5149,27 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
     profile.browserAutomation.authentication.statusPaths = ["e2e/.auth/user.json", "e2e/.edge-profile"];
     writeFileSync(profilePath, JSON.stringify(profile));
 
+    writeFileSync(join(repository, "auth-failure.cjs"),
+      "process.stderr.write('Error: No tests found; private-auth-output-sentinel'); process.exitCode = 1;");
+    profile.browserAutomation.authentication.command = "node auth-failure.cjs";
+    writeFileSync(profilePath, JSON.stringify(profile));
+    assert.equal((await jsonRequest(url, "/api/playwright/connect", { method: "POST" })).response.status, 202);
+    const diagnosticDeadline = Date.now() + 10000;
+    do {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      status = await jsonRequest(url, "/api/playwright/status");
+    } while (status.body.running && Date.now() < diagnosticDeadline);
+    assert.equal(status.body.running, false, "failed authentication must settle");
+    assert.equal(status.body.ready, false);
+    assert.equal(status.body.lastResult.reason, "configuration-error");
+    assert.match(status.body.lastResult.message, /configured working directory/u);
+    assert.equal(compactControlResult(status.body).lastResult.reason, "configuration-error");
+    assert.doesNotMatch(JSON.stringify(status.body), /private-auth-output-sentinel/u);
+    assert.doesNotMatch(JSON.stringify((await jsonRequest(url, "/api/status")).body),
+      /private-auth-output-sentinel/u);
+    profile.browserAutomation.authentication.command = "node playwright-auth.js";
+    writeFileSync(profilePath, JSON.stringify(profile));
+
     const job = await jsonRequest(url, "/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -8914,6 +8967,48 @@ test("selected non-production data falls back to synthetic only when required", 
   assert.match(prompt, /FIXLAB_TEST with source synthetic-intercepted and mutation mode intercepted/);
   assert.match(prompt, /A synthetic pass proves the UI behavior only/);
   assert.match(prompt, /do not claim the selected backend or its data was validated/);
+});
+
+test("scenario-first browser recovery applies across modes without overriding deferred or API contracts", () => {
+  for (const mode of ["playwright-only", "validate-only", "fix-and-validate"]) {
+    const prompt = buildJobPrompt({ request: "Validate the remap behavior.", mode });
+    assert.match(prompt, /Scenario-first validation/u);
+    assert.match(prompt, /not a setup check, sign-in or screenshot alone/u);
+    assert.match(prompt, /repair its syntax\/selectors/u);
+    assert.match(prompt, /discoverable \.spec file in a job-owned folder/u);
+    assert.match(prompt, /configured testDir; honor testMatch\/project/u);
+    assert.match(prompt, /Verify --list before execution/u);
+    assert.match(prompt, /report file path, runner command and assertion results/u);
+    assert.match(prompt, /approved synthetic\/intercepted data/u);
+    assert.match(prompt, /Finish independent scenarios before asking/u);
+    assert.match(prompt, /never use another checkout to prove an unpublished fix/u);
+  }
+  for (const overrides of [
+    { testEvidence: { apiOnly: true } },
+    { testEvidence: { unitTestsOnly: true } },
+    { skipLiveTests: true },
+    { deferValidation: true, workflow: { publication: "draft" } }
+  ]) {
+    assert.doesNotMatch(buildJobPrompt({
+      request: "Preserve the selected validation contract.", mode: "fix-and-validate", ...overrides
+    }), /Scenario-first validation/u);
+  }
+});
+
+test("live-first recovery cannot offer synthetic fallback when interception is disabled", () => {
+  for (const evidence of [
+    { mutationMode: "none", selectedMutationMode: "none" },
+    { mutationMode: "intercepted", selectedMutationMode: "none" },
+    { mutationMode: "intercepted", enabled: false }
+  ]) {
+    const prompt = buildJobPrompt({
+      request: "Validate using approved reads only.", mode: "playwright-only", targetEnvironment: "dev",
+      testEvidence: { enabled: true, source: "non-production-read-only", ...evidence }
+    });
+    assert.doesNotMatch(prompt, /then fall back to synthetic-intercepted data/u);
+    assert.match(prompt, /This run does not permit synthetic interception/u);
+    assert.match(prompt, /block only dependent scenarios/u);
+  }
 });
 
 test("backend-first prompt guidance requires environment and read-only source", () => {
