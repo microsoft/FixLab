@@ -40,6 +40,12 @@ use [installation.md](installation.md) and the
 Setup still requires reviewed approvals; installing FixLab alone does not
 establish application readiness or grant permissions.
 
+For an existing dedicated runner, `fixlab onboard C:\source\application
+--reuse-setup --runtime copilot` reviews reuse in one checkout with a branch per
+job. Add `--yes` after review; add `--authenticate` for fresh proof of existing
+browser sign-in. Dependencies and private state stay in place, not copied.
+See [shared setup](docs/repository-onboarding.md#reusing-one-checkout-for-sequential-jobs).
+
 ## What you can do
 
 | Workflow | Outcome |

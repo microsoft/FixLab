@@ -260,6 +260,29 @@ fixlab setup-playwright $Repo --yes
 Verify an actual Edge launch, not merely the package version or executable
 path. Do not install through an unreviewed shared `node_modules` junction.
 
+### Reuse an existing dedicated runner setup
+
+When the user chooses sequential jobs in one configured checkout, review
+`fixlab onboard ACTUAL_RUNNER_DIRECTORY --reuse-setup --runtime copilot`.
+After approval add `--yes`. Preserve existing frontend/authentication commands
+and browser state in place; do not copy credentials into new branch folders.
+Review the profile's actual remote, base branch and branch prefix first.
+The option enables shared mode, preserves installed dependencies and verifies
+Playwright/configuration without unconditional restore. Branch-specific tests
+must still detect changed or missing dependencies.
+
+For an existing session, add `--authenticate` to run the repository's fresh
+`proofCommand` instead of redoing login when configured state is present.
+Failed proof remains a real blocker; human authentication is not bypassed.
+Ignored local commit-bound profiles can follow owned branch acquisition;
+tracked templates remain unchanged. See [shared setup](repository-onboarding.md#reusing-one-checkout-for-sequential-jobs).
+
+Before calling setup reusable, inventory the actual guard's required read-only
+bootstrap API calls, local assets, fonts and Microsoft identity resources.
+Repair narrowly through reviewed `fixlab setup-queries` and focused offline
+tests. Keep one shared policy, HTTP/transport failures and write restrictions;
+do not make each journey rediscover the same missing resources.
+
 ### 6. Put private browser state in a valid, protected location
 
 FixLab dashboard authentication `statusPaths` must resolve **inside**

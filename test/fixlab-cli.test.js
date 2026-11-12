@@ -435,6 +435,70 @@ test("onboard validates source arguments before initialization", () => {
   assert.match(result.stderr, /source checkout after --from/);
 });
 
+test("onboard reuse setup plans without changes and rejects separate worktree provisioning", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-reuse-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "--quiet", repository]).status, 0);
+    writeFileSync(join(repository, "tracked.txt"), "fixture");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "tracked.txt"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=Fixture",
+      "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "fixture"]).status, 0);
+    assert.equal(run(["init", repository], repository).status, 0);
+    const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+    const original = readFileSync(profilePath, "utf8");
+    const plan = run(["onboard", repository, "--reuse-setup"], repository);
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stdout, /Reuse existing setup in this checkout/);
+    assert.match(plan.stdout, /No files or commands changed/);
+    assert.equal(readFileSync(profilePath, "utf8"), original);
+    const conflict = run(["onboard", repository, "--reuse-setup", "--from", repository], repository);
+    assert.equal(conflict.status, 1);
+    assert.match(conflict.stderr, /not both/);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("onboard reuses browser proof without restoring dependencies or retrying failed sign-in", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-reuse-proof-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "--quiet", repository]).status, 0);
+    writeFileSync(join(repository, "tracked.txt"), "fixture");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "tracked.txt"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=Fixture",
+      "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "fixture"]).status, 0);
+    assert.equal(run(["init", repository], repository).status, 0);
+    const frontend = join(repository, "frontend");
+    const playwright = join(frontend, "node_modules", "@playwright", "test");
+    mkdirSync(playwright, { recursive: true });
+    writeFileSync(join(playwright, "index.js"), "exports.chromium = { launch: async () => ({ close: async () => {} }) };");
+    mkdirSync(join(frontend, ".edge-profile"));
+    writeFileSync(join(frontend, "proof.cjs"), 'require("node:fs").writeFileSync("proof-ran.txt","fresh");process.exit(7);');
+    writeFileSync(join(frontend, "login.cjs"), 'require("node:fs").writeFileSync("login-ran.txt","unexpected");');
+    const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+    const profile = JSON.parse(readFileSync(profilePath));
+    profile.validation.commands = {};
+    profile.browserAutomation.authentication = {
+      required: true, command: "node login.cjs", proofCommand: "node proof.cjs", statusPaths: [".edge-profile"]
+    };
+    writeFileSync(profilePath, JSON.stringify(profile));
+    const result = run(["onboard", repository, "--reuse-setup", "--yes", "--authenticate"], repository);
+    assert.equal(result.status, 7, result.stderr);
+    assert.match(result.stdout, /Existing dependencies preserved/);
+    assert.match(result.stderr, /No automatic login retry/);
+    assert.equal(readFileSync(join(frontend, "proof-ran.txt"), "utf8"), "fresh");
+    assert.equal(existsSync(join(frontend, "login-ran.txt")), false);
+    assert.equal(JSON.parse(readFileSync(profilePath)).worktreeSetup.mode, "shared");
+    writeFileSync(join(frontend, "proof.cjs"), 'require("node:fs").writeFileSync("proof-ran.txt","verified");');
+    const verified = run(["onboard", repository, "--reuse-setup", "--yes", "--authenticate"], repository);
+    assert.match(verified.stdout, /Existing browser sign-in verified/);
+    assert.equal(readFileSync(join(frontend, "proof-ran.txt"), "utf8"), "verified");
+    assert.equal(existsSync(join(frontend, "login-ran.txt")), false);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test("Windows bootstrap keeps NVM and Node changes explicit", () => {
   const installer = readFileSync(
     fileURLToPath(new URL("../scripts/install-fixlab.ps1", import.meta.url)),

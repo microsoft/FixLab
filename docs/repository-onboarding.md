@@ -319,6 +319,39 @@ permissions or API authentication blocks live testing, not a synthetic pass.
 
 ### Reusing one checkout for sequential jobs
 
+For an already configured dedicated checkout, review and enable reuse without
+recreating its setup:
+
+```powershell
+fixlab onboard C:\source\application-runner --reuse-setup --runtime copilot
+fixlab onboard C:\source\application-runner --reuse-setup --runtime copilot --yes
+```
+
+The plan preserves existing commands, helper files, dependencies and browser
+state in place. It requires the profile's real remote, base branch and branch
+naming settings; it does not guess them, start a job or switch branches.
+Approval enables shared mode and runs Playwright/configuration checks without
+running restore commands. Changed branch manifests still need validation and,
+when necessary, an explicit `fixlab prepare` restore.
+
+Add `--authenticate` to the approved command to verify an existing browser
+session with its configured `proofCommand` when all contained `statusPaths`
+exist. A failed proof is reported, not silently retried as login or treated as
+success. Use the existing `fixlab authenticate ... --yes` operation for human
+sign-in when needed. API authentication keeps its separate fresh-job contract.
+
+If the local profile already has `validation.expectedCommit`, reuse enables
+`worktreeSetup.bindExpectedCommit` and refreshes that pin after owned branch
+acquisition or resume. This requires a Git-ignored local profile; tracked
+profiles are never rewritten. Keep a reusable template separately. Changed
+profile revisions still invalidate prior authentication/write approvals.
+Neither a refreshed pin nor a directory's presence proves authenticated access.
+
+Repair a legacy browser guard once through reviewed `fixlab setup-queries`,
+including required read-only bootstrap APIs, local assets, UI fonts and identity
+resources in the repository's shared policy. Do not copy a one-off journey's
+allowlist into every future test or broadly allow an origin to avoid a blocker.
+
 Opt in to shared mode in a dedicated runner checkout's repository profile:
 
 ```json
