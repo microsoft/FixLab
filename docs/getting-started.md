@@ -44,6 +44,13 @@ Follow the conversation and **Run details**. When **Action needed** appears,
 read the blocker, supply the missing information, and use **Resume FixLab**
 when offered. Review runtime permission requests separately.
 
+For a live decision, the conversation shows the exact question and **Choose
+next step** opens its response panel. Choice-only questions must use an offered
+answer; the message composer cannot silently queue a different job as a reply.
+Permission waits instead offer **Review permission** and explicit allow/deny
+controls. Read-only MCP tools advertise read-only metadata; hosts still apply
+their own permission policies.
+
 Connected Copilot status shows whether execution is waiting for input or
 permission. For a non-sensitive live question, answer through the host's
 question UI; the reply targets that exact question in the same executor.
@@ -73,6 +80,17 @@ Synthetic checks do not prove the real backend works.
 Portal browser evidence uses full-page Playwright screenshots (`fullPage: true`),
 with sensitive regions masked. Close-ups are additional evidence, not a substitute.
 API-only and unit-test-only jobs do not require browser screenshots.
+
+By default, browser evidence covers the journey, not only its final grid:
+search/entry, mode selection, input/import preview, and verified result. Open
+**Selected job Playwright evidence** and choose **Refresh evidence**. Numbered
+screenshots are shown in step order, with the newest scenario directory first.
+Static labels and approved test values stay readable; account details and
+unrelated private data remain masked. For imports, evidence identifies the exact
+uploaded bytes by filename and SHA-256 and includes a labeled safe input preview;
+the original input is retained only when repository policy permits it.
+Expected/observed comparisons follow actual assertions. Save/Submit and
+persistence are not verified unless separately authorized and exercised.
 
 Fix-and-validate may produce an authorized draft PR while validation continues.
 Validate-only produces findings and evidence, not a new PR.

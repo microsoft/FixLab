@@ -855,6 +855,29 @@ test("runtime guidance distinguishes Allow all exceptions from questions", async
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
 });
 
+test("conversation shows the exact next-step question and does not queue a choice-only reply", async ({ page }) => {
+  const job = pendingQuestionJob("Validation cannot use the sibling worktree. Which next step?");
+  job.runtimeRequests[0].allowFreeform = false;
+  job.runtimeRequests[0].choices = ["Configure the target worktree", "Leave validation blocked"];
+  const posts = [];
+  await mockChatWorkspace(page, { job });
+  page.on("request", request => { if (request.method() === "POST") { posts.push(request.url()); } });
+  await page.goto(baseUrl);
+  await expect(page.locator("#conversation-state-detail")).toHaveText(job.runtimeRequests[0].details);
+  await expect(page.locator("#needs-response")).toHaveText("Choose next step");
+  await expect(page.locator("#composer-question")).toContainText("Choose a next step");
+  await expect(page.locator("#start-button")).toBeDisabled();
+  await page.locator("#job-form").evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await expect(page.locator("#form-error")).toContainText("Choose a next step from the offered answers");
+  await expect(page.locator("#start-button")).toBeDisabled();
+  await page.locator("#needs-response").click();
+  await expect(page.getByRole("button", { name: "Configure the target worktree", exact: true })).toBeVisible();
+  expect(posts).toEqual([]);
+  await page.locator("#new-conversation").click();
+  await expect(page.locator("#start-button")).toBeEnabled();
+  await expect(page.locator("#composer-question")).toBeHidden();
+});
+
 test("native Copilot prompts allow once, deny and answer choices in the same live job", async ({ page }) => {
   const directory = mkdtempSync(join(tmpdir(), "fixlab-native-ui-"));
   mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });

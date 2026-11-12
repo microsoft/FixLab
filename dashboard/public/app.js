@@ -643,7 +643,7 @@ function setRuntimeBusy(busy) {
     element.disabled = busy;
   });
   if (composerQuestionSelection) {
-    startButton.disabled = busy;
+    startButton.disabled = busy || !composerQuestionSelection.allowFreeform;
   }
 }
 
@@ -788,7 +788,8 @@ async function respondToRuntime(action, choice, scope, answer = runtimeAnswer.va
 
 function renderComposerQuestion(job, isActive) {
   const pending = isActive ? job?.runtimeRequests?.[0] : null;
-  const question = pending?.kind === "question" && pending.allowFreeform ? pending : null;
+  const question = pending?.kind === "question" ? pending : null;
+  const freeform = question?.allowFreeform === true;
   const key = question ? `${dashboardInstanceId}:${job.id}:${question.id}` : null;
   if (composerQuestionSelection && composerQuestionSelection.key !== key && requestInput.value) {
     requestInput.value = "";
@@ -797,20 +798,29 @@ function renderComposerQuestion(job, isActive) {
     composerReplyResult.textContent = "The question context changed. Its unsent reply was cleared; review the current question before answering.";
   }
   composerQuestionSelection = question ? {
-    key, instanceId: dashboardInstanceId, jobId: job.id, requestId: question.id
+    key, instanceId: dashboardInstanceId, jobId: job.id, requestId: question.id,
+    allowFreeform: freeform
   } : null;
   composerQuestion.hidden = !question;
-  composerQuestion.textContent = question?.details ?? "";
+  composerQuestion.textContent = question
+    ? `${question.details}${freeform ? "" : " Choose a next step in the response panel above; a new message does not answer this question."}`
+    : "";
   document.querySelector('label[for="request"]').textContent = question
-    ? "Reply to Copilot's question" : "Bug or required enhancement";
+    ? freeform ? "Reply to Copilot's question" : "Choose a next step above"
+    : "Bug or required enhancement";
   requestInput.maxLength = question ? 4000 : 10000;
   requestInput.placeholder = question
-    ? "Reply to the question above. Never enter passwords, tokens or MFA codes."
+    ? freeform ? "Reply to the question above. Never enter passwords, tokens or MFA codes."
+      : "Use an offered answer above, or New conversation for a separate request."
     : "Describe what you want to fix or check.";
-  if (question) {
+  if (freeform) {
     document.querySelector(".composer-heading span").textContent = "Reply to current job";
     startButton.textContent = "Send reply";
     startButton.disabled = runtimeBusy;
+  } else if (question) {
+    document.querySelector(".composer-heading span").textContent = "Choose next step above";
+    startButton.textContent = "Choose next step above";
+    startButton.disabled = true;
   }
 }
 
@@ -1322,12 +1332,17 @@ function renderConversation(job, isActive) {
     job?.status === "blocked" || job?.status === "failed")));
   document.querySelector("#conversation-state").classList.toggle("waiting", waiting);
   needsResponse.hidden = !waiting;
+  needsResponse.textContent = pending?.kind === "question"
+    ? "Choose next step"
+    : pending?.kind === "permission" ? "Review permission" : "Review and respond";
   if (!job) {
     conversationTitle.textContent = "Ready when you are";
     conversationDetail.textContent = "Describe an outcome. Run options control the mode and environment; nothing runs until you send it.";
   } else if (pending) {
     conversationTitle.textContent = pending.kind === "permission" ? "Waiting for your permission" : "Waiting for your answer";
-    conversationDetail.textContent = pending.title;
+    conversationDetail.textContent = pending.kind === "question"
+      ? pending.details
+      : `${pending.title}. Next step: review the exact request below, then allow or deny it. No execution is progressing while this decision is pending.`;
   } else if (job.permissionRequest) {
     conversationTitle.textContent = "Access review required";
     conversationDetail.textContent = "The executor is paused. Review the exact folder scope; no access has been granted.";
@@ -2689,6 +2704,9 @@ form.addEventListener("submit", async (event) => {
           activeJob?.id !== replySelection.jobId) {
         throw new Error("The question changed. Review the current request before replying.");
       }
+      if (!replySelection.allowFreeform) {
+        throw new Error("Choose a next step from the offered answers above, or use New conversation for a separate request.");
+      }
       if (selectedScreenshots.length) {
         throw new Error("Question replies support text only. Remove the images before replying, or choose New conversation to start a separate job.");
       }
@@ -2789,7 +2807,7 @@ form.addEventListener("submit", async (event) => {
       composerReplyResult.classList.add("error");
       composerReplyResult.hidden = false;
     }
-    startButton.disabled = false;
+    startButton.disabled = composerQuestionSelection?.allowFreeform === false;
   }
 });
 

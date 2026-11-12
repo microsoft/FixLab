@@ -156,6 +156,17 @@ before capture; never include credentials or sign-in screens. Close-ups may
 supplement, not replace, the full-page screenshot. API-only and unit-test-only
 runs require no browser screenshot.
 
+By default, capture a numbered journey per scenario in repository-owned
+test-results: entry/search, mode selection, input/import preview, and verified
+result (01-search.png, 02-input.png, etc.), not just a final grid. Keep static
+labels and approved test values readable while masking account details and
+unrelated private data. For imports, compute SHA-256 from the exact bytes passed
+to the upload; retain only policy-approved inputs, filename/digest, and a labeled
+safe preview of those same bytes. Compare expected versus observed values after
+assertions. Never fabricate application screens; report incomplete evidence if
+masking hides required values. Save/Submit and persistence remain unverified
+unless separately authorized and asserted.
+
 When `browserAutomation.mode` is `api`, validate the backend with Playwright
 `APIRequestContext`, not a frontend or browser. This overrides browser-only
 startup, screenshots, video and profile-lock requirements, not safety gates.

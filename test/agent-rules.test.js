@@ -27,6 +27,11 @@ test("full-page portal evidence guidance stays aligned without requiring browser
     assert.match(text, /page\.screenshot\(\{ path, fullPage: true \}\)/u, entryPoint);
     assert.match(text, /[Mm]ask sensitive regions/u, entryPoint);
     assert.match(text, /API-only and unit-test-only runs require no browser screenshot/u, entryPoint);
+    assert.match(text, /numbered journey per scenario/u, entryPoint);
+    assert.match(text, /SHA-256/u, entryPoint);
+    assert.match(text, /exact bytes passed to the upload/u, entryPoint);
+    assert.match(text, /expected versus observed/u, entryPoint);
+    assert.match(text, /Save\/Submit and persistence remain unverified/u, entryPoint);
   }
 });
 

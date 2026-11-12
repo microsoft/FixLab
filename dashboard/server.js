@@ -1286,7 +1286,7 @@ export function buildJobPrompt({
     ? `- Record the focused Playwright journey as non-sensitive video evidence using repository-supported Playwright video recording.
 - Save the recording as WebM or MP4 under the repository-owned test-results, playwright-report, or artifacts directory. Keep it under 50 MiB and capture only the application surface: no credentials, browser profiles, personal windows, or unrelated data.
 - Keep the required screenshot evidence as the lightweight review artifact. If recording is unavailable, report that limitation explicitly instead of claiming video evidence exists.`
-    : "- Playwright video recording was not requested. Preserve the required screenshot evidence and any repository-default traces.";
+    : "- No video requested; preserve screenshots and repository-default traces.";
   const manualLocalhostGuidance = manualLocalhostTest
     ? `- Manual React localhost validation is enabled independently of Playwright. After required automated validation finishes, start or reuse only the profile-defined frontend and wait for its health check at ${manualLocalhostUrl || "the profile-defined local health URL"}.
 ${process.platform === "win32" ? "- Windows executor children are job-contained and terminated when the agent exits. For a manual gate, use a dashboard-managed frontend outside the executor; the user can start it with Start React. Verify that it serves the validated checkout. If no independently managed server serves that checkout, block with that exact prerequisite instead of retaining an executor child or validating a baseline checkout.\n" : ""}- Dashboard-managed frontends remain under dashboard session controls; do not terminate them from the agent.
@@ -1295,7 +1295,7 @@ ${process.platform === "win32" ? "- Windows executor children are job-contained 
 - Do not run or rerun Playwright solely because this manual option is enabled.
 - If an authorized draft PR already exists, keep it draft with the manual gate pending; otherwise emit pr skipped because manual confirmation is pending.
 - When the dashboard resumes this session with the user's manual result, mark live-test passed or failed accordingly, stop only frontend processes owned by the current job (not a dashboard-managed server), and continue to the gated PR outcome.`
-    : "- Stop FixLab-owned applications after automated browser validation unless another explicit workflow requirement needs them.";
+    : "- After browser validation stop only FixLab-owned apps, unless explicitly required running.";
   const branchNamingGuidance = branchNaming
     ? `- Repository branch naming is configured as ${branchNaming.prefix}. Create or reuse only branches beneath this prefix. Do not substitute a runtime, bot, or agent name for the configured user ID.`
     : "- Follow the repository's existing branch naming policy; do not invent a bot-specific prefix.";
@@ -1311,12 +1311,12 @@ ${process.platform === "win32" ? "- Windows executor children are job-contained 
   if (playwrightOnly) {
     return `FixLab output protocol (follow before any tool call):
 - First emit FIXLAB_STAGE|intake|running|Accepted the request and starting intake.
-- Before each stage emit FIXLAB_STAGE|stage|running|next action and its terminal outcome before the next stage. Never defer or batch stage markers.
+- Emit FIXLAB_STAGE|stage|running|next action before tools and its terminal outcome before advancing. Never defer or batch stage markers.
 - Markers are literal assistant response lines, never shell, files, tool results or code blocks.
 - Stages: ${FIXLAB_STAGES.join(", ")}. Terminal statuses: passed, skipped, blocked, failed. Finish every stage; never report skipped checks as passed.
-- FIXLAB_ACTIVITY|stage|summary: meaningful evidence/blockers only, at most twice per stage unless a new blocker changes the plan. No secrets or private data.
+- FIXLAB_ACTIVITY|stage|summary: evidence/blockers only; at most twice per stage unless a blocker changes. No secrets/private data.
 - Emit FIXLAB_TEST|source|mutation-mode|scenario on scenario selection and data/mutation changes. Sources: ${[...testDataSources].join(", ")}. Mutation modes: ${[...mutationModes].join(", ")}.
-- Expected bug IDs: ${bugResults.map((bug) => bug.id).join(", ") || "none"}. For each, emit FIXLAB_BUG|id|outcome|owner|summary before finishing. Outcomes: ${[...bugOutcomeStatuses].join(", ")}. Attribute upstream limitations honestly.
+- Expected bug IDs: ${bugResults.map((bug) => bug.id).join(", ") || "none"}. Emit FIXLAB_BUG|id|outcome|owner|summary for each. Outcomes: ${[...bugOutcomeStatuses].join(", ")}. Attribute upstream limitations.
 
 Run a FixLab playwright-only job.
 Playwright-only mode: ${apiOnly ? "API" : "browser"} validation, not implementation.
@@ -1340,10 +1340,10 @@ ${apiOnly && useDeployedBackend ? "useDeployedBackend=true: use the configured d
 - Skip source diagnosis, separate reproduction, implementation, diff review and unrelated non-browser gates. The diagnosis, reproduce, fix, review, and pr stages must be explicitly skipped unless their own required prerequisite fails.
 - Do not edit files other than job-owned transient Playwright journeys and runner evidence. Do not commit, push, create or update pull requests, or change repository configuration.
 - Never overwrite pre-existing tests.
-- Derive the focused Playwright journey from the request. Batch-read profile, browser configuration, fixture and nearest test; prefer an existing journey or retained script. Inspect implementation only for missing selectors/prerequisites.
-- Generate one parameterized deterministic Playwright script for repeated rows/scenarios; use the repository runner, not per-row/field model round-trips.
-- Keep the same-job script/results through retries and human waits; change only failing steps. Never delete running artifacts. Remove transient source after validation and continuations finish; permanent coverage needs authorization.
-- Preserve forms and human-entered values; never replay stale snapshots or successful mutations. Do not copy browser state or credentials; sign-in/MFA remain human-controlled.
+- Batch-read profile, browser config, fixture and nearest test; prefer an existing journey or retained script. Inspect implementation only for missing selectors/prerequisites.
+- Use one parameterized deterministic Playwright script and repository runner, not per-row/field model round-trips.
+- Keep the same-job script/results through retries/waits; change only failing steps. Never delete running artifacts. Remove transient source after execution/continuations; permanent coverage needs authorization.
+- Preserve human-entered values; never replay stale snapshots/successful mutations. Do not copy browser state or credentials; human-controlled sign-in/MFA.
 - Do not reinstall dependencies that are already available. Run only minimum setup required by the repository profile: verify browser authentication, required applications and the focused Playwright journey. State files alone do not prove sign-in.
 ${uiScenarioGuidance}
 ${environmentGuidance}
@@ -1354,10 +1354,10 @@ ${testEvidence.allowPostRequests === true
 ${videoGuidance}
 ${manualLocalhostGuidance}
 - ${PORTAL_SCREENSHOT_GUIDANCE}
-- Run verbose commands through fixlab exec --stage live-test -- <command> [args...]; quote '--' in Windows PowerShell. Keep compact results and bounded failure diagnostics. Never reuse cached live-browser, authentication or external-data results.
-- Continue independent safe steps after unrelated failures, never across failed prerequisites. Mark required full regression deferred, not passed.
-- Do not delegate one continuous journey or rescan the repository; batch reads and bound output.
-- Missing decisions/authentication/authorization block only the affected stage. Use native live questions below; never infer approval, waive policy or collect credentials.
+- Use fixlab exec --stage live-test -- <command>; quote '--' in PowerShell. Bound diagnostics; no cached browser/auth/external-data results.
+- Continue independent safe work, never across failed prerequisites. Full regression deferred is not passed.
+- Do not delegate one continuous journey or rescan; batch reads.
+- Missing decisions/auth/access block affected stages only. Use native questions; never infer approval, waive policy or collect credentials.
 - Finish with exact passed/failed assertions, skipped gates, blockers and risks before task_complete.
 
 Request:
@@ -1400,10 +1400,10 @@ ${!unverifiedDraft && allowsDraftIntegrationDeferral({ mode, workflow, manualLoc
 ${skipLiveTests || useDeployedBackend ? `${OPTIONAL_INTEGRATION_GUIDANCE}\nSelected job choices: skipLiveTests=${skipLiveTests}; useDeployedBackend=${useDeployedBackend}; deferValidation=${deferValidation}.` : ""}
 ${!readOnly && !unverifiedDraft ? AUTONOMOUS_RECOVERY_GUIDANCE : ""}
 ${setupRecovery.length ? `Offline setup diagnostics to repair when needed for this task:\n${JSON.stringify(setupRecovery)}` : ""}
-- For a fix request, begin with the smallest known reproduction, using an approved existing application when appropriate; prepare the local stack only when needed to exercise changed code. Do not claim a deployed baseline proves an unpublished fix.
-- Before validation in a new isolated worktree, plan \`fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME\`. After scoped setup approval, add \`--yes\`. The source profile declares non-sensitive configuration in \`worktreeSetup.files\`. Never copy credentials or browser state. Missing configuration, authentication or denied runtime access is a blocker for the dependent check; do not retry unchanged approvals or grant blanket path access. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration; report missing prerequisites as blocked.
-- Inspect current git status and effective diff; search task-relevant symbols and files, not the whole repository.
-- Reuse this job/session context. Do not reread unchanged files, repeat diagnosis, reinstall available dependencies or rerun broad checks without new evidence.
+- Start with the smallest reproduction on an approved app; prepare a stack only to exercise changed code. A deployed baseline never proves an unpublished fix.
+- New worktree: plan \`fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME\`; add \`--yes\` after scoped setup approval. Copy only declared \`worktreeSetup.files\`. Never copy credentials or browser state; do not retry unchanged approvals or grant blanket path access. Missing prerequisites block dependent checks. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration.
+- Inspect git status/effective diff; search task-relevant symbols/files, not the whole repository.
+- Reuse job context. No unchanged file reads/diagnosis, dependency reinstalls or broad reruns without new evidence.
 - Treat commit changes and repository-profile or instruction changes as invalidation boundaries.
 ${readOnly ? "" : requestGuidance}
 ${readOnly ? "" : pullRequestGuidance}
@@ -3588,7 +3588,7 @@ function collectPlaywrightArtifacts(root, directory = root, depth = 0) {
 }
 
 function listPlaywrightArtifacts(repository, { since = null } = {}) {
-  return playwrightArtifactRoots(repository)
+  const artifacts = playwrightArtifactRoots(repository)
     .flatMap((root) =>
       collectPlaywrightArtifacts(root)
         .map((artifact) => ({
@@ -3605,6 +3605,26 @@ function listPlaywrightArtifacts(repository, { since = null } = {}) {
         !since || Date.parse(artifact.updatedAt) >= Date.parse(since)
     )
     .slice(0, MAX_PLAYWRIGHT_ARTIFACTS);
+  if (!artifacts.some((artifact) => /^\d{2,3}[-_]/u.test(artifact.name))) {
+    return artifacts;
+  }
+  const journeys = new Map();
+  for (const artifact of artifacts) {
+    const directory = dirname(artifact.path);
+    if (!journeys.has(directory)) {journeys.set(directory, []);}
+    journeys.get(directory).push(artifact);
+  }
+  return [...journeys.values()].flatMap((journey) => {
+    if (!journey.some((artifact) => /^\d{2,3}[-_]/u.test(artifact.name))) {return journey;}
+    return journey.sort((left, right) => {
+      const leftStep = left.name.match(/^(\d{2,3})[-_]/u)?.[1];
+      const rightStep = right.name.match(/^(\d{2,3})[-_]/u)?.[1];
+      if (leftStep === undefined && rightStep === undefined) {return 0;}
+      if (leftStep === undefined) {return 1;}
+      if (rightStep === undefined) {return -1;}
+      return Number(leftStep) - Number(rightStep) || left.name.localeCompare(right.name);
+    });
+  });
 }
 
 function resetJobForResume(job) {

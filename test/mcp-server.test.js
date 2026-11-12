@@ -64,6 +64,11 @@ test("MCP server initializes and lists FixLab tools", async () => {
       listed.result.tools.map((tool) => tool.name),
       ["fixlab_inspect_repository", "fixlab_validation_commands", "fixlab_dashboard_status", "fixlab_dashboard_reply", "fixlab_dashboard_control"]
     );
+    for (const tool of listed.result.tools) {
+      assert.equal(tool.annotations?.readOnlyHint,
+        ["fixlab_inspect_repository", "fixlab_validation_commands", "fixlab_dashboard_status"].includes(tool.name),
+        tool.name);
+    }
   } finally {
     await client.stop();
   }

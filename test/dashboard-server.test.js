@@ -10,6 +10,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync
 } from "node:fs";
 import { createServer as createHttpServer, request as createHttpRequest } from "node:http";
@@ -5142,12 +5143,25 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
     const nestedDirectory = join(screenshotDirectory, "nested-journey");
     mkdirSync(nestedDirectory);
     writeFileSync(join(nestedDirectory, "nested-proof.png"), screenshot);
+    const flowDirectory = join(screenshotDirectory, "latest-flow");
+    mkdirSync(flowDirectory);
+    const capturedAt = Date.now() / 1000 + 1;
+    for (const [index, name] of [
+      "01-search.png", "02-input-preview.png", "03-verified-result.png"
+    ].entries()) {
+      const path = join(flowDirectory, name);
+      writeFileSync(path, screenshot);
+      utimesSync(path, capturedAt + index / 10, capturedAt + index / 10);
+    }
     const artifacts = await jsonRequest(
       url,
       `/api/playwright/artifacts?jobId=${job.body.job.id}`
     );
     assert.equal(artifacts.response.status, 200);
-    assert.equal(artifacts.body.artifacts.length, 3);
+    assert.equal(artifacts.body.artifacts.length, 6);
+    assert.deepEqual(artifacts.body.artifacts.slice(0, 3).map((artifact) => artifact.name), [
+      "01-search.png", "02-input-preview.png", "03-verified-result.png"
+    ]);
     const imageArtifact = artifacts.body.artifacts.find(
       (artifact) => artifact.name === "hold-option.png"
     );
