@@ -425,7 +425,10 @@ test("runtime questions and replies allow credential-related test diagnostics wi
     const request = { ...runtimeQuestionPrompt({ question }), id: randomUUID() };
     state.bridge.receive(request);
     assert.equal(runtimeConversationQuestion(request).responseChannel, "conversation");
-    for (const answer of ["PIN: 1234", "Refresh token: synthetic-value"]) {
+    for (const answer of [
+      "PIN: 1234", "Refresh token: synthetic-value",
+      "My PIN is 1234", "My password is synthetic-value", "My API keys are synthetic-values"
+    ]) {
       assert.throws(() => state.bridge.respond(request.id, { action: "answer", answer }), /non-sensitive/);
     }
     const answer = "The password reset test fails";

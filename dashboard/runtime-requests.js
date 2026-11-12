@@ -12,7 +12,7 @@ const secret = /authorization|bearer\s|(?:password|passwd|secret|token|cookie|ap
 const credentialQuestion = /\b(?:password|passphrase|passwd|passcode|credential|verification\s+code|one[ -]time\s+(?:code|password)|(?:MFA|2FA|security|recovery|backup)\s+code|OTP|TOTP|PIN|(?:access|refresh|id|session|authentication)\s*[_-]?\s*token|API\s*[_-]?\s*key|private\s*[_-]?\s*key|client\s*[_-]?\s*secret|cookie|secret)s?\b/i;
 const credentialSolicitation = /\b(?:enter|paste|provide|send|share|supply|submit|type|input|give|tell|what\s+(?:is|are)|required|needed)\b/i;
 const credentialTest = new RegExp(`${credentialQuestion.source}(?:[-\\s]+(?:reset|validation|rotation|expiration))?[-\\s]+(?:tests?|specs?)\\b`, "gi");
-const credentialValue = new RegExp(`${credentialQuestion.source}\\s*[:=]`, "i");
+const credentialValue = new RegExp(`${credentialQuestion.source}(?:\\s*[:=]|\\s+(?:is|are)\\s+\\S)`, "i");
 const credentialPath = /(?:^|[\\/])(?:\.auth|\.edge-profile|\.ssh|\.aws|\.azure|\.env(?:\.[^\\/]*)?|credentials(?:\.[^\\/]*)?)(?:[\\/]|$)/i;
 const permissionBlockReasons = {
   unsupported: "The runtime supplied an unsupported or incomplete request.",
