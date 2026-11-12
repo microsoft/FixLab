@@ -10,6 +10,9 @@ export function validateToolApprovalMode(value = "ask") {
 }
 const secret = /authorization|bearer\s|(?:password|passwd|secret|token|cookie|api[_-]?key)\s*["':=]|(?:gh[pousr]_|github_pat_|eyJ)[A-Za-z0-9_-]{16,}|https?:\/\/[^/\s]+:[^/\s]+@|[?&](?:sig|code|key|access_token|client_secret)=|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
 const credentialQuestion = /\b(?:password|passphrase|passwd|passcode|credential|verification\s+code|one[ -]time\s+(?:code|password)|(?:MFA|2FA|security|recovery|backup)\s+code|OTP|TOTP|PIN|(?:access|refresh|id|session|authentication)\s*[_-]?\s*token|API\s*[_-]?\s*key|private\s*[_-]?\s*key|client\s*[_-]?\s*secret|cookie|secret)s?\b/i;
+const credentialSolicitation = /\b(?:enter|paste|provide|send|share|supply|submit|type|input|give|tell|what\s+(?:is|are)|required|needed)\b/i;
+const credentialTest = new RegExp(`${credentialQuestion.source}(?:[-\\s]+(?:reset|validation|rotation|expiration))?[-\\s]+(?:tests?|specs?)\\b`, "gi");
+const credentialValue = new RegExp(`${credentialQuestion.source}\\s*[:=]`, "i");
 const credentialPath = /(?:^|[\\/])(?:\.auth|\.edge-profile|\.ssh|\.aws|\.azure|\.env(?:\.[^\\/]*)?|credentials(?:\.[^\\/]*)?)(?:[\\/]|$)/i;
 const permissionBlockReasons = {
   unsupported: "The runtime supplied an unsupported or incomplete request.",
@@ -30,6 +33,11 @@ export const PERMISSION_RECOVERY_GUIDANCE =
 export function safeRuntimeText(value, limit = 8192) {
   return typeof value === "string" && value.length <= limit &&
     !secret.test(value) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
+}
+
+function requestsCredentials(value) {
+  return credentialQuestion.test(value) &&
+    (credentialSolicitation.test(value) || credentialQuestion.test(value.replace(credentialTest, "")));
 }
 
 export function validateSourceEditReview(value) {
@@ -147,9 +155,9 @@ export function runtimePermissionPrompt(request) {
 export function runtimeQuestionPrompt(request) {
   const choices = request?.choices ?? [];
   if (!safeRuntimeText(request?.question, 4000) ||
-      credentialQuestion.test(request.question) ||
+      requestsCredentials(request.question) ||
       !Array.isArray(choices) || choices.length > 20 ||
-      choices.some((choice) => !safeRuntimeText(choice, 1000) || credentialQuestion.test(choice))) {
+      choices.some((choice) => !safeRuntimeText(choice, 1000) || requestsCredentials(choice))) {
     throw new Error("Copilot requested sensitive, unsupported or oversized input. Complete authentication in the normal browser; never enter credentials in FixLab.");
   }
   if (choices.length === 0 && request.allowFreeform === false) {
@@ -167,8 +175,8 @@ export function runtimeQuestionPrompt(request) {
 
 export function runtimeConversationQuestion(request) {
   const canAnswer = request.kind === "question" &&
-    [request.details, ...request.choices].every((value) =>
-      safeRuntimeText(value, 4000) && !credentialQuestion.test(value) && !/https?:\/\//i.test(value));
+    [request.title, request.details, ...request.choices].every((value) =>
+      safeRuntimeText(value, 4000) && !requestsCredentials(value) && !/https?:\/\//i.test(value));
   if (canAnswer) {
     return {
       kind: "runtime-question",
@@ -211,7 +219,7 @@ export function createRuntimeRequestBridge({ send, onChange }) {
           !Array.isArray(value.choices) || value.choices.length > 20 ||
           value.choices.some((choice) => !safeRuntimeText(choice, 1000)) ||
           (value.kind === "question" &&
-            [value.details, ...value.choices].some((text) => credentialQuestion.test(text))) ||
+            [value.title, value.details, ...value.choices].some((text) => requestsCredentials(text))) ||
           typeof value.canApprove !== "boolean" ||
           typeof value.allowFreeform !== "boolean" ||
           (value.perAction !== undefined &&
@@ -288,7 +296,7 @@ export function createRuntimeRequestBridge({ send, onChange }) {
           result = { ...result, answer: request.choices[choice], wasFreeform: false };
         } else if (choice === undefined && request.allowFreeform &&
             safeRuntimeText(answer, 4000) && answer.trim() &&
-            !credentialQuestion.test(answer)) {
+            !credentialValue.test(answer)) {
           result = { ...result, answer, wasFreeform: true };
         } else {
           throw new Error("Select an available choice or supply a non-sensitive answer.");

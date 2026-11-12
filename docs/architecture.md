@@ -20,6 +20,9 @@ restarting stages or copying the answer into logs/history. Questions containing
 URLs remain dashboard-only so redacted destinations cannot be blindly approved.
 Credential-entry requests, including API keys, refresh tokens and PINs, are
 rejected before either input channel, including direct question transport.
+This includes displayed titles, details and choices. Diagnostic questions about
+credential-related tests and non-sensitive diagnostic answers remain supported;
+credential solicitation and answers containing credential values remain blocked.
 Native permissions stay in the browser panel; connected status exposes only
 fixed reason codes and recovery guidance, never commands, diffs or grant buttons.
 Separately, `fixlab_nonproduction_post` mediates DEV/PPE/SIT/UAT writes through each
@@ -47,6 +50,11 @@ journeys without narrowing PPE to reads or treating every POST as a write.
 Browser requests are serialized; failed/ambiguous attempts revoke the shared
 grant without retrying pending actions. Other environment/POST-only scopes
 remain unchanged.
+
+The private relay allows at most 16 pending requests. Its bounded transport
+deadline includes queue time (20 seconds per slot, at most 320 seconds total);
+the upstream dispatch still has its separate 15-second limit. A slow earlier
+request does not consume a later request's dispatch budget.
 
 For broader DEV validation, the separate **Allow all DEV API writes for this job**
 checkbox exposes `fixlab_dev_write` for POST/PUT/PATCH/DELETE on exact reviewed

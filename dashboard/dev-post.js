@@ -48,7 +48,7 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
     }
     for (const base of configuration.baseUrls) {
       const url = new URL(base);
-      const labels = [...url.hostname.split(/[.-]/u), ...url.pathname.split("/")].map((value) => {
+      const labels = `${url.hostname}${url.pathname}`.split(/[./_-]/u).map((value) => {
         const label = value.toLowerCase();
         return label === "development" ? "dev" : label;
       });

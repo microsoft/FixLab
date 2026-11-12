@@ -4,6 +4,8 @@ import { safeRuntimeText } from "./runtime-requests.js";
 
 const requestLimit = 8192;
 const responseLimit = 1024 * 1024;
+const maxPendingRequests = 16;
+const transportTimeoutMs = 20000;
 const channelNames = [
   "FIXLAB_BROWSER_POST_URL", "FIXLAB_BROWSER_POST_KEY", "FIXLAB_BROWSER_POST_JOB",
   "FIXLAB_BROWSER_POST_ENV", "FIXLAB_BROWSER_POST_HELPER"
@@ -48,7 +50,7 @@ export async function startBrowserPostBridge({ send, revoke, jobId, environment,
       res.writeHead(403).end();
       return;
     }
-    if ((pending && !serializeRequests) || pending >= 16) {
+    if ((pending && !serializeRequests) || pending >= maxPendingRequests) {
       res.writeHead(409).end();
       return;
     }
@@ -108,7 +110,7 @@ export async function startBrowserPostBridge({ send, revoke, jobId, environment,
       release?.();
     }
   });
-  server.requestTimeout = 20000;
+  server.requestTimeout = transportTimeoutMs;
   server.headersTimeout = 10000;
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -179,11 +181,13 @@ async function forwardBrowserRequest(route, { environment, purpose }, postOnly) 
       ...(!postOnly && method !== "POST" ? { method } : {}),
       ...(data === null ? {} : { payload: JSON.parse(data) }) };
     const input = JSON.stringify({ jobId, environment: environment.toLowerCase(), args });
+    // Include every bounded queue slot; upstream dispatch retains its own 15-second limit.
+    const deadline = AbortSignal.timeout(maxPendingRequests * transportTimeoutMs);
     const reply = await new Promise((resolve, reject) => {
       const req = httpRequest(url, {
         method: "POST", headers: { "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(input), "x-fixlab-post-key": key },
-        timeout: 20000
+        signal: deadline
       }, async (res) => {
         try {
           const body = await boundedBody(res, responseLimit * 2);
@@ -199,10 +203,9 @@ async function forwardBrowserRequest(route, { environment, purpose }, postOnly) 
           reject(error);
         }
       });
-      req.once("error", () => reject(new Error("The current FixLab browser POST channel is unavailable.")));
-      req.once("timeout", () => {
-        req.destroy(new Error("Browser POST timed out; inspect the selected environment before retrying."));
-      });
+      req.once("error", () => reject(new Error(deadline.aborted
+        ? "Browser POST timed out; inspect the selected environment before retrying."
+        : "The current FixLab browser POST channel is unavailable.")));
       req.end(input);
     });
     await route.fulfill({ status: reply.status, headers: reply.headers,

@@ -50,6 +50,7 @@ test("connected blockers distinguish answerable questions from private questions
     { ...question, details: "Allow GET https://private.example.test/path?" },
     { ...question, choices: ["https://private.example.test/path"] },
     { ...question, details: "Enter the verification code" },
+    { ...question, title: "Enter your PIN" },
     ...["Enter your API key", "Enter your refresh token", "Enter your PIN",
       "API key?", "Refresh token required to continue:", "PIN?", "API keys?", "Refresh tokens:", "Passcode?", "Credentials:"]
       .map((details) => ({ ...question, details }))
@@ -411,6 +412,32 @@ test("runtime input rejects credential collection and malformed choices", () => 
     { question: null }
   ]) {
     assert.throws(() => runtimeQuestionPrompt(request));
+  }
+});
+
+test("runtime questions and replies allow credential-related test diagnostics without collecting credentials", () => {
+  for (const question of [
+    "Which password-reset test should I run?",
+    "Should I run the API key validation tests?",
+    "Which refresh token rotation spec reproduces the failure?"
+  ]) {
+    const state = fixture();
+    const request = { ...runtimeQuestionPrompt({ question }), id: randomUUID() };
+    state.bridge.receive(request);
+    assert.equal(runtimeConversationQuestion(request).responseChannel, "conversation");
+    for (const answer of ["PIN: 1234", "Refresh token: synthetic-value"]) {
+      assert.throws(() => state.bridge.respond(request.id, { action: "answer", answer }), /non-sensitive/);
+    }
+    const answer = "The password reset test fails";
+    state.bridge.respond(request.id, { action: "answer", answer });
+    assert.equal(state.sent[0].answer, answer);
+    assert.equal(state.sent[0].wasFreeform, true);
+  }
+  for (const question of [
+    "Enter your API key for the validation test",
+    "Provide the password reset test credentials"
+  ]) {
+    assert.throws(() => runtimeQuestionPrompt({ question }), /sensitive/);
   }
 });
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { createDevPostTool, createDevWriteApproval, createPpeWriteApproval, createPostBaseApproval, createPostWriteApproval, createNonProductionPostAccess } from "../dashboard/dev-post.js";
 import { forwardApprovedBrowserPost, forwardApprovedBrowserRequest, startBrowserPostBridge } from "../dashboard/browser-post.js";
@@ -186,6 +187,36 @@ test("PPE browser scenarios load, save and verify real response data with serial
   await assert.rejects(access.browserRequest({ ...state.args, method: "GET" }, state.settings.request), /requires/);
   assert.equal(state.requests.length, 5);
   assert.equal(state.prompts.length, 0);
+});
+
+test("slow serialized PPE requests retain their grant when queue time exceeds the dispatch timeout", { timeout: 35000 }, async (t) => {
+  const state = fixture(t);
+  approveOrigins(state, "PPE");
+  state.args.url = "https://api.ppe.example.test/records";
+  let active = 0;
+  let maximumActive = 0;
+  state.settings.request = async (target, options) => {
+    state.requests.push({ target, options });
+    active++;
+    maximumActive = Math.max(maximumActive, active);
+    try {
+      if (state.requests.length <= 2) {
+        await delay(12000, undefined, { signal: options.signal });
+      }
+      return new Response(null, { status: 201 });
+    } finally {
+      active--;
+    }
+  };
+  const access = await browserAccess(t, state);
+  const routes = [browserRoute(state), browserRoute(state)];
+  await Promise.all(routes.map(route => forwardApprovedBrowserRequest(route, {
+    environment: "PPE", purpose: state.args.purpose
+  })));
+  assert.equal(maximumActive, 1);
+  assert.ok(routes.every(route => route.fulfilled.length === 1 && route.aborted.length === 0));
+  await access.tool.handler({ ...state.args, method: "POST" });
+  assert.equal(state.requests.length, 3);
 });
 
 test("an unsuccessful PPE browser read revokes queued writes without retry or broadening POST-only grants", async (t) => {
@@ -461,14 +492,20 @@ test("all-POST setup rejects missing, ambiguous or production API bases before a
 
 test("POST API bases normalize environment labels before rejecting conflicting destinations", (t) => {
   for (const [environment, accepted, rejected] of [
-    ["PPE", ["https://api.shared.example.test/api/PPE/v1"], [
+    ["PPE", ["https://api.shared.example.test/api/PPE/v1",
+      "https://api.shared.example.test/api/PPE-v1"], [
       "https://api.ppe.example.test/api/SIT/v1",
       "https://api.development.example.test/api/ppe/v1",
-      "https://api.ppe.example.test/api/Development/v1"
+      "https://api.ppe.example.test/api/Development/v1",
+      "https://api.ppe.example.test/api/sit-v1",
+      "https://api.ppe.example.test/api/dev_v1",
+      "https://api.ppe.example.test/api/Development.v1"
     ]],
     ["DEV", ["https://api.development.example.test/api/DEV/v1",
-      "https://api.shared.example.test/api/Development/v1"], [
-      "https://api.development.example.test/api/PPE/v1"
+      "https://api.shared.example.test/api/Development/v1",
+      "https://api.shared.example.test/api/dev_v1"], [
+      "https://api.development.example.test/api/PPE/v1",
+      "https://api.dev.example.test/api/ppe-v1"
     ]]
   ]) {
     const state = fixture(t);
