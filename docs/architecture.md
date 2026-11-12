@@ -17,6 +17,20 @@ Continue independently runnable scenarios despite unrelated PR/build/setup
 blockers, without substituting another checkout as proof of unpublished code.
 API-only, unit-only and explicitly deferred validation retain their contracts.
 
+Portal browser evidence defaults to unmasked full-page screenshots
+(`page.screenshot({ path, fullPage: true })`), without a separate screenshot-scope
+question. Crops are supplemental. Existing crop-only journeys can be supplemented
+in a job-owned transient wrapper without changing the original test, shared
+configuration or request guards. Explicit privacy policy and genuinely sensitive
+content still require protection; credentials, sign-in/MFA screens and
+private/customer data must not be captured. Evidence remains local unless sharing
+is separately authorized. Native permissions remain independent.
+
+Every executor prompt includes its assigned repository, actual bound dashboard
+port, instance ID and job ID, including browser-only jobs with no validation
+gates. Connected tools must read fresh status and use those bindings, never infer
+the default port or control another dashboard. Connection metadata is not consent.
+
 Generated journeys are actual discoverable `.spec` files in a job-owned folder
 under the selected Playwright configuration's `testDir`, respecting its
 `testMatch` and project selection. Verify discovery with the approved runner's

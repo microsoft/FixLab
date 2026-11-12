@@ -1411,6 +1411,12 @@ test("connected control starts scoped browser jobs, manages the queue and stops 
     assert.match(calls[0].prompt, /Playwright-only mode/);
     assert.match(calls[0].prompt, /Do not edit files/);
     assert.match(calls[0].prompt, /Full regression is explicitly deferred/);
+    assert.match(calls[0].prompt, /Assigned dashboard connection/u);
+    assert.ok(calls[0].prompt.includes(`Repository: ${JSON.stringify(base.repository)}`));
+    assert.ok(calls[0].prompt.includes(`Port: ${base.port}`));
+    assert.ok(calls[0].prompt.includes(`Instance ID: ${started.state.instanceId}`));
+    assert.ok(calls[0].prompt.includes(`Job ID: ${started.state.job.id}`));
+    assert.doesNotMatch(calls[0].prompt, /Dashboard-owned required validation/u);
     assert.equal(JSON.stringify(started).includes('"logs"'), false);
     const queued = await control("job-start", { request: "Queue another check.", mode: "validate-only" });
     assert.equal(queued.result.queued, true);
@@ -9104,7 +9110,10 @@ test("browser-only instructions are bounded and retain request, policy and execu
   });
   for (const prompt of [browser, full]) {
     assert.match(prompt, /page\.screenshot\(\{ path, fullPage: true \}\)/u);
-    assert.match(prompt, /Mask sensitive regions before capture/u);
+    assert.match(prompt, /Default to unmasked full-page screenshots of approved portal pages/u);
+    assert.match(prompt, /Do not blanket-mask the page or ask again for default screenshot capture/u);
+    assert.match(prompt, /job-owned transient wrapper/u);
+    assert.match(prompt, /Explicit repository privacy rules and genuinely sensitive content/u);
     assert.match(prompt, /API-only and unit-test-only runs require no browser screenshot/u);
   }
   assert.ok(browser.length < full.length * 0.6, `${browser.length} must be less than 60% of ${full.length}`);

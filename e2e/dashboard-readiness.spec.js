@@ -2398,6 +2398,11 @@ test("dashboard retries a blocked Playwright gate without shell input", async ({
     "profile-defined browser and test command"
   );
   expect(submittedInput.details).toContain("save at least one");
+  expect(submittedInput.details).toContain("Default to unmasked full-page");
+  expect(submittedInput.details).toContain("page.screenshot({ path, fullPage: true })");
+  expect(submittedInput.details).toContain("do not ask again for default screenshot capture");
+  expect(submittedInput.details).toContain("Preserve explicit privacy rules");
+  expect(submittedInput.details).not.toContain("after masking sensitive regions");
   expect(submittedInput.details).toContain("Do not skip");
 });
 
@@ -2744,6 +2749,10 @@ test("browser-only retry preserves browser scope and makes its prerequisite bloc
   expect(submitted.action).toBe("retry");
   expect(submitted.details).toContain("retained same-job script");
   expect(submitted.details).toContain("Do not retry an unchanged profile lock");
+  expect(submitted.details).toContain("Default to unmasked full-page");
+  expect(submitted.details).toContain("page.screenshot({ path, fullPage: true })");
+  expect(submitted.details).toContain("do not ask again for default screenshot capture");
+  expect(submitted.details).toContain("Preserve explicit privacy rules");
   expect(submitted.details).not.toContain("continue to pull-request creation");
 });
 

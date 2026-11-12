@@ -472,6 +472,16 @@ actually validated.
 Do not retain generated validation-only authenticated spec files in product
 changes unless permanent coverage was explicitly requested.
 
+Portal journeys default to unmasked full-page screenshots (`fullPage: true`),
+with close-ups only as supplements. Include this capture in the reviewed journey
+or a job-owned transient wrapper; do not ask a separate screenshot-scope question
+for the default. Preserve existing tests, guards and shared configuration.
+Explicit privacy policy and genuinely sensitive content still require protection;
+never capture credentials, sign-in/MFA screens or private/customer data. Keep
+evidence local unless sharing is separately authorized. Native permissions and
+human authentication remain separate approvals. Existing stricter repository
+policies are not silently changed by installing FixLab.
+
 ### 9. Verify Doctor and a stable, matching dashboard
 
 ```powershell
@@ -502,6 +512,8 @@ Verify all of these:
 - Dashboard UI returns HTTP 200.
 - `fixlab_dashboard_status` reports the exact repository and expected port.
 - Record its actual instance ID and confirm no job was started by setup.
+- Use the actual port/repository/instance/job supplied in executor context, not
+  the default port or an older dashboard. Read fresh status before mutations.
 - Read `fixlab_dashboard_control` operation `authentication-status`, bound to
   that instance ID and current job ID (`null` when idle).
 - Check status again after that request to catch a crash. A basic status
@@ -512,6 +524,13 @@ An idle dashboard can report authentication `configured: true` and
 memory-only and tied to the owning job, environment, configuration, and state
 identities. Obtain its own fresh proof when that operation/job is authorized.
 Do not start a job just to make the status green.
+
+A live dashboard may be waiting for input or a native permission rather than
+stopped. Answer non-sensitive questions against their exact current request ID;
+native permission decisions stay in the dashboard browser panel. Do not reinstall
+or restart merely to clear these states. Reuse an owned healthy frontend only
+after verifying its checkout, environment and source version; a deployed screenshot
+does not prove an unpublished commit.
 
 ### 10. Finish with actual status
 

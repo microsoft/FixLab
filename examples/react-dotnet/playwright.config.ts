@@ -7,7 +7,7 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:3000",
     channel: "msedge",
-    screenshot: "only-on-failure",
+    screenshot: { mode: "only-on-failure", fullPage: true },
     trace: "retain-on-failure",
     video: "retain-on-failure"
   }

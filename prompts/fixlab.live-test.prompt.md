@@ -7,8 +7,8 @@ Start only the applications required by the effective diff, using the commands,
 ports, environments, and health URLs in the FixLab profile. Track every process
 created and never stop an unrelated process. Run the repository-defined
 Playwright journey on the developer or registered-runner machine. Capture
-sanitized screenshots, API assertions, logs, cleanup, and the exact observable
-result.
+policy-compliant screenshots, sanitized API assertions/logs, cleanup, and the
+exact observable result.
 
 Scenario-first validation: execute the requested feature journey with
 expected-versus-observed assertions, not a setup check, sign-in or screenshot alone.
@@ -24,16 +24,23 @@ Finish independent scenarios before asking for dependent prerequisites.
 API-only, unit-only and explicitly deferred checks keep their contracts.
 
 For portal evidence, use `page.screenshot({ path, fullPage: true })`, not a
-viewport-only or element screenshot. Mask sensitive regions first; never capture
-credentials or sign-in screens. Close-ups may supplement the full-page evidence.
+viewport-only or element screenshot. Default to unmasked full-page screenshots
+of approved portal pages. Do not blanket-mask the page or ask again for default
+screenshot capture. Close-ups supplement, not replace, full-page evidence.
+If an existing journey captures only crops, add capture in a job-owned transient
+wrapper; preserve the original test, shared configuration and guards. Normal
+runtime permissions remain required.
+Explicit repository privacy rules and genuinely sensitive content still require
+protection; never capture credentials, sign-in/MFA screens or private/customer
+data. Keep evidence local; external sharing needs separate approval.
 API-only and unit-test-only runs require no browser screenshot.
 
 By default, capture a numbered journey per scenario in repository-owned
 test-results: entry/search, mode selection, input/import preview, and verified
 result (01-search.png, 02-input.png, etc.), not just a final grid. Keep static
-labels and approved test values readable while masking account details and
-unrelated private data. For imports, compute SHA-256 from the exact bytes passed
-to the upload; retain only policy-approved inputs, filename/digest, and a labeled
+labels and approved test values readable; do not mask unrelated page regions
+merely because capture is full-page. For imports, compute SHA-256 from the exact
+bytes passed to the upload; retain only policy-approved inputs, filename/digest, and a labeled
 safe preview of those same bytes. Compare expected versus observed values after
 assertions. Never fabricate application screens; report incomplete evidence if
 masking hides required values. Save/Submit and persistence remain unverified

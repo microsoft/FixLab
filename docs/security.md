@@ -54,7 +54,11 @@ operations. Treat every runner as privileged engineering infrastructure.
 
 - Use synthetic or approved non-production test data.
 - Avoid production unless a separately governed workflow explicitly allows it.
-- Sanitize screenshots and API evidence.
+- Sanitize API evidence. Portal screenshots default to unmasked full-page
+  capture of approved pages, not blanket masking. Explicit privacy rules and
+  sensitive content still require protection; never capture credentials,
+  sign-in/MFA screens or private/customer data. Keep evidence local unless
+  sharing is separately authorized.
 - Apply retention limits to logs, screenshots, and temporary worktrees.
 - Dashboard screenshots are restricted to five PNG/JPEG/WebP files, 2 MiB each
   and 8 MiB total. Names, extensions, MIME types, base64, and file signatures

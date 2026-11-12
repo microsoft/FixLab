@@ -78,16 +78,22 @@ and any PR link. Failed, blocked, skipped, or pending checks are not passes.
 Synthetic checks do not prove the real backend works.
 
 Portal browser evidence uses full-page Playwright screenshots (`fullPage: true`),
-with sensitive regions masked. Close-ups are additional evidence, not a substitute.
+unmasked by default for approved portal pages, without a separate screenshot-scope
+question. Close-ups are additional evidence, not a substitute. An existing
+crop-only journey can be supplemented in a job-owned transient wrapper without
+changing the original test or shared configuration. Native permissions still apply.
+Explicit privacy rules and sensitive content still require protection; never
+capture credentials, sign-in/MFA screens or private/customer data. Evidence stays
+local unless sharing is separately authorized.
 API-only and unit-test-only jobs do not require browser screenshots.
 
 By default, browser evidence covers the journey, not only its final grid:
 search/entry, mode selection, input/import preview, and verified result. Open
 **Selected job Playwright evidence** and choose **Refresh evidence**. Numbered
 screenshots are shown in step order, with the newest scenario directory first.
-Static labels and approved test values stay readable; account details and
-unrelated private data remain masked. For imports, evidence identifies the exact
-uploaded bytes by filename and SHA-256 and includes a labeled safe input preview;
+Static labels and approved test values stay readable; full-page capture does not
+require blanket masking of unrelated page regions. For imports, evidence
+identifies the exact uploaded bytes by filename and SHA-256 and includes a labeled safe input preview;
 the original input is retained only when repository policy permits it.
 Expected/observed comparisons follow actual assertions. Save/Submit and
 persistence are not verified unless separately authorized and exercised.
