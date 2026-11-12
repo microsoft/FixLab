@@ -1286,7 +1286,7 @@ export function buildJobPrompt({
     ? `- Record the focused Playwright journey as non-sensitive video evidence using repository-supported Playwright video recording.
 - Save the recording as WebM or MP4 under the repository-owned test-results, playwright-report, or artifacts directory. Keep it under 50 MiB and capture only the application surface: no credentials, browser profiles, personal windows, or unrelated data.
 - Keep the required screenshot evidence as the lightweight review artifact. If recording is unavailable, report that limitation explicitly instead of claiming video evidence exists.`
-    : "- No video requested; preserve screenshots and repository-default traces.";
+    : "- No video requested; retain screenshots/default traces.";
   const manualLocalhostGuidance = manualLocalhostTest
     ? `- Manual React localhost validation is enabled independently of Playwright. After required automated validation finishes, start or reuse only the profile-defined frontend and wait for its health check at ${manualLocalhostUrl || "the profile-defined local health URL"}.
 ${process.platform === "win32" ? "- Windows executor children are job-contained and terminated when the agent exits. For a manual gate, use a dashboard-managed frontend outside the executor; the user can start it with Start React. Verify that it serves the validated checkout. If no independently managed server serves that checkout, block with that exact prerequisite instead of retaining an executor child or validating a baseline checkout.\n" : ""}- Dashboard-managed frontends remain under dashboard session controls; do not terminate them from the agent.
@@ -1295,7 +1295,7 @@ ${process.platform === "win32" ? "- Windows executor children are job-contained 
 - Do not run or rerun Playwright solely because this manual option is enabled.
 - If an authorized draft PR already exists, keep it draft with the manual gate pending; otherwise emit pr skipped because manual confirmation is pending.
 - When the dashboard resumes this session with the user's manual result, mark live-test passed or failed accordingly, stop only frontend processes owned by the current job (not a dashboard-managed server), and continue to the gated PR outcome.`
-    : "- After browser validation stop only FixLab-owned apps, unless explicitly required running.";
+    : "- After browser checks stop only FixLab-owned apps unless required running.";
   const branchNamingGuidance = branchNaming
     ? `- Repository branch naming is configured as ${branchNaming.prefix}. Create or reuse only branches beneath this prefix. Do not substitute a runtime, bot, or agent name for the configured user ID.`
     : "- Follow the repository's existing branch naming policy; do not invent a bot-specific prefix.";
@@ -1400,10 +1400,10 @@ ${!unverifiedDraft && allowsDraftIntegrationDeferral({ mode, workflow, manualLoc
 ${skipLiveTests || useDeployedBackend ? `${OPTIONAL_INTEGRATION_GUIDANCE}\nSelected job choices: skipLiveTests=${skipLiveTests}; useDeployedBackend=${useDeployedBackend}; deferValidation=${deferValidation}.` : ""}
 ${!readOnly && !unverifiedDraft ? AUTONOMOUS_RECOVERY_GUIDANCE : ""}
 ${setupRecovery.length ? `Offline setup diagnostics to repair when needed for this task:\n${JSON.stringify(setupRecovery)}` : ""}
-- Start with the smallest reproduction on an approved app; prepare a stack only to exercise changed code. A deployed baseline never proves an unpublished fix.
+- Reproduce on an approved app; start a stack only for changed code. Deployed baselines never prove unpublished fixes.
 - New worktree: plan \`fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME\`; add \`--yes\` after scoped setup approval. Copy only declared \`worktreeSetup.files\`. Never copy credentials or browser state; do not retry unchanged approvals or grant blanket path access. Missing prerequisites block dependent checks. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration.
-- Inspect git status/effective diff; search task-relevant symbols/files, not the whole repository.
-- Reuse job context. No unchanged file reads/diagnosis, dependency reinstalls or broad reruns without new evidence.
+- Inspect git status and effective diff; search task-relevant symbols and files, not the whole repository.
+- Reuse this job/session context. Do not reread unchanged files, repeat diagnosis, reinstall available dependencies or rerun broad checks without new evidence.
 - Treat commit changes and repository-profile or instruction changes as invalidation boundaries.
 ${readOnly ? "" : requestGuidance}
 ${readOnly ? "" : pullRequestGuidance}
