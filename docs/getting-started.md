@@ -58,6 +58,12 @@ Do not use retry or comments as an answer. Native permissions and questions
 whose details must remain private still require the dashboard browser panel.
 When offered, **Deny and request safe recovery** rejects the blocked operation
 and lets Copilot try existing reviewed tests/helpers; it does not grant access.
+Native execution can reject one eligible unreviewable operation automatically
+to try those safe alternatives. A remaining blocker clearly reports that the
+attempt was used and gives next steps; it still needs your decision. Plain
+**Deny** rejects only the operation, not the whole job, and never passes a check.
+Managed restrictions, private-state paths and offered source-edit review remain
+manual. If no authorized alternative exists, the stage stays blocked.
 
 For complete PPE scenarios, select PPE and use the reviewed **Allow all PPE API
 writes** option. Its configured PPE origins and existing authentication support

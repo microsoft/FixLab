@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  AUTOMATIC_PERMISSION_RECOVERY_GUIDANCE,
   MAX_RUNTIME_FRAME_BYTES,
   MAX_RUNTIME_REQUESTS,
   PERMISSION_RECOVERY_GUIDANCE,
@@ -72,6 +73,8 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
   const publication = createPublicationPermissions(config.repository, config.protectedPaths);
   let publicationGranted = false;
   let policyReady = false;
+  let automaticRecoveryAvailable = true;
+  let automaticRecoveryAttempted = false;
   const usage = {
     inputTokens: config.usage?.inputTokens ?? 0,
     cachedInputTokens: config.usage?.cachedInputTokens ?? 0,
@@ -167,12 +170,27 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
       }
       const sourceEditReview = policyReady && config.mode === "fix-and-validate"
         ? permissions.reviewSourceEdit(request, prompt) : null;
+      if (policyReady && prompt.canRecover === true && !sourceEditReview &&
+          automaticRecoveryAvailable && request.canOfferSessionApproval !== false &&
+          !request.hasWriteFileRedirection) {
+        automaticRecoveryAvailable = false;
+        automaticRecoveryAttempted = true;
+        output("stderr", `\nFixLab rejected an unreviewable operation (${prompt.blockedReasons.join(", ")}); requesting one automatic safe recovery using already-authorized helpers. No permission was granted or operation replayed. A remaining blocker requires manual review.\n`);
+        return { kind: "reject", feedback: AUTOMATIC_PERMISSION_RECOVERY_GUIDANCE };
+      }
+      if (automaticRecoveryAttempted && prompt.canRecover === true) {
+        prompt.automaticRecoveryAttempted = true;
+        prompt.details += "\nAutomatic safe recovery was already attempted once. Resolve the remaining prerequisite using the guidance above; further recovery requires an explicit dashboard decision.";
+      }
       const response = await ask({
         ...prompt, ...(grantScope ? { grantScope } : {}), ...(canAllowAll ? { canAllowAll: true } : {}),
         ...(sourceEditReview ? { sourceEditReview } : {})
       });
       if (budgetReached) {
         return { kind: "reject" };
+      }
+      if (response.action === "deny") {
+        automaticRecoveryAvailable = false;
       }
       if (response.action === "allow" && !prompt.canApprove) {
         throw new Error("An unreviewable permission request cannot be approved.");

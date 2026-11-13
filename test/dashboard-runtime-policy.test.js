@@ -538,6 +538,7 @@ test("reviewed file trust covers source reads and edits across hosts, never othe
       async sendAndWait() {
         for (const request of [
           state.read(), write(), state.read(authTest), write(authTest),
+          { ...write(), diff: "using Microsoft.AspNetCore.Authorization;\n[Authorize]\npublic class FeatureFlagsController {}" },
           { ...write(), diff: "+".repeat(8500) }
         ]) {
           assert.deepEqual(await options.onPermissionRequest(request), {
@@ -557,7 +558,7 @@ test("reviewed file trust covers source reads and edits across hosts, never othe
   }
 });
 
-test("oversized source edits offer a fresh review only after complete eligibility checks, never a grant", (t) => {
+test("oversized source edits offer a fresh review only after complete eligibility checks, never a grant", async (t) => {
   const state = fixture(t);
   const request = { kind: "write", fileName: join(state.repository, "src", "index.ts"), diff: "+".repeat(9000) };
   const prompt = runtimePermissionPrompt(request);
@@ -583,6 +584,37 @@ test("oversized source edits offer a fresh review only after complete eligibilit
   assert.equal(state.policy.isSourceFile(longRequest.fileName), true);
   assert.equal(state.policy.reviewSourceEdit(longRequest, runtimePermissionPrompt(longRequest)), null,
     "unrepresentable hint metadata keeps the normal denial rather than breaking the permission bridge");
+  let decisions = 0;
+  await runCopilotSession({
+    repository: state.repository, sessionId: randomUUID(), mode: "fix-and-validate",
+    prompt: "Review the oversized source edit."
+  }, {
+    output() {},
+    async ask(value) {
+      decisions++;
+      assert.deepEqual(value.sourceEditReview, review);
+      assert.equal(value.automaticRecoveryAttempted, undefined);
+      return { action: "deny" };
+    },
+    client: {
+      async start() {},
+      async createSession(options) {
+        return {
+          rpc: {
+            managedSettings: { async get() { return { failClosed: false }; } },
+            model: { async getCurrent() { return { modelId: "synthetic-model" }; } },
+            metadata: { async recomputeContextTokens() { return { messagesTokenCount: 1 }; } }
+          },
+          on() {},
+          async sendAndWait() {
+            assert.deepEqual(await options.onPermissionRequest(request), { kind: "reject" });
+          }
+        };
+      },
+      async stop() { return []; }
+    }
+  });
+  assert.equal(decisions, 1, "an offered source-edit review must not be automatically denied");
 });
 
 test("only the current session's regular checkpoint Markdown is automatically readable", (t) => {

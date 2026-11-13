@@ -47,7 +47,15 @@ connected tools expose the safe reason; this neither retries authentication nor
 grants permissions or changes browser ownership.
 
 Native runtime request classification supplies redacted, reason-specific
-diagnostics. Eligible blocked operations expose **Deny and request safe recovery**:
+diagnostics and next steps. Authorization source identifiers are not credential
+values; authorization assignments/headers and credential solicitations remain
+protected. After managed policy resolves, the native SDK may reject one eligible
+unreviewable operation with safe-recovery feedback automatically per executor.
+It creates no grant and never replays that operation. Human denials disable
+subsequent automatic recovery. Managed/sandbox restrictions, sensitive paths and
+offered source-edit review stay manual. A remaining eligible blocker reports
+that automatic recovery was attempted and requires an explicit decision.
+Eligible blocked operations expose **Deny and request safe recovery**:
 the runtime receives a rejection with fixed recovery feedback, not a permission
 grant or automatic replay. Existing stage evidence remains authoritative.
 Connected status distinguishes `executionState` from the retained job outcome:

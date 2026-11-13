@@ -744,6 +744,7 @@ test("live Allow all requires confirmation and is absent without an offered capa
 test("safe recovery denies the hidden request and per-action DEV POST never enters batch approval", async ({ page }) => {
   const job = pendingApprovalJob(["npm test"]);
   const hidden = { ...runtimePermissionPrompt({ kind: "shell", fullCommandText: "x".repeat(8193) }), id: randomUUID() };
+  hidden.automaticRecoveryAttempted = true;
   job.runtimeRequests = [hidden];
   const posts = [];
   await mockChatWorkspace(page, { job });
@@ -754,6 +755,8 @@ test("safe recovery denies the hidden request and per-action DEV POST never ente
   });
   await page.goto(baseUrl);
   await expect(page.locator("#runtime-request-details")).toContainText("8192-character");
+  await expect(page.locator("#runtime-request-guidance")).toContainText("Automatic safe recovery was already attempted once");
+  await expect(page.locator("#runtime-request-details")).toContainText("do not split or repackage");
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
   const recover = page.getByRole("button", { name: "Deny and request safe recovery", exact: true });
   page.once("dialog", (dialog) => dialog.dismiss());
@@ -1054,7 +1057,7 @@ test("native Copilot prompts allow once, deny and answer choices in the same liv
       id: randomUUID()
     };
     bridge.receive(hidden);
-    await expect(page.locator("#runtime-request-details")).toContainText("authentication-related source code");
+    await expect(page.locator("#runtime-request-details")).toContainText("existing reviewed authentication helper");
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Deny and request safe recovery", exact: true }).click();
     await expect.poll(() => sent.at(-1)?.recover).toBe(true);

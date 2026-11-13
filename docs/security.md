@@ -153,6 +153,14 @@ with fixed guidance to reuse existing reviewed tests/helpers in the same stage;
 it never approves, hides or replays the rejected operation. Managed escalation
 and sensitive-path requests do not offer recovery. Existing evidence and failed
 checks remain authoritative; a missing safe prerequisite still blocks the stage.
+After managed policy resolves, native execution can automatically reject one
+eligible unreviewable operation with that safe-recovery feedback, without a
+permission grant. A subsequent eligible blocker requires explicit review and
+reports the previous attempt. Human denials disable further automatic recovery;
+managed/sandbox restrictions, sensitive paths and offered source-edit review
+remain manual. Ordinary authorization source identifiers are reviewable, but
+authorization assignments/headers, credential values and solicitations remain
+protected. Reason-specific next steps never reveal the rejected payload.
 
 ### Broad DEV and PPE API writes
 

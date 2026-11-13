@@ -836,7 +836,9 @@ function renderRuntimeRequest(job, isActive) {
   runtimeGuidance.textContent = pending.perAction === true
     ? "This is a real non-production POST action without current job-scoped write approval. Review its environment, exact destination and complete payload. It requires single-use confirmation; Allow all does not approve it."
     : pending.kind === "permission" && !pending.canApprove
-      ? "This operation cannot be approved here. Read the specific reasons below. Safe recovery denies the operation; it never overrides a restriction or replays hidden details."
+      ? pending.automaticRecoveryAttempted === true
+        ? "Automatic safe recovery was already attempted once. Resolve the remaining prerequisite using the guidance below. Any further recovery needs your explicit decision; no permission has been granted."
+        : "This operation cannot be approved here. Read the specific reasons and next steps below. Deny rejects only this operation; it does not stop the job or pass a check. Safe recovery requests existing reviewed helpers without overriding restrictions or replaying hidden details."
     : pending.kind === "question"
     ? "This is a question, not a tool permission. Choose an answer below or reply from Message FixLab when freeform input is available. Allow all never supplies answers for you."
     : job.toolApprovalMode === "allow-all"
