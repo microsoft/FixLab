@@ -44,14 +44,18 @@ import { runStructuredCommand } from "./structured-command.js";
 import {
   applyWorktreeSetup,
   browserConfigurationErrors,
+  buildQuerySetupPrompt,
   planWorktreeSetup,
-  REPOSITORY_PROMPT_NAMES
+  REPOSITORY_PROMPT_NAMES,
+  setupPath
 } from "../dashboard/repository-setup.js";
 import { runValidationGate } from "./validation-gate-client.js";
+import { applySharedSetup, planSharedSetup } from "../dashboard/shared-worktree.js";
+import { quoteWindowsArgument } from "../dashboard/windows-executor.js";
 import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, SCENARIO_VALIDATION_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "../dashboard/workflow-policy.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -86,12 +90,13 @@ function printUsage() {
 
 Usage:
   fixlab <repository> [--runtime <agency|copilot>] [--model <model>]
-  fixlab onboard [repository] [--from <source-checkout>] [--yes] [--authenticate] [--start-dashboard] [--runtime <agency|copilot>] [--model <model>]
+  fixlab onboard [repository] [--from <source-checkout> | --reuse-setup] [--yes] [--authenticate] [--start-dashboard] [--runtime <agency|copilot>] [--model <model>]
   fixlab init [repository]
   fixlab notifications [repository] [--yes]
   fixlab prepare [repository] [--yes]
   fixlab doctor [repository] [--runtime <agency|copilot>]
   fixlab setup-playwright [repository] [--yes]
+  fixlab setup-queries [repository] --environment <name> [--yes] [--runtime <agency|copilot>] [--model <model>]
   fixlab authenticate [repository] [--yes]
   fixlab linked-api-proof [repository] [--authenticate|--proof] [--yes]
   fixlab portal-api-proof [repository] [--authenticate|--proof] --yes
@@ -115,6 +120,8 @@ Commands:
   doctor    Check required tools and repository configuration.
   setup-playwright
             Plan or install Playwright; API-only profiles need no browser.
+  setup-queries
+            Review or repair verified read-only query coverage in repository adapters.
   authenticate
             Plan or run the repository-owned browser or API authentication command.
   linked-api-proof
@@ -938,7 +945,7 @@ function setupPlaywright(repository, approved) {
   return 0;
 }
 
-function authenticate(repository, approved) {
+function authenticate(repository, approved, { reuseExisting = false } = {}) {
   const { profile, error } = loadProfile(repository);
   if (error) {
     console.error(
@@ -982,9 +989,16 @@ function authenticate(repository, approved) {
     return 1;
   }
 
-  const command = authentication.command.trim();
+  const existingState = Array.isArray(authentication.statusPaths) && authentication.statusPaths.length > 0 &&
+    authentication.statusPaths.every((path) => typeof path === "string" && existsSync(
+      reuseExisting ? setupPath(workingDirectory, path) : resolve(workingDirectory, path)
+    ));
+  const reusing = reuseExisting && browserAutomation.mode !== "api" && existingState &&
+    typeof authentication.proofCommand === "string" && authentication.proofCommand.trim();
+  const command = reusing ? authentication.proofCommand.trim() : authentication.command.trim();
   const authenticationEnvironment = authentication.environment ?? {};
   console.log(`${authenticationLabel} authentication plan:`);
+  if (reusing) {console.log("  Reuse existing state in place; run fresh repository-owned proof before accepting sign-in.");}
   console.log(`  command: ${redactCommandForDisplay(command)}`);
   console.log(`  working directory: ${workingDirectory}`);
   const environmentNames = Object.keys(authenticationEnvironment);
@@ -1007,6 +1021,7 @@ function authenticate(repository, approved) {
     windowsHide: true
   });
   if (result.status !== 0) {
+    if (reusing) {console.error("Existing sign-in could not be verified. No automatic login retry was made; review the proof failure or run fixlab authenticate with --yes for human sign-in.");}
     console.error(`${authenticationLabel} authentication failed with exit code ${result.status ?? 1}.`);
     printTroubleshooting();
     return result.status ?? 1;
@@ -1023,7 +1038,7 @@ function authenticate(repository, approved) {
     return 1;
   }
 
-  console.log(browserAutomation.mode === "api"
+  console.log(reusing ? "Existing browser sign-in verified; each job still requires fresh environment-bound proof." : browserAutomation.mode === "api"
     ? "API authentication helper completed and its status is present; this does not replace the owning job's fresh API proof."
     : "Browser authentication helper completed and required state is present; this does not prove sign-in. Run the repository-owned authenticated browser proof for the selected job and environment.");
   return 0;
@@ -1084,6 +1099,11 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     // Interactive sessions use packaged guidance; request prompts go through stdin.
     ...(request && profile.validation?.liveTestsRequired !== false &&
       profile.browserAutomation?.mode !== "api" ? [READ_ONLY_POST_GUIDANCE] : []),
+    ...(request && profile.validation?.liveTestsRequired !== false &&
+      profile.browserAutomation?.mode !== "api" ? [PORTAL_SCREENSHOT_GUIDANCE] : []),
+    ...(request && !choices.deferValidation && !choices.skipLiveTests &&
+      profile.validation?.liveTestsRequired !== false &&
+      profile.browserAutomation?.mode !== "api" ? [SCENARIO_VALIDATION_GUIDANCE] : []),
     ...(request ? [componentRetrievalGuidance(profile, request)] : []),
     ...(profile.validation?.liveTestsRequired === false ? [UNIT_TEST_ONLY_GUIDANCE] : []),
     ...(readOnly ? [TRANSIENT_PLAYWRIGHT_GUIDANCE] : []),
@@ -1167,6 +1187,55 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     input: forwardsPrompt ? invocation.input : undefined,
     shell: process.platform === "win32"
   });
+  return result.status ?? 1;
+}
+
+function setupQueries(args) {
+  const parsed = parseRuntimeArguments(args);
+  if (parsed.error) { throw new Error(parsed.error); }
+  let repositoryArgument;
+  let environment;
+  let approved = false;
+  for (let index = 0; index < parsed.args.length; index += 1) {
+    const value = parsed.args[index];
+    if (value === "--environment" && environment === undefined &&
+        parsed.args[index + 1] && !parsed.args[index + 1].startsWith("-")) {
+      environment = parsed.args[++index];
+    } else if (value === "--yes" && !approved) {
+      approved = true;
+    } else if (!value.startsWith("-") && repositoryArgument === undefined) {
+      repositoryArgument = value;
+    } else {
+      throw new Error("Usage: fixlab setup-queries [repository] --environment <name> [--yes] [--runtime <agency|copilot>] [--model <model>]");
+    }
+  }
+  const repository = resolveRepository(repositoryArgument);
+  const { profile, error } = loadProfile(repository);
+  if (error) { throw new Error(`Cannot review query setup because ${error}.`); }
+  const selectedEnvironment = validateTargetEnvironment(environment ?? "", configuredValidationEnvironments(profile)).toLowerCase();
+  const prompt = buildQuerySetupPrompt({ environment: selectedEnvironment, approved });
+  const evidence = configuredTestSynthesis(profile, "", undefined, selectedEnvironment);
+  if (profile.browserAutomation?.dataSafety?.productionAllowed !== false ||
+      evidence.apiOnly || evidence.unitTestsOnly || evidence.productionDatabaseReadOnly ||
+      !["non-production-read-only", "non-production-approved"].includes(evidence.source)) {
+    throw new Error("Query setup requires an existing approved non-production browser read scope; it cannot override API-only, unit-only, synthetic-only or production policy.");
+  }
+  if (!findExecutable(parsed.runtime)) {
+    throw new Error(`Cannot review query setup because ${parsed.runtime} is unavailable. Install and authenticate the selected runtime first.`);
+  }
+  console.log(`FixLab query setup: ${approved ? "reviewed repair" : "plan only"} (${selectedEnvironment})`);
+  const runtimeArgs = [
+    ...(parsed.runtime === "agency" ? ["copilot"] : []),
+    "--plugin-dir", packageRoot, "--agent", "fixlab:fixlab",
+    ...(parsed.runtime === "copilot" ? copilotModelArguments(parsed.model) : []),
+    "--interactive", prompt
+  ];
+  const result = spawnSync(parsed.runtime,
+    process.platform === "win32" ? runtimeArgs.map(quoteWindowsArgument) : runtimeArgs,
+    { cwd: repository, stdio: "inherit", shell: process.platform === "win32" });
+  if (result.error) {
+    console.error(`Query setup runtime could not start: ${result.error.message}`);
+  }
   return result.status ?? 1;
 }
 
@@ -1331,8 +1400,13 @@ function parseOnboardArguments(args) {
   let source;
   let authenticateBrowser = false;
   let startDashboard = false;
+  let reuseSetup = false;
   for (let index = 0; index < runtimeArguments.args.length; index += 1) {
     const argument = runtimeArguments.args[index];
+    if (argument === "--reuse-setup") {
+      reuseSetup = true;
+      continue;
+    }
     if (argument === "--from") {
       const value = runtimeArguments.args[++index];
       if (!value || value.startsWith("-")) {
@@ -1362,11 +1436,13 @@ function parseOnboardArguments(args) {
     repositoryArgument = argument;
   }
 
+  if (source && reuseSetup) {return { error: "Choose --reuse-setup for one existing checkout or --from for a separate worktree, not both" };}
   return {
     repository: resolveRepository(repositoryArgument),
     runtime: runtimeArguments.runtime,
     model: runtimeArguments.model,
     source,
+    reuseSetup,
     approved,
     authenticateBrowser,
     startDashboard
@@ -1378,6 +1454,7 @@ async function onboard({
   runtime,
   model,
   source,
+  reuseSetup,
   approved,
   authenticateBrowser,
   startDashboard
@@ -1390,6 +1467,18 @@ async function onboard({
   console.log(`  runtime: ${runtime}`);
   if (model) {
     console.log(`  model: ${model}`);
+  }
+  if (reuseSetup) {
+    const plan = planSharedSetup(repository);
+    console.log(`Reuse existing setup in this checkout; new jobs use branches from ${plan.configuration.remote}/${plan.configuration.baseBranch}.`);
+    console.log(`Branch prefix: ${plan.configuration.prefix}; automatic source stashing: ${plan.configuration.autoStash ? "enabled by existing profile" : "off"}.`);
+    console.log("Preserve dependencies, authentication helpers and private browser state in place. Do not copy credentials or start a job.");
+    if (plan.profile.worktreeSetup.bindExpectedCommit) {console.log("Bind the ignored local profile to the selected job branch commit; fresh job proof remains required.");}
+    if (!approved) {
+      console.log("No files or commands changed. Review the existing profile and rerun with --reuse-setup --yes.");
+      return 0;
+    }
+    applySharedSetup(plan);
   }
 
   if (source) {
@@ -1450,7 +1539,7 @@ async function onboard({
     console.log(`Runtime path approval required for linked dependencies: ${directory}`);
   }
 
-  const preparationPlan = prepare(repository, false);
+  const preparationPlan = reuseSetup ? 0 : prepare(repository, false);
   if (preparationPlan !== 0) {
     return preparationPlan;
   }
@@ -1481,7 +1570,8 @@ async function onboard({
     console.log("Approved only the listed linked dependency directories; runtime deny rules remain in force.");
   }
 
-  const preparationResult = prepare(repository, true);
+  if (reuseSetup) {console.log("Existing dependencies preserved. Branch-specific tests must verify them; run fixlab prepare only when restore is needed.");}
+  const preparationResult = reuseSetup ? 0 : prepare(repository, true);
   if (preparationResult !== 0) {
     return preparationResult;
   }
@@ -1490,7 +1580,7 @@ async function onboard({
     return playwrightResult;
   }
   if (authenticateBrowser) {
-    const authenticationResult = authenticate(repository, true);
+    const authenticationResult = authenticate(repository, true, { reuseExisting: reuseSetup });
     if (authenticationResult !== 0) {
       return authenticationResult;
     }
@@ -1794,6 +1884,10 @@ async function main(args) {
       return 1;
     }
     return onboard(parsed);
+  }
+
+  if (command === "setup-queries") {
+    return setupQueries(rest);
   }
 
   if (command === "init") {

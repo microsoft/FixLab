@@ -54,7 +54,11 @@ operations. Treat every runner as privileged engineering infrastructure.
 
 - Use synthetic or approved non-production test data.
 - Avoid production unless a separately governed workflow explicitly allows it.
-- Sanitize screenshots and API evidence.
+- Sanitize API evidence. Portal screenshots default to unmasked full-page
+  capture of approved pages, not blanket masking. Explicit privacy rules and
+  sensitive content still require protection; never capture credentials,
+  sign-in/MFA screens or private/customer data. Keep evidence local unless
+  sharing is separately authorized.
 - Apply retention limits to logs, screenshots, and temporary worktrees.
 - Dashboard screenshots are restricted to five PNG/JPEG/WebP files, 2 MiB each
   and 8 MiB total. Names, extensions, MIME types, base64, and file signatures
@@ -149,6 +153,14 @@ with fixed guidance to reuse existing reviewed tests/helpers in the same stage;
 it never approves, hides or replays the rejected operation. Managed escalation
 and sensitive-path requests do not offer recovery. Existing evidence and failed
 checks remain authoritative; a missing safe prerequisite still blocks the stage.
+After managed policy resolves, native execution can automatically reject one
+eligible unreviewable operation with that safe-recovery feedback, without a
+permission grant. A subsequent eligible blocker requires explicit review and
+reports the previous attempt. Human denials disable further automatic recovery;
+managed/sandbox restrictions, sensitive paths and offered source-edit review
+remain manual. Ordinary authorization source identifiers are reviewable, but
+authorization assignments/headers, credential values and solicitations remain
+protected. Reason-specific next steps never reveal the rejected payload.
 
 ### Broad DEV and PPE API writes
 
@@ -165,9 +177,14 @@ PPE uses its own **Allow all PPE API writes** choice, `fixlab_ppe_write` tool an
 `environments` and configure reviewed origins such as
 `https://api.ppe.example.test`. PPE grants never inherit DEV configuration or
 consent. Neither choice enables broad SIT/UAT or production writes.
+The PPE grant also supports GET reads on those same origins for complete
+load/save/reload browser scenarios. `fixlab_ppe_write` retains its existing name
+and accepts GET without a payload; GET metadata is read-only, not write proof.
+The private browser helper returns response data only to the waiting browser.
 For future native PPE jobs only, the dashboard preselects this choice after
-the existing origin/helper configuration checks pass. Users can uncheck it;
-explicit read-only/intercepted selections suppress it. Identity-bound,
+the existing origin/helper configuration checks pass. Users can uncheck it.
+POST-scope readiness changes clear scoped POST consent without resetting that opt-out.
+Explicit read-only/intercepted selections suppress it. Identity-bound,
 user-authorized MCP `job-start` targeting PPE applies the same default and
 accepts `allowPpeWrites: false` to opt out. A scoped POST selection also takes
 precedence. The server revalidates configuration at grant creation and use;
@@ -282,7 +299,7 @@ Credential-sensitive debug logging must be disabled.
 Without current job-scoped approval, every exact URL and complete JSON payload
 receives separate human review, including while Allow all is active. These
 requests are excluded from batch approval and expire after five minutes.
-With checkbox approval, payloads still require the exact configured test-record
+With endpoint-scoped checkbox approval, payloads still require the exact configured test-record
 field/value, credential screening and size limits. Review the endpoint contract:
 it must scope the operation to that test record; the marker alone cannot prove
 the business meaning of other payload fields.
@@ -294,6 +311,86 @@ and credentials never enter results or job history; only status metadata returns
 An HTTP success is not a passed scenario assertion. Existing arbitrary tool
 execution remains privileged: this constrained helper is not an OS network
 sandbox and cannot enforce the contract against an unrelated same-user process.
+
+### Browser POST approval handoff
+
+For a fresh, configured job-scoped grant, native execution creates an
+executor-owned loopback relay before starting Copilot. Reviewed Node/Playwright
+business-request guards can load the packaged helper without a second approval
+contract:
+
+```js
+const { forwardApprovedBrowserPost } = await import(
+  process.env.FIXLAB_BROWSER_POST_HELPER
+);
+await forwardApprovedBrowserPost(route, {
+  environment: "DEV",
+  purpose: "Verify creation of the approved test record"
+});
+```
+
+Invoke it only for business POST routes. Keep configured authentication flows
+and verified read-only query handling separate; do not replace the entire guard.
+The runner must inherit the executor environment. This is not available in
+independently launched runners, Agency, interactive CLI, recovered unchecked
+jobs or explicit read-only modes. Missing endpoint/helper configuration still
+blocks real writes; enabling test synthesis alone is insufficient.
+
+The relay checks an ephemeral capability, exact Host, absence of browser Origin,
+job, environment and bounded JSON input. It delegates to the same mediated
+authorization and authentication path as `fixlab_nonproduction_post`, without
+copying browser credentials. Endpoint/test-record and API-base scopes, changed
+profile/helper rejection, no redirects/retries, and shared failure revocation
+remain enforced. Endpoint/API-base grants and broad DEV grants expose only POST.
+For a broad PPE-origin grant, `forwardApprovedBrowserRequest` from the same
+helper additionally supports GET, PUT, PATCH and DELETE on exactly those PPE
+origins. Use it for approved PPE business traffic only, not sign-in, portal
+assets or other origins. The POST-only helper remains POST-only; endpoint and
+API-base grants never acquire additional methods. PPE browser requests are
+serialized (at most 16 pending) rather than raced or replayed. A failed or
+ambiguous request revokes the grant for queued requests too. GET cannot carry
+a payload and retains read-only metadata; use scenario assertions to verify
+the complete flow, including any approved persisted writes.
+It closes and clears inherited channel values when the executor ends.
+Never print, persist or manually copy `FIXLAB_BROWSER_POST_*` values.
+
+Unlike the model-facing tool, this private transport returns up to 1 MiB of
+response data directly to the waiting browser, in memory only. Only content type
+and required CORS headers are preserved, never cookies or authorization headers.
+The tool and dashboard still receive no response bodies. Do not retain response
+payloads, credentials or sensitive browser state in traces, evidence or logs.
+Oversized responses and unsuccessful/ambiguous attempts revoke the shared grant;
+inspect effects before requesting fresh approval. Assert the browser result and
+approved persisted outcome separately; HTTP success is not validation success.
+The capability is not an OS sandbox against unrelated same-user processes.
+
+The dashboard's **Allow all selected-environment POST requests, including writes**
+checkbox uses reviewed `dataSafety.post.<environment>.baseUrls` and the existing authentication
+helper, without an endpoint/test-record list. One explicit job approval authorizes
+POST to any path/record within those exact API bases; it does not authorize PUT, PATCH
+or DELETE. This POST-only grant uses `fixlab_nonproduction_post`, remains
+profile/helper/job-bound and memory-only, and stops after unsuccessful or ambiguous
+attempts. It never follows redirects or overrides explicit read-only modes,
+API-only/unit-only/production policy or browser guards.
+DEV, SIT, UAT and PPE are separately selected, even when they share an API host.
+Base URLs must identify the selected environment in their hostname or path.
+Environment labels are compared case-insensitively, with `development` treated
+as DEV; conflicting environment labels are rejected in either location.
+Path boundaries and encoded-path checks prevent cross-environment matching.
+Configure each entry with `baseUrls`, `sessionHelper` and `scope`. The helper
+receives the selected `environment` and must authenticate only that environment.
+HTTP clients must send `allowPostRequests`, `postWriteApprovalConfirmed` and
+`postBaseApprovalConfirmed` as `true`, with the exact native dashboard Host/Origin
+and selected non-production environment. Older endpoint-scoped confirmations retain their
+original scope; they do not silently become origin-wide grants. The separate
+all-PPE-write checkbox retains its broader POST/PUT/PATCH/DELETE scope.
+
+Identity-bound connected `job-start` requests may supply the same explicit POST
+and Allow-all confirmations without a browser Origin. The existing loopback
+host, operation, instance, repository, current-job and confirmed-user checks
+apply and are rechecked after the bounded request body. This creates only the
+requested fresh job consent; it cannot approve a pending native permission,
+recover a grant, expand an API base or override a read-only selection.
 
 A reported text-only non-interactive denial pauses the owned executor without automatic
 retries; approval remains unavailable until its termination is verified.

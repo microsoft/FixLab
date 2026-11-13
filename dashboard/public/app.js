@@ -176,6 +176,7 @@ const allowDevWritesInput = document.querySelector("#allow-dev-writes");
 let postUiBlocked = true;
 let postRuntimeAvailable = false;
 let postCheckboxEnvironment = null;
+let postCheckboxScope = null;
 let repositoryReadiness = null;
 
 function updatePostRequestsOption() {
@@ -185,14 +186,21 @@ function updatePostRequestsOption() {
   const available = postRuntimeAvailable && !postUiBlocked && ["dev", "sit", "uat", "ppe"].includes(environment) &&
     !document.querySelector('[name="testMutationMode"]').value;
   const key = available ? environment : "";
-  if (postCheckboxEnvironment !== key) {
+  const scope = repositoryReadiness?.postBaseEnvironments?.includes(environment) ? "base" : "endpoint";
+  if (postCheckboxEnvironment !== key || postCheckboxScope !== scope) {
     allowPostRequestsInput.checked = false;
+    postCheckboxScope = scope;
+  }
+  if (postCheckboxEnvironment !== key) {
     allowDevWritesInput.checked = key === "ppe" && repositoryReadiness?.ppeWriteConfigured === true;
     postCheckboxEnvironment = key;
   }
   allowDevWritesInput.disabled = !available || !["dev", "ppe"].includes(environment);
   document.querySelector("#origin-writes-label").textContent =
     `Allow all ${environment === "ppe" ? "PPE" : "DEV"} API writes for this job`;
+  document.querySelector("#post-writes-label").textContent = scope === "base"
+    ? `Allow all ${environment.toUpperCase()} POST requests, including writes, for this job`
+    : "Allow POST writes for this job in the selected environment";
   allowPostRequestsInput.disabled = !available || allowDevWritesInput.checked;
   updateIntegrationOptions();
 }
@@ -635,7 +643,7 @@ function setRuntimeBusy(busy) {
     element.disabled = busy;
   });
   if (composerQuestionSelection) {
-    startButton.disabled = busy;
+    startButton.disabled = busy || !composerQuestionSelection.allowFreeform;
   }
 }
 
@@ -780,7 +788,8 @@ async function respondToRuntime(action, choice, scope, answer = runtimeAnswer.va
 
 function renderComposerQuestion(job, isActive) {
   const pending = isActive ? job?.runtimeRequests?.[0] : null;
-  const question = pending?.kind === "question" && pending.allowFreeform ? pending : null;
+  const question = pending?.kind === "question" ? pending : null;
+  const freeform = question?.allowFreeform === true;
   const key = question ? `${dashboardInstanceId}:${job.id}:${question.id}` : null;
   if (composerQuestionSelection && composerQuestionSelection.key !== key && requestInput.value) {
     requestInput.value = "";
@@ -789,20 +798,29 @@ function renderComposerQuestion(job, isActive) {
     composerReplyResult.textContent = "The question context changed. Its unsent reply was cleared; review the current question before answering.";
   }
   composerQuestionSelection = question ? {
-    key, instanceId: dashboardInstanceId, jobId: job.id, requestId: question.id
+    key, instanceId: dashboardInstanceId, jobId: job.id, requestId: question.id,
+    allowFreeform: freeform
   } : null;
   composerQuestion.hidden = !question;
-  composerQuestion.textContent = question?.details ?? "";
+  composerQuestion.textContent = question
+    ? `${question.details}${freeform ? "" : " Choose a next step in the response panel above; a new message does not answer this question."}`
+    : "";
   document.querySelector('label[for="request"]').textContent = question
-    ? "Reply to Copilot's question" : "Bug or required enhancement";
+    ? freeform ? "Reply to Copilot's question" : "Choose a next step above"
+    : "Bug or required enhancement";
   requestInput.maxLength = question ? 4000 : 10000;
   requestInput.placeholder = question
-    ? "Reply to the question above. Never enter passwords, tokens or MFA codes."
+    ? freeform ? "Reply to the question above. Never enter passwords, tokens or MFA codes."
+      : "Use an offered answer above, or New conversation for a separate request."
     : "Describe what you want to fix or check.";
-  if (question) {
+  if (freeform) {
     document.querySelector(".composer-heading span").textContent = "Reply to current job";
     startButton.textContent = "Send reply";
     startButton.disabled = runtimeBusy;
+  } else if (question) {
+    document.querySelector(".composer-heading span").textContent = "Choose next step above";
+    startButton.textContent = "Choose next step above";
+    startButton.disabled = true;
   }
 }
 
@@ -818,7 +836,9 @@ function renderRuntimeRequest(job, isActive) {
   runtimeGuidance.textContent = pending.perAction === true
     ? "This is a real non-production POST action without current job-scoped write approval. Review its environment, exact destination and complete payload. It requires single-use confirmation; Allow all does not approve it."
     : pending.kind === "permission" && !pending.canApprove
-      ? "This operation cannot be approved here. Read the specific reasons below. Safe recovery denies the operation; it never overrides a restriction or replays hidden details."
+      ? pending.automaticRecoveryAttempted === true
+        ? "Automatic safe recovery was already attempted once. Resolve the remaining prerequisite using the guidance below. Any further recovery needs your explicit decision; no permission has been granted."
+        : "This operation cannot be approved here. Read the specific reasons and next steps below. Deny rejects only this operation; it does not stop the job or pass a check. Safe recovery requests existing reviewed helpers without overriding restrictions or replaying hidden details."
     : pending.kind === "question"
     ? "This is a question, not a tool permission. Choose an answer below or reply from Message FixLab when freeform input is available. Allow all never supplies answers for you."
     : job.toolApprovalMode === "allow-all"
@@ -1314,12 +1334,17 @@ function renderConversation(job, isActive) {
     job?.status === "blocked" || job?.status === "failed")));
   document.querySelector("#conversation-state").classList.toggle("waiting", waiting);
   needsResponse.hidden = !waiting;
+  needsResponse.textContent = pending?.kind === "question"
+    ? "Choose next step"
+    : pending?.kind === "permission" ? "Review permission" : "Review and respond";
   if (!job) {
     conversationTitle.textContent = "Ready when you are";
     conversationDetail.textContent = "Describe an outcome. Run options control the mode and environment; nothing runs until you send it.";
   } else if (pending) {
     conversationTitle.textContent = pending.kind === "permission" ? "Waiting for your permission" : "Waiting for your answer";
-    conversationDetail.textContent = pending.title;
+    conversationDetail.textContent = pending.kind === "question"
+      ? pending.details
+      : `${pending.title}. Next step: review the exact request below, then allow or deny it. No execution is progressing while this decision is pending.`;
   } else if (job.permissionRequest) {
     conversationTitle.textContent = "Access review required";
     conversationDetail.textContent = "The executor is paused. Review the exact folder scope; no access has been granted.";
@@ -2681,6 +2706,9 @@ form.addEventListener("submit", async (event) => {
           activeJob?.id !== replySelection.jobId) {
         throw new Error("The question changed. Review the current request before replying.");
       }
+      if (!replySelection.allowFreeform) {
+        throw new Error("Choose a next step from the offered answers above, or use New conversation for a separate request.");
+      }
       if (selectedScreenshots.length) {
         throw new Error("Question replies support text only. Remove the images before replying, or choose New conversation to start a separate job.");
       }
@@ -2694,6 +2722,8 @@ form.addEventListener("submit", async (event) => {
       return;
     }
     const data = new FormData(form);
+    const reviewedPostEnvironment = postCheckboxEnvironment;
+    const reviewedPostScope = postCheckboxScope;
     const allowAllTools = data.get("allowAllTools") === "on";
     if (allowAllTools && !window.confirm(
       "Allow all reviewable tool commands for this run? Commands can access or change files and contact services without individual approval prompts. This is privileged execution, not a sandbox. Organization policy, sensitive/escalated requests, sign-in, publication consent and required checks remain separate. Retries and later jobs require a new opt-in."
@@ -2708,6 +2738,11 @@ form.addEventListener("submit", async (event) => {
     const screenshots = await Promise.all(
       validateSelectedScreenshots().map(fileBase64)
     );
+    if (data.get("allowPostRequests") === "on" &&
+        (reviewedPostEnvironment !== postCheckboxEnvironment || reviewedPostScope !== postCheckboxScope ||
+          allowPostRequestsInput.disabled || !allowPostRequestsInput.checked)) {
+      throw new Error("The POST approval scope changed. Review the current environment and approve it again.");
+    }
     const body = await fetchJson("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2732,6 +2767,7 @@ form.addEventListener("submit", async (event) => {
         testMutationMode: data.get("testMutationMode") ?? "",
         allowPostRequests: !allowPostRequestsInput.disabled && data.get("allowPostRequests") === "on",
         postWriteApprovalConfirmed: !allowPostRequestsInput.disabled && data.get("allowPostRequests") === "on",
+        postBaseApprovalConfirmed: !allowPostRequestsInput.disabled && reviewedPostScope === "base" && data.get("allowPostRequests") === "on",
         allowDevWrites: !allowDevWritesInput.disabled && postCheckboxEnvironment === "dev" && data.get("allowDevWrites") === "on",
         devWriteApprovalConfirmed: !allowDevWritesInput.disabled && postCheckboxEnvironment === "dev" && data.get("allowDevWrites") === "on",
         allowPpeWrites: !allowDevWritesInput.disabled && postCheckboxEnvironment === "ppe" && data.get("allowDevWrites") === "on",
@@ -2773,7 +2809,7 @@ form.addEventListener("submit", async (event) => {
       composerReplyResult.classList.add("error");
       composerReplyResult.hidden = false;
     }
-    startButton.disabled = false;
+    startButton.disabled = composerQuestionSelection?.allowFreeform === false;
   }
 });
 
@@ -3088,8 +3124,8 @@ async function retryLiveTest() {
         action: "retry",
         details:
           activeJob?.mode === "playwright-only"
-            ? "Retry only the browser-validation prerequisite and focused Playwright journey using the retained same-job script, selected environment and existing authentication. Do not retry an unchanged profile lock, copy browser state, delete a script still needed for continuation, change product source, or perform PR work. Report unavailable browser prerequisites as blocked and non-browser stages as skipped."
-            : "Reuse the repository-profile-defined browser authentication and all completed diagnosis, fix, review, and local validation evidence. Rerun only the blocked Playwright live-test gate using the profile-defined browser and test command, save at least one non-sensitive screenshot under the profile-defined working directory's test-results folder, emit the terminal live-test result, and continue to pull-request creation. Do not skip the live-test or PR stage."
+            ? "Retry only the browser-validation prerequisite and focused Playwright journey using the retained same-job script, selected environment and existing authentication. Default to unmasked full-page portal screenshots using page.screenshot({ path, fullPage: true }); do not ask again for default screenshot capture. Preserve explicit privacy rules and exclude credentials, sign-in/MFA screens and private/customer data. Do not retry an unchanged profile lock, copy browser state, delete a script still needed for continuation, change product source, or perform PR work. Report unavailable browser prerequisites as blocked and non-browser stages as skipped."
+            : "Reuse the repository-profile-defined browser authentication and all completed diagnosis, fix, review, and local validation evidence. Rerun only the blocked Playwright live-test gate using the profile-defined browser and test command, save at least one non-sensitive screenshot. Default to unmasked full-page portal screenshots using page.screenshot({ path, fullPage: true }) in the configured test-results folder; do not ask again for default screenshot capture. Preserve explicit privacy rules and exclude credentials, sign-in/MFA screens and private/customer data. Emit the terminal live-test result and continue to pull-request creation. Do not skip the live-test or PR stage."
       })
     });
     jobInputMessage.textContent =

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
+import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, PPE_POST_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
 import { ValidationSession, selectedValidationGates, validationGates } from "../dashboard/validation-gates.js";
 import { buildJobPrompt, FIXLAB_STAGES } from "../dashboard/server.js";
 
@@ -23,7 +23,9 @@ test("verified read-only POST searches use the default browser policy independen
         "Verified read-only POST searches:", "exact approved environment, origin and path",
         "genuine returned records", "policy blocker, not backend unavailability",
         "Do not silently substitute synthetic data", "Read-only jobs must not edit configuration",
-        "synthetic-only, API-only, unit-only or production policy"
+        "synthetic-only, API-only, unit-only or production policy",
+        "fixlab setup-queries REPOSITORY --environment ENV --runtime RUNTIME",
+        "separate plan-first setup operation", "Cover the full verified query scope"
       ]) {
         assert.ok(prompt.includes(phrase), `${mode}/${allowPostRequests}: ${phrase}`);
       }
@@ -52,6 +54,7 @@ test("verified query guidance stays aligned without expanding interactive CLI ar
 
 test("DEV write guidance stays native-only and aligned across runtime and initialized agents", () => {
   assert.ok(RUNTIME_RECOVERY_GUIDANCE.includes(DEV_WRITE_GUIDANCE));
+  assert.ok(RUNTIME_RECOVERY_GUIDANCE.includes(PPE_POST_GUIDANCE));
   for (const path of [
     "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
     "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
@@ -59,6 +62,7 @@ test("DEV write guidance stays native-only and aligned across runtime and initia
   ]) {
     const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8").replace(/\s+/gu, " ");
     assert.ok(source.includes(DEV_WRITE_GUIDANCE), path);
+    assert.ok(source.includes(PPE_POST_GUIDANCE), path);
   }
 });
 

@@ -318,6 +318,15 @@ cannot replay an approval, and a historical unclassified denial has no live
 request to approve. This feature does not make failed tests or organization
 restrictions automatically approvable.
 
+For an unreviewable native operation, FixLab can reject it once automatically
+and ask Copilot to reuse existing reviewed helpers. This is not an approval or
+retry. If another blocker remains, its panel reports that safe recovery was
+already attempted and gives reason-specific next steps. For oversized source
+edits, use **Review source-edit access** when offered. For credential-like
+content, use an existing authentication helper; never paste secrets or resend
+the hidden content. Human denials and managed restrictions are not recovered
+automatically, and missing coverage remains blocked rather than passed.
+
 For an Agency or older dashboard job that reports "no interactive user response was available"
 or "Denied, no one to approve", use the browser's **Copilot permission required**
 panel. Inspect the logs, then review and explicitly confirm a specific external

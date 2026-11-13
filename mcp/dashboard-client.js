@@ -120,14 +120,23 @@ export async function dashboardConversation(args, reply = false) {
       !current.job || current.job.id !== args.jobId) {
     throw new Error("Reply requires the user's explicit answer and the current dashboard instance and job IDs. Read status again.");
   }
-  if (!["comment", "continue", "retry", "skip", "manual-pass", "manual-fail"].includes(args.action) ||
+  if (!["answer", "comment", "continue", "retry", "skip", "manual-pass", "manual-fail"].includes(args.action) ||
       typeof args.details !== "string" || !args.details.trim() || args.details.length > 10000 ||
       (args.validationIntent !== undefined && !["scoped", "full", "affected"].includes(args.validationIntent))) {
     throw new Error("Provide a valid action, explicit answer (1-10000 characters), and scoped, full, or affected validation intent.");
   }
+  if (args.action === "answer" && (current.question?.responseChannel !== "conversation" ||
+      current.question?.kind !== "runtime-question" || current.question.requestId !== args.requestId ||
+      args.validationIntent !== undefined || args.reviewedWorkspace !== undefined)) {
+    throw new Error("Answer requires the current live question request ID; permissions and sensitive questions remain in the dashboard. Read status again.");
+  }
+  if (args.action !== "answer" && args.requestId !== undefined) {
+    throw new Error("A runtime request ID is valid only for an explicit live question answer.");
+  }
   const result = validateConversation(await dashboardRequest(args.port, "/api/conversation/reply", {
     instanceId: args.instanceId, jobId: args.jobId, repository,
     confirmed: true, action: args.action, details: args.details,
+    requestId: args.requestId,
     validationIntent: args.validationIntent, reviewedWorkspace: args.reviewedWorkspace
   }), repository);
   if (result.instanceId !== args.instanceId || result.job?.id !== args.jobId) {

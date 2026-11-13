@@ -10,6 +10,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync
 } from "node:fs";
 import { createServer as createHttpServer, request as createHttpRequest } from "node:http";
@@ -20,6 +21,7 @@ import { dirname, join, parse } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
 import test from "node:test";
 import {
+  formatJobStatus,
   parseNaturalChatCommand,
   runChat
 } from "../dashboard/chat.js";
@@ -29,6 +31,7 @@ import {
   buildJobPrompt,
   createCacheContext,
   createCopilotExecutor,
+  createAuthenticationDiagnostics,
   createDashboardServer,
   configuredTestSynthesis,
   createProcessCompletion,
@@ -57,6 +60,37 @@ const packageRoot = new URL("..", import.meta.url).pathname.replace(
   /^\/([A-Za-z]:)/,
   "$1"
 );
+
+test("authentication diagnostics classify split output without retaining private helper details", () => {
+  const cases = [
+    ["Cannot find module 'private-helper-path'", "missing-dependency"],
+    ["Executable doesn't exist at private-browser-path", "browser-unavailable"],
+    ["ProcessSingleton: browser profile is busy", "browser-profile-busy"],
+    ["AADSTS53003: private identity and challenge", "authentication-required"],
+    ["Error: No tests found", "configuration-error"],
+    ["TimeoutError: private page locator timed out", "timeout"],
+    ["Unrecognized private authentication failure", "unknown"]
+  ];
+  for (const [output, reason] of cases) {
+    const diagnostics = createAuthenticationDiagnostics();
+    diagnostics.observe("stdout", Buffer.from("private-token-sentinel\n"));
+    const middle = Math.floor(output.length / 2);
+    diagnostics.observe("stderr", Buffer.from(output.slice(0, middle)));
+    diagnostics.observe("stderr", Buffer.from(output.slice(middle)));
+    const result = diagnostics.failure();
+    assert.equal(result.reason, reason);
+    assert.doesNotMatch(JSON.stringify(result), /private-|AADSTS53003|ProcessSingleton/);
+    assert.ok(result.message.length > 20);
+  }
+  const diagnostics = createAuthenticationDiagnostics();
+  diagnostics.observe("stdout", Buffer.from("Cannot find "));
+  diagnostics.observe("stderr", Buffer.from("module: unrelated stream"));
+  assert.equal(diagnostics.failure().reason, "unknown", "streams must not create a false diagnostic");
+  diagnostics.observe("stderr", Buffer.from("\nAADSTS53003: restricted"));
+  diagnostics.observe("stdout", Buffer.from("module 'private-dependency'"));
+  assert.equal(diagnostics.failure().reason, "authentication-required",
+    "access restrictions must not be hidden behind dependency diagnostics");
+});
 
 test("engineering summary validates detail fields, redacts sensitive text and rejects unsafe paths", () => {
   const detail = {
@@ -1377,6 +1411,12 @@ test("connected control starts scoped browser jobs, manages the queue and stops 
     assert.match(calls[0].prompt, /Playwright-only mode/);
     assert.match(calls[0].prompt, /Do not edit files/);
     assert.match(calls[0].prompt, /Full regression is explicitly deferred/);
+    assert.match(calls[0].prompt, /Assigned dashboard connection/u);
+    assert.ok(calls[0].prompt.includes(`Repository: ${JSON.stringify(base.repository)}`));
+    assert.ok(calls[0].prompt.includes(`Port: ${base.port}`));
+    assert.ok(calls[0].prompt.includes(`Instance ID: ${started.state.instanceId}`));
+    assert.ok(calls[0].prompt.includes(`Job ID: ${started.state.job.id}`));
+    assert.doesNotMatch(calls[0].prompt, /Dashboard-owned required validation/u);
     assert.equal(JSON.stringify(started).includes('"logs"'), false);
     const queued = await control("job-start", { request: "Queue another check.", mode: "validate-only" });
     assert.equal(queued.result.queued, true);
@@ -1982,6 +2022,129 @@ test("new DEV/PPE portal defaults use real reads only in their environments and 
   assert.equal(configuredTestSynthesis(profile, "", undefined, "dev").unitTestsOnly, true);
 });
 
+test("connected starts accept explicitly confirmed all-POST and Allow all for selected lower environments", async () => {
+  const repository = createGitRepository();
+  const profile = validProfile();
+  profile.environments = ["dev", "sit", "uat"];
+  profile.browserAutomation.dataSafety.post = Object.fromEntries(profile.environments.map((environment) => [
+    environment, {
+      scope: "api://example-service/access", sessionHelper: "post-session.mjs",
+      baseUrls: [`https://api.shared.example.test/api/${environment}/v1`]
+    }
+  ]));
+  writeFileSync(join(repository, "post-session.mjs"),
+    'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  const launches = [];
+  const { dashboard, url } = await startDashboard(repository, (input) => {
+    launches.push(input);
+    return { completion: new Promise(() => {}) };
+  }, undefined, { runtime: "copilot" });
+  const base = { repository, port: Number(new URL(url).port) };
+  const start = async (parameters = {}, confirmed = true) => {
+    const state = await dashboardConversation(base);
+    return dashboardControl({
+      ...base, instanceId: state.instanceId, jobId: state.job?.id ?? null,
+      operation: "job-start", confirmed,
+      parameters: {
+        request: "Synthetic approved lower-environment live scenarios.", mode: "validate-only",
+        targetEnvironment: "dev", allowPostRequests: true,
+        postWriteApprovalConfirmed: true, postBaseApprovalConfirmed: true,
+        toolApprovalMode: "allow-all", allowAllConfirmed: true, runAllUiScenarios: true,
+        ...parameters
+      }
+    });
+  };
+  try {
+    await assert.rejects(start({}, false), /explicit user authorization/u);
+    for (const parameters of [
+      { allowAllConfirmed: false }, { postWriteApprovalConfirmed: false },
+      { postBaseApprovalConfirmed: "yes" }, { allowPostRequests: false },
+      { targetEnvironment: "production" }, { testMutationMode: "none" },
+      { testMutationMode: "intercepted" }
+    ]) {
+      await assert.rejects(start(parameters));
+    }
+    assert.equal(launches.length, 0);
+    for (const environment of profile.environments) {
+      await start({ targetEnvironment: environment });
+      const state = (await jsonRequest(url, "/api/job")).body;
+      const job = state.queue.at(-1) ?? state.job;
+      assert.equal(job.targetEnvironment, environment);
+      assert.equal(job.postWriteApproved, true);
+      assert.equal(job.toolApprovalMode, "allow-all");
+      assert.equal(job.runAllUiScenarios, true);
+    }
+    assert.equal(launches.length, 1, "queued grants never alter the active executor");
+    assert.equal(launches[0].postWriteApproval.mode, "post-base");
+    assert.equal(launches[0].postWriteApproval.environment, "dev");
+    assert.equal(launches[0].toolApprovalMode, "allow-all");
+    assert.equal(launches[0].allowPostRequests, true);
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("PPE POST-only approval uses reviewed API bases without granting other methods or surviving recovery", async () => {
+  const repository = createGitRepository();
+  const profile = validProfile();
+  profile.environments = ["dev", "ppe"];
+  profile.browserAutomation.dataSafety.post = { ppe: {
+    scope: "api://example-service/access", sessionHelper: "ppe-session.mjs",
+    baseUrls: ["https://api.shared.example.test/api/ppe/v1"]
+  } };
+  writeFileSync(join(repository, "ppe-session.mjs"),
+    'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  const launches = [];
+  const executor = (input) => {
+    launches.push(input);
+    return { completion: new Promise(() => {}) };
+  };
+  let running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
+  try {
+    const post = (changes = {}, origin = running.url) => jsonRequest(running.url, "/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
+      body: JSON.stringify({ request: "Approve all PPE POST requests for this job.", mode: "validate-only",
+        targetEnvironment: "ppe", allowPostRequests: true, postWriteApprovalConfirmed: true,
+        postBaseApprovalConfirmed: true, ...changes })
+    });
+    const created = await post();
+    assert.equal(created.response.status, 202, created.body.error);
+    assert.equal(launches[0].postWriteApproval.mode, "post-base");
+    assert.equal(created.body.job.postWriteApproved, true);
+    assert.equal(created.body.job.ppeWriteApproved, false);
+    assert.match(launches[0].prompt, /all PPE POST requests, including writes/u);
+    assert.match(launches[0].prompt, /fixlab_nonproduction_post/u);
+    assert.doesNotMatch(launches[0].prompt, /Use fixlab_ppe_write/u);
+    for (const changes of [
+      { postBaseApprovalConfirmed: "yes" }, { allowPostRequests: false },
+      { postWriteApprovalConfirmed: false }, { targetEnvironment: "dev" },
+      { allowPpeWrites: true, ppeWriteApprovalConfirmed: true },
+      { testMutationMode: "none" }, { testMutationMode: "intercepted" }
+    ]) {
+      assert.equal((await post(changes)).response.status, 400, JSON.stringify(changes));
+    }
+    for (const origin of ["", "https://example.invalid"]) {
+      assert.equal((await post({}, origin)).response.status, 403);
+    }
+    const queued = await post();
+    const held = await jsonRequest(running.url, "/api/jobs/hold", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: queued.body.queue[0].id })
+    });
+    assert.equal(held.body.held[0].postWriteApproved, false);
+    await running.dashboard.close();
+    running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
+    assert.equal((await jsonRequest(running.url, "/api/status")).body.job.postWriteApproved, false);
+  } finally {
+    await running.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 for (const environment of ["dev", "ppe"]) {
 for (const enabled of [true, false]) {
   test(`${environment.toUpperCase()} portal default ${enabled} is environment-bound, recovered and cannot change on retry`, async () => {
@@ -2251,6 +2414,9 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
   const approvedField = `${environment}WriteApproved`;
   const profile = validProfile();
   profile.environments = ["dev", "sit", "uat", "ppe"];
+  if (environment === "ppe") {
+    profile.browserAutomation.testSynthesis.ppeReadOnly = true;
+  }
   profile.browserAutomation.dataSafety[`${environment}Write`] = {
     scope: "api://example-service/access", sessionHelper: "dev-session.mjs",
     origins: [`https://api.${environment}.example.test`]
@@ -2269,7 +2435,8 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
       method: "POST",
       headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
       body: JSON.stringify({ request: `Synthetic approved broad ${environment} writes.`, mode: "validate-only",
-        targetEnvironment: environment, [writeField]: true, [confirmField]: true, ...changes })
+        targetEnvironment: environment, [writeField]: true, [confirmField]: true,
+        runAllUiScenarios: environment === "ppe", ...changes })
     });
     for (const changes of [
       { [writeField]: "yes" }, { [writeField]: null }, { [writeField]: false },
@@ -2294,6 +2461,18 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
     assert.equal(launches[0].postWriteApproval.jobId, created.body.job.id);
     assert.equal(launches[0].allowPostRequests, true);
     assert.match(launches[0].prompt, new RegExp(`fixlab_${environment}_write.*POST, PUT, PATCH and DELETE`, "u"));
+    if (environment === "ppe") {
+      assert.equal(created.body.job.runAllUiScenarios, true);
+      assert.match(launches[0].prompt, /run every repository-defined Playwright\/UI scenario/);
+      assert.match(launches[0].prompt, /Do not intercept an authorized mutation/);
+      assert.doesNotMatch(launches[0].prompt, /Keep all backend access read-only and intercept every mutating request/);
+      const browserPrompt = buildJobPrompt({
+        request: "Run all PPE scenarios.", mode: "playwright-only", runAllUiScenarios: true,
+        targetEnvironment: "ppe", testEvidence: created.body.job.testEvidence
+      });
+      assert.match(browserPrompt, /Save, Submit, Approve, autosave and other writes require the current mediated native approval/);
+      assert.doesNotMatch(browserPrompt, /No Save, Submit, Approve/);
+    }
     const queued = await post();
     assert.equal(queued.body.queue[0][approvedField], true);
     const held = await jsonRequest(running.url, "/api/jobs/hold", {
@@ -2800,6 +2979,10 @@ test("live native prompts require current instance/job/request, exact browser or
     const conversation = (await jsonRequest(url, "/api/conversation")).body;
     assert.equal(conversation.question.kind, "runtime-input");
     assert.deepEqual(conversation.question.actions, []);
+    assert.equal(conversation.job.executionState, "waiting-for-permission");
+    assert.equal(conversation.question.requestId, id);
+    assert.equal(conversation.question.responseChannel, "dashboard");
+    assert.doesNotMatch(JSON.stringify(conversation.question), /npm test/);
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal((await jsonRequest(url, "/api/job")).body.job.status, "running", "human wait suspends idle timeout");
     const valid = {
@@ -2824,6 +3007,13 @@ test("live native prompts require current instance/job/request, exact browser or
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "continue", details: "Do not use as approval." })
     })).response.status, 409);
+    assert.equal((await jsonRequest(url, "/api/conversation/reply", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repository: realpathSync(repository), instanceId: state.instanceId,
+        jobId: created.body.job.id, requestId: id, confirmed: true, action: "answer", details: "Allow"
+      })
+    })).response.status, 409, "a question answer cannot approve a native permission");
     assert.equal(sent.length, 0);
     assert.equal((await post(valid)).response.status, 200);
     assert.equal(sent[0].action, "allow");
@@ -2849,6 +3039,104 @@ test("live native prompts require current instance/job/request, exact browser or
     await dashboard.close();
     assert.equal(sent.at(-1).action, "cancel");
     assert.throws(() => bridge.respond(questionId, { action: "answer", choice: 0 }), /stale/);
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("connected live answers are exact, single-use and continue only the same executor without logging answers", async () => {
+  const repository = createGitRepository();
+  let bridge;
+  let launches = 0;
+  const sent = [];
+  const questionId = randomUUID();
+  const { dashboard, url } = await startDashboard(repository, ({ onRuntimeRequests, onOutput }) => {
+    launches++;
+    onOutput("stdout", "FIXLAB_STAGE|diagnosis|passed|Retained diagnosis.\n");
+    bridge = createRuntimeRequestBridge({ send: (value) => sent.push(value), onChange: onRuntimeRequests });
+    bridge.receive({
+      ...runtimeQuestionPrompt({
+        question: "Which reviewed test scope?",
+        choices: ["Focused answer sentinel", "Full"], allowFreeform: false
+      }),
+      id: questionId
+    });
+    return {
+      completion: new Promise(() => {}),
+      respondToRuntimeRequest: (id, decision) => bridge.respond(id, decision),
+      terminate: () => bridge.cancel()
+    };
+  }, undefined, { runtime: "copilot" });
+  const post = (body, origin) => jsonRequest(url, "/api/conversation/reply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
+    body: JSON.stringify(body)
+  });
+  try {
+    const created = await jsonRequest(url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Synthetic live question handoff.", mode: "validate-only" })
+    });
+    const args = { repository: realpathSync(repository), port: Number(new URL(url).port) };
+    const state = await dashboardConversation(args);
+    assert.equal(state.job.executionState, "waiting-for-input");
+    assert.equal(state.job.status, "running");
+    assert.equal(state.question.kind, "runtime-question");
+    assert.equal(state.question.requestId, questionId);
+    assert.deepEqual(state.question.actions, ["answer"]);
+    assert.match(formatJobStatus((await jsonRequest(url, "/api/job")).body.job), /waiting-for-input.*\n[\s\S]*Action needed: Which reviewed test scope/);
+    assert.equal(state.question.message, "Which reviewed test scope?");
+    const reply = {
+      ...args, instanceId: state.instanceId, jobId: created.body.job.id,
+      requestId: questionId, confirmed: true, action: "answer", details: "Focused answer sentinel"
+    };
+    for (const change of [
+      { instanceId: randomUUID() }, { jobId: randomUUID() }, { repository: tmpdir() },
+      { requestId: randomUUID() }, { requestId: undefined }, { confirmed: false },
+      { action: "comment" }, { action: "retry" }, { action: "allow" }
+    ]) {
+      const result = await post({ ...reply, ...change });
+      assert.equal(result.response.status, 409, JSON.stringify(change));
+    }
+    assert.equal((await post(reply, url)).response.status, 403);
+    for (const change of [
+      { details: "An unavailable choice" }, { validationIntent: "scoped" },
+      { scope: "all-tools" }, { recover: true }, { reviewedWorkspace: {} }
+    ]) {
+      assert.equal((await post({ ...reply, ...change })).response.status, 400, JSON.stringify(change));
+    }
+    await assert.rejects(dashboardConversation({ ...reply, requestId: randomUUID() }, true), /request ID/);
+    assert.equal(sent.length, 0);
+    const answered = await dashboardConversation(reply, true);
+    assert.equal(answered.question, null);
+    assert.equal(answered.job.executionState, "running");
+    assert.equal(answered.job.stages.diagnosis.status, "passed");
+    assert.equal(launches, 1);
+    assert.deepEqual(sent, [{
+      type: "response", id: questionId, action: "answer",
+      answer: "Focused answer sentinel", wasFreeform: false
+    }]);
+    assert.equal((await post(reply)).response.status, 409);
+    const freeformId = randomUUID();
+    bridge.receive({ ...runtimeQuestionPrompt({ question: "What is the remaining symptom?" }), id: freeformId });
+    assert.equal((await post({ ...reply, requestId: freeformId, details: "password=private-sentinel" })).response.status, 400);
+    const freeform = await post({ ...reply, requestId: freeformId, details: "Freeform symptom sentinel" });
+    assert.equal(freeform.response.status, 200);
+    assert.equal(sent.at(-1).wasFreeform, true);
+    bridge.receive({
+      ...runtimeQuestionPrompt({ question: "Allow GET https://private.example.test/path?" }),
+      id: randomUUID()
+    });
+    const hidden = await dashboardConversation(args);
+    assert.equal(hidden.question.responseChannel, "dashboard");
+    assert.doesNotMatch(JSON.stringify(hidden), /private\.example/);
+    assert.equal((await post({ ...reply, requestId: hidden.question.requestId })).response.status, 409);
+    const snapshot = readFileSync(join(dirname(createCacheContext(repository).cachePath), "dashboard-jobs.json"), "utf8");
+    const job = (await jsonRequest(url, "/api/job")).body.job;
+    assert.doesNotMatch(snapshot, /Focused answer sentinel|Freeform symptom sentinel|Which reviewed test scope|private\.example/);
+    assert.doesNotMatch(JSON.stringify(job.logs), /Focused answer sentinel|Freeform symptom sentinel/);
+    assert.equal(job.pendingInputCount, 0);
   } finally {
     await dashboard.close();
     rmSync(repository, { recursive: true, force: true });
@@ -4867,6 +5155,27 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
     profile.browserAutomation.authentication.statusPaths = ["e2e/.auth/user.json", "e2e/.edge-profile"];
     writeFileSync(profilePath, JSON.stringify(profile));
 
+    writeFileSync(join(repository, "auth-failure.cjs"),
+      "process.stderr.write('Error: No tests found; private-auth-output-sentinel'); process.exitCode = 1;");
+    profile.browserAutomation.authentication.command = "node auth-failure.cjs";
+    writeFileSync(profilePath, JSON.stringify(profile));
+    assert.equal((await jsonRequest(url, "/api/playwright/connect", { method: "POST" })).response.status, 202);
+    const diagnosticDeadline = Date.now() + 10000;
+    do {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      status = await jsonRequest(url, "/api/playwright/status");
+    } while (status.body.running && Date.now() < diagnosticDeadline);
+    assert.equal(status.body.running, false, "failed authentication must settle");
+    assert.equal(status.body.ready, false);
+    assert.equal(status.body.lastResult.reason, "configuration-error");
+    assert.match(status.body.lastResult.message, /configured working directory/u);
+    assert.equal(compactControlResult(status.body).lastResult.reason, "configuration-error");
+    assert.doesNotMatch(JSON.stringify(status.body), /private-auth-output-sentinel/u);
+    assert.doesNotMatch(JSON.stringify((await jsonRequest(url, "/api/status")).body),
+      /private-auth-output-sentinel/u);
+    profile.browserAutomation.authentication.command = "node playwright-auth.js";
+    writeFileSync(profilePath, JSON.stringify(profile));
+
     const job = await jsonRequest(url, "/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4893,12 +5202,25 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
     const nestedDirectory = join(screenshotDirectory, "nested-journey");
     mkdirSync(nestedDirectory);
     writeFileSync(join(nestedDirectory, "nested-proof.png"), screenshot);
+    const flowDirectory = join(screenshotDirectory, "latest-flow");
+    mkdirSync(flowDirectory);
+    const capturedAt = Date.now() / 1000 + 1;
+    for (const [index, name] of [
+      "01-search.png", "02-input-preview.png", "03-verified-result.png"
+    ].entries()) {
+      const path = join(flowDirectory, name);
+      writeFileSync(path, screenshot);
+      utimesSync(path, capturedAt + index / 10, capturedAt + index / 10);
+    }
     const artifacts = await jsonRequest(
       url,
       `/api/playwright/artifacts?jobId=${job.body.job.id}`
     );
     assert.equal(artifacts.response.status, 200);
-    assert.equal(artifacts.body.artifacts.length, 3);
+    assert.equal(artifacts.body.artifacts.length, 6);
+    assert.deepEqual(artifacts.body.artifacts.slice(0, 3).map((artifact) => artifact.name), [
+      "01-search.png", "02-input-preview.png", "03-verified-result.png"
+    ]);
     const imageArtifact = artifacts.body.artifacts.find(
       (artifact) => artifact.name === "hold-option.png"
     );
@@ -8653,6 +8975,48 @@ test("selected non-production data falls back to synthetic only when required", 
   assert.match(prompt, /do not claim the selected backend or its data was validated/);
 });
 
+test("scenario-first browser recovery applies across modes without overriding deferred or API contracts", () => {
+  for (const mode of ["playwright-only", "validate-only", "fix-and-validate"]) {
+    const prompt = buildJobPrompt({ request: "Validate the remap behavior.", mode });
+    assert.match(prompt, /Scenario-first validation/u);
+    assert.match(prompt, /not a setup check, sign-in or screenshot alone/u);
+    assert.match(prompt, /repair its syntax\/selectors/u);
+    assert.match(prompt, /discoverable \.spec file in a job-owned folder/u);
+    assert.match(prompt, /configured testDir; honor testMatch\/project/u);
+    assert.match(prompt, /Verify --list before execution/u);
+    assert.match(prompt, /report file path, runner command and assertion results/u);
+    assert.match(prompt, /approved synthetic\/intercepted data/u);
+    assert.match(prompt, /Finish independent scenarios before asking/u);
+    assert.match(prompt, /never use another checkout to prove an unpublished fix/u);
+  }
+  for (const overrides of [
+    { testEvidence: { apiOnly: true } },
+    { testEvidence: { unitTestsOnly: true } },
+    { skipLiveTests: true },
+    { deferValidation: true, workflow: { publication: "draft" } }
+  ]) {
+    assert.doesNotMatch(buildJobPrompt({
+      request: "Preserve the selected validation contract.", mode: "fix-and-validate", ...overrides
+    }), /Scenario-first validation/u);
+  }
+});
+
+test("live-first recovery cannot offer synthetic fallback when interception is disabled", () => {
+  for (const evidence of [
+    { mutationMode: "none", selectedMutationMode: "none" },
+    { mutationMode: "intercepted", selectedMutationMode: "none" },
+    { mutationMode: "intercepted", enabled: false }
+  ]) {
+    const prompt = buildJobPrompt({
+      request: "Validate using approved reads only.", mode: "playwright-only", targetEnvironment: "dev",
+      testEvidence: { enabled: true, source: "non-production-read-only", ...evidence }
+    });
+    assert.doesNotMatch(prompt, /then fall back to synthetic-intercepted data/u);
+    assert.match(prompt, /This run does not permit synthetic interception/u);
+    assert.match(prompt, /block only dependent scenarios/u);
+  }
+});
+
 test("backend-first prompt guidance requires environment and read-only source", () => {
   const withoutEnvironment = buildJobPrompt({
     request: "Validate result rendering.",
@@ -8744,6 +9108,14 @@ test("browser-only instructions are bounded and retain request, policy and execu
   const full = buildJobPrompt({
     request, mode: "fix-and-validate", targetEnvironment: "dev"
   });
+  for (const prompt of [browser, full]) {
+    assert.match(prompt, /page\.screenshot\(\{ path, fullPage: true \}\)/u);
+    assert.match(prompt, /Default to unmasked full-page screenshots/u);
+    assert.match(prompt, /No blanket masking or repeat screenshot-scope questions/u);
+    assert.match(prompt, /job-owned transient wrapper/u);
+    assert.match(prompt, /Respect explicit privacy rules/u);
+    assert.match(prompt, /API-only and unit-test-only runs require no browser screenshot/u);
+  }
   assert.ok(browser.length < full.length * 0.6, `${browser.length} must be less than 60% of ${full.length}`);
   assert.ok(browser.length < 9500);
   assert.ok(browser.endsWith(request));

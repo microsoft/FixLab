@@ -14,6 +14,7 @@ const protocolVersion = "2024-11-05";
 const tools = [
   {
     name: "fixlab_inspect_repository",
+    annotations: { readOnlyHint: true },
     description:
       "Inspect whether a repository has a parseable FixLab profile and summarize its configured validation surfaces.",
     inputSchema: {
@@ -29,6 +30,7 @@ const tools = [
   },
   {
     name: "fixlab_validation_commands",
+    annotations: { readOnlyHint: true },
     description:
       "Read the repository-owned package scripts that participate in FixLab validation without executing them.",
     inputSchema: {
@@ -44,7 +46,8 @@ const tools = [
   },
   {
     name: "fixlab_dashboard_status",
-    description: "Read compact status and any pending recovery question from an existing loopback dashboard. Ask the user using the host's question UI; never assume approval. Does not start or modify jobs.",
+    annotations: { readOnlyHint: true },
+    description: "Read compact status, waiting state and any pending question from an existing loopback dashboard. Ask the user using the host's question UI; never assume approval. Safe live questions include a requestId for an explicit answer; native permissions and sensitive questions stay in the dashboard. Does not start or modify jobs.",
     inputSchema: {
       type: "object",
       properties: { repository: { type: "string" }, port: { type: "integer", minimum: 1, maximum: 65535 } },
@@ -54,7 +57,8 @@ const tools = [
   },
   {
     name: "fixlab_dashboard_reply",
-    description: "Submit the user's explicit answer to the exact dashboard instance and same job returned by status. Never infer confirmed=true. For workspace reuse, review the diff with the user and send the approved branch/fingerprint. Cannot grant runtime permissions or bypass authentication or required gates. Read status again after conflicts.",
+    annotations: { readOnlyHint: false },
+    description: "Submit the user's explicit answer to the exact dashboard instance and same job returned by status. For a live runtime-question with responseChannel=conversation, use action=answer, its requestId and the user's exact answer or offered choice as details; this continues the same executor without retrying. Never infer confirmed=true. For workspace reuse, review the diff with the user and send the approved branch/fingerprint. Cannot grant runtime permissions or bypass authentication or required gates. Read status again after conflicts.",
     inputSchema: {
       type: "object",
       properties: {
@@ -62,7 +66,8 @@ const tools = [
         port: { type: "integer", minimum: 1, maximum: 65535 },
         instanceId: { type: "string" }, jobId: { type: "string" },
         confirmed: { type: "boolean", const: true },
-        action: { type: "string", enum: ["comment", "continue", "retry", "skip", "manual-pass", "manual-fail"] },
+        action: { type: "string", enum: ["answer", "comment", "continue", "retry", "skip", "manual-pass", "manual-fail"] },
+        requestId: { type: "string", description: "Exact live question requestId from status, required only for action=answer." },
         details: { type: "string", minLength: 1, maxLength: 10000 },
         validationIntent: { type: "string", enum: ["scoped", "full", "affected"] },
         reviewedWorkspace: {
@@ -78,6 +83,7 @@ const tools = [
   },
   {
     name: "fixlab_dashboard_control",
+    annotations: { readOnlyHint: false },
     description: "Run an existing FixLab dashboard operation authorized by the user: jobs/queue, configured gates, frontend, human authentication, scoped permissions, sessions and intake. Read status first and bind to its instance/job IDs (jobId=null when none). parameters uses that dashboard operation's existing JSON payload. confirmed=true represents actual user authorization, not permission to bypass normal guards. Prefer the dedicated reply tool for blocker answers. No arbitrary shell commands, URLs or credential access. A successful start is not evidence that validation passed.",
     inputSchema: {
       type: "object",

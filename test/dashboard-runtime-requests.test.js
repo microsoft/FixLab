@@ -5,6 +5,7 @@ import {
   createRuntimeRequestBridge,
   MAX_RUNTIME_REQUESTS,
   PERMISSION_RECOVERY_GUIDANCE,
+  runtimeConversationQuestion,
   runtimePermissionPrompt,
   runtimeQuestionPrompt,
   validateRuntimeUsage
@@ -34,6 +35,45 @@ function fixture() {
   return { bridge, sent, permission, get requests() { return requests; } };
 }
 
+test("connected blockers distinguish answerable questions from private questions and permission recovery", () => {
+  const question = {
+    ...runtimeQuestionPrompt({ question: "Which test scope?", choices: ["Focused", "Full"] }),
+    id: randomUUID()
+  };
+  const view = runtimeConversationQuestion(question);
+  assert.equal(view.kind, "runtime-question");
+  assert.equal(view.requestId, question.id);
+  assert.equal(view.message, "Which test scope?");
+  assert.deepEqual(view.choices, ["Focused", "Full"]);
+  assert.deepEqual(view.actions, ["answer"]);
+  for (const request of [
+    { ...question, details: "Allow GET https://private.example.test/path?" },
+    { ...question, choices: ["https://private.example.test/path"] },
+    { ...question, details: "Enter the verification code" },
+    { ...question, title: "Enter your PIN" },
+    ...["Enter your API key", "Enter your refresh token", "Enter your PIN",
+      "API key?", "Refresh token required to continue:", "PIN?", "API keys?", "Refresh tokens:", "Passcode?", "Credentials:"]
+      .map((details) => ({ ...question, details }))
+  ]) {
+    const hidden = runtimeConversationQuestion(request);
+    assert.equal(hidden.responseChannel, "dashboard");
+    assert.deepEqual(hidden.actions, []);
+    assert.doesNotMatch(JSON.stringify(hidden), /private\.example|verification code/);
+    if (!request.details.includes("https:") && !request.choices.some((value) => value.includes("https:"))) {
+      assert.throws(() => fixture().bridge.receive(request), /invalid/);
+    }
+  }
+  const blocked = runtimeConversationQuestion({
+    ...runtimePermissionPrompt({ kind: "write", fileName: "test.js", diff: 'const token = "private-sentinel";' }),
+    id: randomUUID()
+  });
+  assert.equal(blocked.kind, "runtime-input");
+  assert.deepEqual(blocked.blockedReasons, ["sensitive-content"]);
+  assert.equal(blocked.canRecover, true);
+  assert.match(blocked.message, /Deny and request safe recovery/);
+  assert.doesNotMatch(JSON.stringify(blocked), /private-sentinel|test\.js/);
+});
+
 test("blocked permission diagnostics distinguish causes without exposing original details", () => {
   for (const [request, expected] of [
     [{ kind: "shell", fullCommandText: "x".repeat(8193) }, ["oversized"]],
@@ -52,16 +92,55 @@ test("blocked permission diagnostics distinguish causes without exposing origina
   }
 });
 
+test("authorization source identifiers are reviewable without exposing authorization values", () => {
+  const prompt = runtimePermissionPrompt({
+    kind: "write", fileName: "FeatureFlagsController.cs",
+    diff: "using Microsoft.AspNetCore.Authorization;\n[Authorize]\npublic class FeatureFlagsController {}"
+  });
+  assert.equal(prompt.canApprove, true);
+  const state = fixture();
+  state.bridge.receive({ ...prompt, id: randomUUID() });
+  assert.equal(state.requests[0].canApprove, true);
+  for (const diff of [
+    'Authorization: Basic synthetic-private-value',
+    'const headers = { "Authorization": "synthetic-private-value" };',
+    'const authorization = "synthetic-private-value";',
+    'const rawAuthorizationHeader = "synthetic-private-value";',
+    'authorization header is synthetic-private-value'
+  ]) {
+    const hidden = runtimePermissionPrompt({ kind: "write", fileName: "test.js", diff });
+    assert.equal(hidden.canApprove, false);
+    assert.doesNotMatch(hidden.details, /synthetic-private-value/u);
+  }
+  for (const question of ["Provide your authorization header", "What is your authorization?"]) {
+    assert.throws(() => runtimeQuestionPrompt({ question }), /sensitive/u);
+  }
+  const oversized = runtimePermissionPrompt({
+    kind: "write", fileName: "FeatureFlagsController.cs",
+    diff: `using ${"Authorization".repeat(12000)};`
+  });
+  assert.deepEqual(oversized.blockedReasons, ["oversized"]);
+  assert.equal(oversized.canUseFileTrust, true);
+});
+
 test("guided recovery denies only the exact request, never creates a grant and cannot be replayed", () => {
   const state = fixture();
-  const request = state.permission("x".repeat(8193));
+  const request = { ...state.permission("x".repeat(8193)), automaticRecoveryAttempted: true };
   state.bridge.receive(request);
   assert.equal(state.requests[0].canRecover, true);
+  assert.equal(state.requests[0].automaticRecoveryAttempted, true);
+  assert.equal(runtimeConversationQuestion(state.requests[0]).automaticRecoveryAttempted, true);
   assert.throws(() => state.bridge.respond(request.id, { action: "allow", recover: true }), /not available/u);
   assert.throws(() => state.bridge.respond(request.id, { action: "deny", recover: true, scope: "all-tools" }), /not available/u);
   state.bridge.respond(request.id, { action: "deny", recover: true });
   assert.deepEqual(state.sent[0], { type: "response", id: request.id, action: "deny", recover: true });
   assert.throws(() => state.bridge.respond(request.id, { action: "deny", recover: true }), /stale/u);
+  for (const change of [
+    { automaticRecoveryAttempted: false }, { canRecover: undefined },
+    { kind: "question" }, { canApprove: true }
+  ]) {
+    assert.throws(() => state.bridge.receive({ ...request, ...change, id: randomUUID() }), /invalid/u);
+  }
   for (const source of [
     { kind: "read", path: ".auth/user.json" },
     { kind: "shell", fullCommandText: "x".repeat(8193), managedApprovalRequired: true },
@@ -96,20 +175,31 @@ test("large-edit review metadata survives transport but cannot approve or replay
   }
 });
 
-test("SDK safe recovery returns a denial with bounded feedback rather than approving the hidden operation", async () => {
+test("SDK automatically rejects one unreviewable operation for safe recovery before requiring manual review", async () => {
   let decisions = 0;
+  const logs = [];
   await runCopilotSession({ repository: "synthetic-repository", prompt: "Recover safely.", toolApprovalMode: "allow-all" }, {
-    output() {},
+    output(_stream, text) { logs.push(text); },
     async ask(prompt) {
       decisions++;
       assert.equal(prompt.canRecover, true);
       assert.equal(prompt.canApprove, false);
+      assert.equal(prompt.automaticRecoveryAttempted, true);
+      assert.match(runtimeConversationQuestion({ ...prompt, id: randomUUID() }).message,
+        /Automatic safe recovery was already attempted/u);
       return { action: "deny", recover: true };
     },
     client: {
       async start() {},
       async createSession(options) {
         return { rpc: managedPolicyRpc(), on() {}, async sendAndWait() {
+          const first = await options.onPermissionRequest({
+            kind: "write", fileName: "test.js", diff: 'const token = "synthetic-private-value";'
+          });
+          assert.equal(first.kind, "reject");
+          assert.match(first.feedback, /FixLab rejected an unreviewable operation/u);
+          assert.match(first.feedback, /Do not replay, encode, conceal, split or repackage/u);
+          assert.equal(decisions, 0);
           assert.deepEqual(await options.onPermissionRequest({ kind: "shell", fullCommandText: "x".repeat(8193) }),
             { kind: "reject", feedback: PERMISSION_RECOVERY_GUIDANCE });
         } };
@@ -118,8 +208,37 @@ test("SDK safe recovery returns a denial with bounded feedback rather than appro
     }
   });
   assert.equal(decisions, 1);
+  assert.match(logs.join(""), /one automatic safe recovery/u);
+  assert.doesNotMatch(logs.join(""), /x{100}|synthetic-private-value/u);
   assert.match(PERMISSION_RECOVERY_GUIDANCE, /Do not replay, encode, conceal, split or repackage/u);
   assert.match(PERMISSION_RECOVERY_GUIDANCE, /Keep completed evidence and existing failures/u);
+});
+
+test("SDK never automatically recovers human denials or managed and sensitive-path decisions", async () => {
+  let decisions = 0;
+  const requests = [
+    { kind: "shell", fullCommandText: "x".repeat(8193), managedApprovalRequired: true },
+    { kind: "shell", fullCommandText: "x".repeat(8193), requestSandboxBypass: true },
+    { kind: "read", path: ".auth/user.json" },
+    { kind: "shell", fullCommandText: "npm test" },
+    { kind: "shell", fullCommandText: "x".repeat(8193) }
+  ];
+  await runCopilotSession({ repository: "synthetic-repository", prompt: "Respect every denial." }, {
+    output() {},
+    async ask() { decisions++; return { action: "deny" }; },
+    client: {
+      async start() {},
+      async createSession(options) {
+        return { rpc: managedPolicyRpc(), on() {}, async sendAndWait() {
+          for (const request of requests) {
+            assert.deepEqual(await options.onPermissionRequest(request), { kind: "reject" });
+          }
+        } };
+      },
+      async stop() { return []; }
+    }
+  });
+  assert.equal(decisions, requests.length);
 });
 
 test("runtime permission approval is exact, single-use and never session-wide", () => {
@@ -359,12 +478,49 @@ test("runtime input rejects credential collection and malformed choices", () => 
     { question: "Please enter your password" },
     { question: "What is your password?" },
     { question: "Paste your MFA code" },
+    ...["Enter your API key", "Enter your refresh token", "Enter your PIN",
+      "Provide your API_key", "Paste your refresh_token", "Tell me your client secret",
+      "Send your private key", "Enter\nyour PIN", "Provide your one-time password",
+      "Your API key is required; paste it below.", `Enter ${"a".repeat(100)} then your refresh token`,
+      "API key?", "Refresh token required to continue:", "PIN?", "API keys?", "Refresh tokens:", "Passcode?", "Credentials:"]
+      .map((question) => ({ question })),
+    { question: "Choose an option", choices: ["Enter your API key"] },
     { question: "Choose", choices: ["x".repeat(1001)] },
     { question: "Choose", choices: new Array(21).fill("Option") },
     { question: "Choose", choices: [], allowFreeform: false },
     { question: null }
   ]) {
     assert.throws(() => runtimeQuestionPrompt(request));
+  }
+});
+
+test("runtime questions and replies allow credential-related test diagnostics without collecting credentials", () => {
+  for (const question of [
+    "Which password-reset test should I run?",
+    "Should I run the API key validation tests?",
+    "Which refresh token rotation spec reproduces the failure?"
+  ]) {
+    const state = fixture();
+    const request = { ...runtimeQuestionPrompt({ question }), id: randomUUID() };
+    state.bridge.receive(request);
+    assert.equal(runtimeConversationQuestion(request).responseChannel, "conversation");
+    for (const answer of [
+      "PIN: 1234", "Refresh token: synthetic-value",
+      "My PIN is 1234", "My password is synthetic-value", "My API keys are synthetic-values",
+      "My authorization is synthetic-value"
+    ]) {
+      assert.throws(() => state.bridge.respond(request.id, { action: "answer", answer }), /non-sensitive/);
+    }
+    const answer = "The password reset test fails";
+    state.bridge.respond(request.id, { action: "answer", answer });
+    assert.equal(state.sent[0].answer, answer);
+    assert.equal(state.sent[0].wasFreeform, true);
+  }
+  for (const question of [
+    "Enter your API key for the validation test",
+    "Provide the password reset test credentials"
+  ]) {
+    assert.throws(() => runtimeQuestionPrompt({ question }), /sensitive/);
   }
 });
 

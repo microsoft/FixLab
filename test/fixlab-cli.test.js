@@ -22,6 +22,7 @@ import {
   startKeepAwake,
   stopKeepAwake
 } from "../bin/keep-awake.js";
+import { buildQuerySetupPrompt } from "../dashboard/repository-setup.js";
 
 const cli = fileURLToPath(new URL("../bin/fixlab.js", import.meta.url));
 
@@ -66,6 +67,7 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /fixlab init/);
   assert.match(result.stdout, /fixlab prepare/);
   assert.match(result.stdout, /fixlab authenticate/);
+  assert.match(result.stdout, /fixlab setup-queries/);
   assert.match(result.stdout, /fixlab exec/);
   assert.match(result.stdout, /fixlab validate/);
   assert.match(result.stdout, /fixlab dashboard/);
@@ -79,6 +81,117 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /FIXLAB_RUNTIME/);
   assert.match(result.stdout, /127\.0\.0\.1:4317/);
   assert.match(result.stdout, /docs\/troubleshooting\.md/);
+});
+
+function querySetupFixture(t) {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab query setup-"));
+  t.after(() => rmSync(repository, { recursive: true, force: true }));
+  assert.equal(run(["init", repository], repository).status, 0);
+  const path = join(repository, ".github", "fixlab", "repository-profile.json");
+  const profile = JSON.parse(readFileSync(path, "utf8"));
+  profile.environments = ["DEV", "SIT", "PPE", "Test"];
+  profile.browserAutomation.testSynthesis = {
+    defaultDataSource: "non-production-read-only", mutationMode: "none"
+  };
+  const save = () => writeFileSync(path, `${JSON.stringify(profile, null, 2)}\n`);
+  save();
+  const sentinel = join(repository, "product-source.txt");
+  writeFileSync(sentinel, "preserve product source");
+  const bin = join(repository, "bin");
+  mkdirSync(bin);
+  const probe = join(bin, "runtime-probe.cjs");
+  writeFileSync(probe, [
+    "const args = process.argv.slice(2);",
+    "console.log('RUNTIME_ARGS:' + args.join(' '));",
+    "console.log('RUNTIME_ARGV:' + JSON.stringify(args));"
+  ].join("\n"));
+  for (const runtime of ["agency", "copilot"]) {
+    const executable = join(bin, process.platform === "win32" ? `${runtime}.cmd` : runtime);
+    writeFileSync(executable, process.platform === "win32"
+      ? `@echo off\r\n"${process.execPath}" "${probe}" %*\r\n`
+      : `#!/bin/sh\n"${process.execPath}" "${probe}" "$@"\n`);
+    if (process.platform !== "win32") { chmodSync(executable, 0o755); }
+  }
+  return { repository, path, profile, save, sentinel, bin,
+    environment: { PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}` } };
+}
+
+test("query setup separates interactive planning from approved repair in both runtimes", (t) => {
+  const f = querySetupFixture(t);
+  const previous = readFileSync(f.path, "utf8");
+  for (const runtime of ["agency", "copilot"]) {
+    for (const approved of [false, true]) {
+      const result = run(["setup-queries", f.repository, "--environment", "DEV",
+        "--runtime", runtime, ...(approved ? ["--yes"] : [])], f.repository, f.environment);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /--plugin-dir .* --agent fixlab:fixlab/u);
+      assert.match(result.stdout, /--interactive FixLab query setup (?:PLAN|APPLY) for the selected dev environment/u);
+      const argv = JSON.parse(result.stdout.split(/\r?\n/u)
+        .find((line) => line.startsWith("RUNTIME_ARGV:")).slice("RUNTIME_ARGV:".length));
+      assert.deepEqual(argv.slice(argv.indexOf("--interactive")), [
+        "--interactive", buildQuerySetupPrompt({ environment: "dev", approved })
+      ]);
+      assert.match(result.stdout, approved
+        ? /The user approved this setup operation only/
+        : /PLAN ONLY: read and report/);
+      assert.match(result.stdout, /ALL read-only queries across the approved API scope/u);
+      assert.match(result.stdout, /Updating only the profile or agent instructions is not a completed repair/u);
+      assert.match(result.stdout, /Do not contact a business API/u);
+      assert.match(result.stdout, /fresh reviewed job/u);
+      assert.doesNotMatch(result.stdout, /--allow-all|--allow-tool|--add-dir|--no-ask-user|--autopilot|--session-id/u);
+      assert.equal(readFileSync(f.path, "utf8"), previous);
+      assert.equal(readFileSync(f.sentinel, "utf8"), "preserve product source");
+    }
+  }
+  const testEnvironment = run(["setup-queries", f.repository, "--environment", "Test",
+    "--runtime", "copilot"], f.repository, f.environment);
+  assert.equal(testEnvironment.status, 0, testEnvironment.stderr);
+  assert.match(testEnvironment.stdout, /selected test environment/u);
+});
+
+test("query setup rejects unreviewed environments, malformed options and stricter policies before launch", (t) => {
+  const f = querySetupFixture(t);
+  for (const args of [
+    [], ["--environment"], ["--environment", "production"],
+    ["--environment", "unknown"], ["--environment", "DEV", "--environment", "SIT"],
+    ["--environment", "DEV", "--yes", "--yes"], ["--environment", "DEV", "--allow-all-tools"],
+    ["--environment", "DEV", "another-repository"]
+  ]) {
+    const result = run(["setup-queries", f.repository, "--runtime", "copilot", ...args],
+      f.repository, f.environment);
+    assert.equal(result.status, 1, JSON.stringify(args));
+    assert.doesNotMatch(result.stdout, /RUNTIME_ARGS:/u);
+    assert.match(result.stderr, /Usage:|non-production|profile environments/u);
+  }
+  const original = JSON.stringify(f.profile);
+  for (const change of ["api", "unit", "production", "synthetic"]) {
+    Object.assign(f.profile, JSON.parse(original));
+    if (change === "api") { f.profile.browserAutomation.mode = "api"; }
+    if (change === "unit") { f.profile.validation.liveTestsRequired = false; }
+    if (change === "production") { f.profile.browserAutomation.dataSafety.productionAllowed = true; }
+    if (change === "synthetic") {
+      Object.assign(f.profile.browserAutomation.testSynthesis, {
+        defaultDataSource: "synthetic-intercepted", mutationMode: "intercepted", devReadOnly: false
+      });
+    }
+    f.save();
+    const result = run(["setup-queries", f.repository, "--environment", "DEV", "--yes",
+      "--runtime", "copilot"], f.repository, f.environment);
+    assert.equal(result.status, 1, change);
+    assert.doesNotMatch(result.stdout, /RUNTIME_ARGS:/u);
+    assert.match(result.stderr, /existing approved non-production browser read scope/u);
+  }
+});
+
+test("query setup propagates runtime failure without reporting the adapter ready", (t) => {
+  const f = querySetupFixture(t);
+  const executable = join(f.bin, process.platform === "win32" ? "copilot.cmd" : "copilot");
+  writeFileSync(executable, process.platform === "win32"
+    ? "@echo off\r\nexit /b 7\r\n" : "#!/bin/sh\nexit 7\n");
+  const result = run(["setup-queries", f.repository, "--environment", "DEV", "--yes",
+    "--runtime", "copilot"], f.repository, f.environment);
+  assert.equal(result.status, 7);
+  assert.doesNotMatch(result.stdout, /setup ready|onboarding is ready/u);
 });
 
 test("direct shared-mode bug fixing requires dashboard-owned branch acquisition", () => {
@@ -320,6 +433,70 @@ test("onboard validates source arguments before initialization", () => {
   const result = run(["onboard", "--from", "--yes"], process.cwd());
   assert.equal(result.status, 1);
   assert.match(result.stderr, /source checkout after --from/);
+});
+
+test("onboard reuse setup plans without changes and rejects separate worktree provisioning", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-reuse-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "--quiet", repository]).status, 0);
+    writeFileSync(join(repository, "tracked.txt"), "fixture");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "tracked.txt"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=Fixture",
+      "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "fixture"]).status, 0);
+    assert.equal(run(["init", repository], repository).status, 0);
+    const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+    const original = readFileSync(profilePath, "utf8");
+    const plan = run(["onboard", repository, "--reuse-setup"], repository);
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stdout, /Reuse existing setup in this checkout/);
+    assert.match(plan.stdout, /No files or commands changed/);
+    assert.equal(readFileSync(profilePath, "utf8"), original);
+    const conflict = run(["onboard", repository, "--reuse-setup", "--from", repository], repository);
+    assert.equal(conflict.status, 1);
+    assert.match(conflict.stderr, /not both/);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("onboard reuses browser proof without restoring dependencies or retrying failed sign-in", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-reuse-proof-"));
+  try {
+    assert.equal(spawnSync("git", ["init", "--quiet", repository]).status, 0);
+    writeFileSync(join(repository, "tracked.txt"), "fixture");
+    assert.equal(spawnSync("git", ["-C", repository, "add", "tracked.txt"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", repository, "-c", "user.name=Fixture",
+      "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "fixture"]).status, 0);
+    assert.equal(run(["init", repository], repository).status, 0);
+    const frontend = join(repository, "frontend");
+    const playwright = join(frontend, "node_modules", "@playwright", "test");
+    mkdirSync(playwright, { recursive: true });
+    writeFileSync(join(playwright, "index.js"), "exports.chromium = { launch: async () => ({ close: async () => {} }) };");
+    mkdirSync(join(frontend, ".edge-profile"));
+    writeFileSync(join(frontend, "proof.cjs"), 'require("node:fs").writeFileSync("proof-ran.txt","fresh");process.exit(7);');
+    writeFileSync(join(frontend, "login.cjs"), 'require("node:fs").writeFileSync("login-ran.txt","unexpected");');
+    const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+    const profile = JSON.parse(readFileSync(profilePath));
+    profile.validation.commands = {};
+    profile.browserAutomation.authentication = {
+      required: true, command: "node login.cjs", proofCommand: "node proof.cjs", statusPaths: [".edge-profile"]
+    };
+    writeFileSync(profilePath, JSON.stringify(profile));
+    const result = run(["onboard", repository, "--reuse-setup", "--yes", "--authenticate"], repository);
+    assert.equal(result.status, 7, result.stderr);
+    assert.match(result.stdout, /Existing dependencies preserved/);
+    assert.match(result.stderr, /No automatic login retry/);
+    assert.equal(readFileSync(join(frontend, "proof-ran.txt"), "utf8"), "fresh");
+    assert.equal(existsSync(join(frontend, "login-ran.txt")), false);
+    assert.equal(JSON.parse(readFileSync(profilePath)).worktreeSetup.mode, "shared");
+    writeFileSync(join(frontend, "proof.cjs"), 'require("node:fs").writeFileSync("proof-ran.txt","verified");');
+    const verified = run(["onboard", repository, "--reuse-setup", "--yes", "--authenticate"], repository);
+    assert.match(verified.stdout, /Existing browser sign-in verified/);
+    assert.equal(readFileSync(join(frontend, "proof-ran.txt"), "utf8"), "verified");
+    assert.equal(existsSync(join(frontend, "login-ran.txt")), false);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
 });
 
 test("Windows bootstrap keeps NVM and Node changes explicit", () => {

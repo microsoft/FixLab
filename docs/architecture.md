@@ -7,10 +7,71 @@ installation and usage guides.
 
 FixLab separates orchestration from repository-specific behavior.
 
+When browser validation is enabled, scenario execution is the goal: run the real
+application with expected-versus-observed assertions, not only setup, sign-in or
+a screenshot. Use live data first where permitted, then profile-approved
+synthetic/intercepted data when suitable safe records or backend access are
+unavailable. Preserve the live limitation and label synthetic UI coverage
+separately. Explicit no-interception selections cannot use this fallback.
+Continue independently runnable scenarios despite unrelated PR/build/setup
+blockers, without substituting another checkout as proof of unpublished code.
+API-only, unit-only and explicitly deferred validation retain their contracts.
+
+Portal browser evidence defaults to unmasked full-page screenshots
+(`page.screenshot({ path, fullPage: true })`), without a separate screenshot-scope
+question. Crops are supplemental. Existing crop-only journeys can be supplemented
+in a job-owned transient wrapper without changing the original test, shared
+configuration or request guards. Explicit privacy policy and genuinely sensitive
+content still require protection; credentials, sign-in/MFA screens and
+private/customer data must not be captured. Evidence remains local unless sharing
+is separately authorized. Native permissions remain independent.
+
+Every executor prompt includes its assigned repository, actual bound dashboard
+port, instance ID and job ID, including browser-only jobs with no validation
+gates. Connected tools must read fresh status and use those bindings, never infer
+the default port or control another dashboard. Connection metadata is not consent.
+
+Generated journeys are actual discoverable `.spec` files in a job-owned folder
+under the selected Playwright configuration's `testDir`, respecting its
+`testMatch` and project selection. Verify discovery with the approved runner's
+`--list` before execution, then run the selected file/project and report its
+relative path, runner command and assertion results. Discovery alone is not
+scenario success. Preserve same-job scripts through retries; existing transient
+cleanup and product-PR exclusion rules still apply.
+
+Authentication helper output is classified transiently into fixed reason codes
+and recovery guidance for missing dependencies/browser executables, busy
+profiles, sign-in/access restrictions, configuration errors, timeouts or unknown
+failures. Raw output is never returned, logged or persisted. Both dashboard and
+connected tools expose the safe reason; this neither retries authentication nor
+grants permissions or changes browser ownership.
+
 Native runtime request classification supplies redacted, reason-specific
-diagnostics. Eligible blocked operations expose **Deny and request safe recovery**:
+diagnostics and next steps. Authorization source identifiers are not credential
+values; authorization assignments/headers and credential solicitations remain
+protected. After managed policy resolves, the native SDK may reject one eligible
+unreviewable operation with safe-recovery feedback automatically per executor.
+It creates no grant and never replays that operation. Human denials disable
+subsequent automatic recovery. Managed/sandbox restrictions, sensitive paths and
+offered source-edit review stay manual. A remaining eligible blocker reports
+that automatic recovery was attempted and requires an explicit decision.
+Eligible blocked operations expose **Deny and request safe recovery**:
 the runtime receives a rejection with fixed recovery feedback, not a permission
 grant or automatic replay. Existing stage evidence remains authoritative.
+Connected status distinguishes `executionState` from the retained job outcome:
+`waiting-for-input` and `waiting-for-permission` are not active validation.
+Non-sensitive native questions expose their exact request ID, question and
+choices. An explicitly confirmed `answer` reply is bound to the current
+instance, job and first pending request and continues that executor, without
+restarting stages or copying the answer into logs/history. Questions containing
+URLs remain dashboard-only so redacted destinations cannot be blindly approved.
+Credential-entry requests, including API keys, refresh tokens and PINs, are
+rejected before either input channel, including direct question transport.
+This includes displayed titles, details and choices. Diagnostic questions about
+credential-related tests and non-sensitive diagnostic answers remain supported;
+credential solicitation and answers containing credential values remain blocked.
+Native permissions stay in the browser panel; connected status exposes only
+fixed reason codes and recovery guidance, never commands, diffs or grant buttons.
 Separately, `fixlab_nonproduction_post` mediates DEV/PPE/SIT/UAT writes through each
 environment's existing authentication helper and exact endpoint/test-record
 allowlist. The off-by-default job-start checkbox authorizes configured writes
@@ -22,6 +83,26 @@ does not expand API-only/read-only or other-environment contracts. See the
 [security model](security.md#individually-confirmed-non-production-post) for configuration
 and the privileged-execution boundary.
 
+Reviewed Playwright business-request guards can use the current native executor's
+private browser POST relay. The runner imports `FIXLAB_BROWSER_POST_HELPER` from
+its inherited environment and calls `forwardApprovedBrowserPost`. The relay
+shares the POST tool's authorization, authentication helper and failure
+revocation; no separate approval file or browser token is used. It exists only
+with fresh configured job consent and closes on executor shutdown. Bounded API
+responses return privately to the browser, never to the model or dashboard
+history; status metadata alone does not establish a passed scenario.
+Broad PPE-origin jobs also expose `forwardApprovedBrowserRequest` for GET and
+CRUD through that same authentication and grant. This supports load/save/reload
+journeys without narrowing PPE to reads or treating every POST as a write.
+Browser requests are serialized; failed/ambiguous attempts revoke the shared
+grant without retrying pending actions. Other environment/POST-only scopes
+remain unchanged.
+
+The private relay allows at most 16 pending requests. Its bounded transport
+deadline includes queue time (20 seconds per slot, at most 320 seconds total);
+the upstream dispatch still has its separate 15-second limit. A slow earlier
+request does not consume a later request's dispatch budget.
+
 For broader DEV validation, the separate **Allow all DEV API writes for this job**
 checkbox exposes `fixlab_dev_write` for POST/PUT/PATCH/DELETE on exact reviewed
 `dataSafety.devWrite` HTTPS origins, without endpoint/test-record enumeration.
@@ -29,6 +110,15 @@ It can affect any accessible DEV record and reuses the same revision-bound,
 memory-only grant and lifecycle revocation. No other environment or explicit
 read-only contract is expanded; browser guards remain intact. See
 [DEV/PPE write configuration](security.md#broad-dev-and-ppe-api-writes).
+
+Legacy feature-specific browser guards are repaired through the separate
+interactive `fixlab setup-queries` operation. It requires a selected,
+profile-approved non-production browser read scope. Planning does not change
+files; `--yes` authorizes only reviewed query-policy/adapter changes and focused
+offline guard tests. It does not issue business API requests, grant runtime
+permissions, change product source or authorize writes. Both runtimes receive
+the same setup contract. Guard changes require a fresh reviewed validation job;
+validation-only jobs keep configuration read-only.
 
 PPE has an independent `dataSafety.ppeWrite` configuration, per-job confirmation
 and `fixlab_ppe_write` tool with the same CRUD methods and grant lifecycle.

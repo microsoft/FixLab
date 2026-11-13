@@ -16,6 +16,12 @@ const { createDashboardServer } = await import(
 const { createRuntimeRequestBridge, runtimePermissionPrompt, runtimeQuestionPrompt } = await import(
   pathToFileURL(join(packageRoot, "dashboard", "runtime-requests.js")).href
 );
+const { createNonProductionPostAccess, createPostWriteApproval, createPpeWriteApproval } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "dev-post.js")).href
+);
+const { forwardApprovedBrowserPost, forwardApprovedBrowserRequest, startBrowserPostBridge } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "browser-post.js")).href
+);
 let repository;
 let dashboard;
 let baseUrl;
@@ -37,6 +43,148 @@ async function availablePort() {
   await new Promise((resolve) => probe.close(resolve));
   return port;
 }
+
+test("reviewed browser POST guard consumes the live job grant without a separate contract", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-browser-post-e2e-"));
+  const jobId = randomUUID();
+  const url = "https://api.dev.example.test/items";
+  let bridge;
+  try {
+    mkdirSync(join(root, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(root, "session.mjs"),
+      'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+    writeFileSync(join(root, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      environments: ["dev"],
+      browserAutomation: {
+        testSynthesis: { defaultDataSource: "non-production-approved", mutationMode: "approved-write" },
+        dataSafety: {
+          productionAllowed: false,
+          post: { dev: { scope: "api://example-service/access", sessionHelper: "session.mjs",
+            actions: [{ url, testRecord: { field: "name", value: "FIXLAB_TEST_001" } }] } }
+        }
+      }
+    }));
+    const access = createNonProductionPostAccess({
+      repository: root, targetEnvironment: "dev", allowPostRequests: true, jobId,
+      postWriteApproval: createPostWriteApproval(root, "dev", jobId),
+      isReady: () => true, ask() { throw new Error("Approved browser POST must not prompt again"); }
+    });
+    const writes = [];
+    bridge = await startBrowserPostBridge({
+      send: access.browserPost, revoke: access.revoke, jobId, environment: "dev",
+      async request(target, options) {
+        expect(target).toBe(url);
+        expect(options.redirect).toBe("manual");
+        expect(options.headers.Authorization).toBe("Bearer synthetic-value");
+        writes.push(JSON.parse(options.body));
+        return new Response('{"id":"synthetic-record"}', {
+          status: 201, headers: { "content-type": "application/json" }
+        });
+      }
+    });
+    const metadata = [];
+    await page.route("https://api.dev.example.test/**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: `<button id="save">Save</button><output id="result"></output>
+            <script>document.getElementById("save").onclick = async () => {
+              const response = await fetch("/items", { method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: "FIXLAB_TEST_001", enabled: false }) });
+              document.getElementById("result").textContent = (await response.json()).id;
+            };</script>`
+        });
+        return;
+      }
+      metadata.push(await forwardApprovedBrowserPost(route, {
+        environment: "dev", purpose: "Verify the approved synthetic browser record."
+      }));
+    });
+    await page.goto("https://api.dev.example.test/");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("#result")).toHaveText("synthetic-record");
+    expect(writes).toEqual([{ name: "FIXLAB_TEST_001", enabled: false }]);
+    expect(metadata[0].validationPassed).toBe(false);
+    expect(metadata[0].responseBodyReturned).toBe(false);
+  } finally {
+    await bridge?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("PPE browser journey loads, saves and reloads through the same approved read/write grant", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-ppe-journey-e2e-"));
+  const jobId = randomUUID();
+  const origin = "https://api.ppe.example.test";
+  let bridge;
+  try {
+    mkdirSync(join(root, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(root, "session.mjs"),
+      'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+    writeFileSync(join(root, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      environments: ["ppe"],
+      browserAutomation: {
+        testSynthesis: { defaultDataSource: "non-production-approved", mutationMode: "approved-write" },
+        dataSafety: {
+          productionAllowed: false,
+          ppeWrite: { scope: "api://example-service/access", sessionHelper: "session.mjs", origins: [origin] }
+        }
+      }
+    }));
+    const access = createNonProductionPostAccess({
+      repository: root, targetEnvironment: "PPE", allowPostRequests: true, jobId,
+      postWriteApproval: createPpeWriteApproval(root, "PPE", jobId),
+      isReady: () => true, ask() { throw new Error("Approved PPE journeys must not prompt again"); }
+    });
+    let name = "original";
+    const methods = [];
+    bridge = await startBrowserPostBridge({
+      send: access.browserRequest, serializeRequests: true,
+      revoke: access.revoke, jobId, environment: "ppe",
+      async request(target, options) {
+        expect(target).toBe(`${origin}/records`);
+        expect(options.redirect).toBe("manual");
+        expect(options.headers.Authorization).toBe("Bearer synthetic-value");
+        methods.push(options.method);
+        if (options.method === "POST") { name = JSON.parse(options.body).name; }
+        return new Response(JSON.stringify({ name }), {
+          status: options.method === "POST" ? 201 : 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    });
+    await page.route(`${origin}/`, (route) => route.fulfill({
+      contentType: "text/html",
+      body: `<button id="save" disabled>Save</button><output id="result"></output>
+        <script>
+          const result = document.getElementById("result");
+          const save = document.getElementById("save");
+          async function read() { return (await fetch("/records")).json(); }
+          Promise.all([read(), read()]).then(([record]) => {
+            result.textContent = record.name; save.disabled = false;
+          });
+          save.onclick = async () => {
+            await fetch("/records", { method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: "saved" }) });
+            result.textContent = (await read()).name;
+          };
+        </script>`
+    }));
+    await page.route(`${origin}/records`, (route) => forwardApprovedBrowserRequest(route, {
+      environment: "PPE", purpose: "Verify the approved PPE load/save/reload journey."
+    }));
+    await page.goto(`${origin}/`);
+    await expect(page.locator("#result")).toHaveText("original");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("#result")).toHaveText("saved");
+    expect(methods).toEqual(["GET", "GET", "POST", "GET"]);
+  } finally {
+    await bridge?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function executor({ onOutput }) {
   onOutput(
@@ -151,6 +299,37 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await dashboard.close();
   rmSync(repository, { recursive: true, force: true });
+});
+
+test("browser authentication failure exposes actionable recovery without private helper output", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-auth-diagnostic-e2e-"));
+  const profileDirectory = join(root, ".github", "fixlab");
+  mkdirSync(profileDirectory, { recursive: true });
+  const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+  profile.browserAutomation.authentication = {
+    required: true, command: "node auth-failure.cjs", statusPaths: ["ready.json"]
+  };
+  writeFileSync(join(profileDirectory, "repository-profile.json"), JSON.stringify(profile));
+  writeFileSync(join(root, "auth-failure.cjs"),
+    "process.stderr.write('Error: No tests found; private-browser-auth-sentinel'); process.exitCode = 1;");
+  const instance = createDashboardServer({
+    repository: root, packageRoot, executor, browserOwnership: () => null, browserOpener() {}
+  });
+  try {
+    const url = (await instance.listen({ port: await availablePort() })).url;
+    await openWorkflowControls(page, url);
+    expect((await page.request.post(`${url}/api/playwright/connect`)).status()).toBe(202);
+    await expect.poll(async () => (await (await page.request.get(`${url}/api/playwright/status`)).json()).running)
+      .toBe(false);
+    await page.locator("#playwright-check").click();
+    await expect(page.locator("#playwright-guidance")).toContainText("configured working directory");
+    await expect(page.locator("#playwright-status")).toHaveText("Not connected");
+    await expect(page.locator("#playwright-connect")).toBeEnabled();
+    await expect(page.locator("body")).not.toContainText("private-browser-auth-sentinel");
+  } finally {
+    await instance.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("unit-only dashboard starts from the default form without React warm-up or live options", async ({ page }) => {
@@ -290,6 +469,40 @@ test("POST checkbox explicitly approves this job only and keeps unchecked writes
   await expect(checkbox).not.toBeChecked();
 });
 
+test("POST-base checkbox explicitly confirms all POSTs without granting CRUD or later jobs", async ({ page }) => {
+  const posts = [];
+  await mockChatWorkspace(page, { environments: ["dev", "ppe"], postBaseEnvironments: ["ppe"] });
+  await page.route("**/api/jobs", async (route) => {
+    posts.push(route.request().postDataJSON());
+    await route.fulfill({ contentType: "application/json", status: 202,
+      body: JSON.stringify({ job: { id: "ppe-post-preference", request: "Synthetic PPE POST approval.",
+        mode: "validate-only", status: "running", stages: {}, bugs: [], logs: [], activity: [] },
+      queue: [], history: [] }) });
+  });
+  await openWorkflowControls(page, baseUrl);
+  await page.locator("#target-environment").selectOption("ppe");
+  await page.getByLabel("Allow all PPE POST requests, including writes, for this job", { exact: true }).check();
+  await page.locator("#request").fill("Approve all PPE POST requests for this job.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0].postBaseApprovalConfirmed).toBe(true);
+  expect(posts[0].postWriteApprovalConfirmed).toBe(true);
+  expect(posts[0].allowPostRequests).toBe(true);
+  expect(posts[0].allowPpeWrites).toBe(false);
+  await expect(page.locator("#allow-post-requests")).not.toBeChecked();
+  await page.locator("#request").fill("Run without a new POST approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(2);
+  expect(posts[1].postBaseApprovalConfirmed).toBe(false);
+  await page.locator("#target-environment").selectOption("dev");
+  await page.locator("#allow-post-requests").check();
+  await page.locator("#request").fill("Use endpoint-scoped DEV approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(3);
+  expect(posts[2].postBaseApprovalConfirmed).toBe(false);
+  expect(posts[2].postWriteApprovalConfirmed).toBe(true);
+});
+
 for (const environment of ["dev", "ppe"]) {
 test(`${environment.toUpperCase()} write checkbox is environment-specific, excludes scoped POST and resets consent for every job`, async ({ page }) => {
   const posts = [];
@@ -350,6 +563,45 @@ test(`${environment.toUpperCase()} write checkbox is environment-specific, exclu
   await expect(checkbox).not.toBeChecked();
 });
 }
+
+test("PPE POST scope refreshes reset POST consent without restoring opted-out broad writes", async ({ page }) => {
+  const posts = [];
+  const postBaseEnvironments = [];
+  await mockChatWorkspace(page, { environments: ["dev", "ppe"], ppeWriteConfigured: true, postBaseEnvironments });
+  await page.route("**/api/jobs", async (route) => {
+    posts.push(route.request().postDataJSON());
+    await route.fulfill({ contentType: "application/json", status: 202,
+      body: JSON.stringify({ job: { id: "ppe-scope-refresh", request: "Synthetic PPE validation.",
+        mode: "validate-only", status: "running", stages: {}, bugs: [], logs: [], activity: [] },
+      queue: [], history: [] }) });
+  });
+  await openWorkflowControls(page, baseUrl);
+  await page.locator("#target-environment").selectOption("ppe");
+  const broad = page.locator("#allow-dev-writes");
+  const scoped = page.locator("#allow-post-requests");
+  await expect(broad).toBeChecked();
+  await broad.uncheck();
+  await scoped.check();
+  postBaseEnvironments.push("ppe");
+  await expect(page.locator("#post-writes-label")).toHaveText(
+    "Allow all PPE POST requests, including writes, for this job");
+  await expect(broad).not.toBeChecked();
+  await expect(scoped).not.toBeChecked();
+  await expect(scoped).toBeEnabled();
+  await scoped.check();
+  postBaseEnvironments.length = 0;
+  await expect(page.locator("#post-writes-label")).toHaveText(
+    "Allow POST writes for this job in the selected environment");
+  await expect(broad).not.toBeChecked();
+  await expect(scoped).not.toBeChecked();
+  await page.locator("#request").fill("Validate PPE without restoring write approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0].allowPpeWrites).toBe(false);
+  expect(posts[0].ppeWriteApprovalConfirmed).toBe(false);
+  expect(posts[0].allowPostRequests).toBe(false);
+  expect(posts[0].postBaseApprovalConfirmed).toBe(false);
+});
 
 test("configured PPE writes default on for future jobs, preserve opt-out and never select other environments", async ({ page }) => {
   const posts = [];
@@ -492,6 +744,7 @@ test("live Allow all requires confirmation and is absent without an offered capa
 test("safe recovery denies the hidden request and per-action DEV POST never enters batch approval", async ({ page }) => {
   const job = pendingApprovalJob(["npm test"]);
   const hidden = { ...runtimePermissionPrompt({ kind: "shell", fullCommandText: "x".repeat(8193) }), id: randomUUID() };
+  hidden.automaticRecoveryAttempted = true;
   job.runtimeRequests = [hidden];
   const posts = [];
   await mockChatWorkspace(page, { job });
@@ -502,6 +755,8 @@ test("safe recovery denies the hidden request and per-action DEV POST never ente
   });
   await page.goto(baseUrl);
   await expect(page.locator("#runtime-request-details")).toContainText("8192-character");
+  await expect(page.locator("#runtime-request-guidance")).toContainText("Automatic safe recovery was already attempted once");
+  await expect(page.locator("#runtime-request-details")).toContainText("do not split or repackage");
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
   const recover = page.getByRole("button", { name: "Deny and request safe recovery", exact: true });
   page.once("dialog", (dialog) => dialog.dismiss());
@@ -632,6 +887,29 @@ test("runtime guidance distinguishes Allow all exceptions from questions", async
   await expect(page.locator("#runtime-request-guidance")).toContainText("question, not a tool permission");
   await expect(page.locator("#runtime-request-guidance")).toContainText("Allow all never supplies answers");
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
+});
+
+test("conversation shows the exact next-step question and does not queue a choice-only reply", async ({ page }) => {
+  const job = pendingQuestionJob("Validation cannot use the sibling worktree. Which next step?");
+  job.runtimeRequests[0].allowFreeform = false;
+  job.runtimeRequests[0].choices = ["Configure the target worktree", "Leave validation blocked"];
+  const posts = [];
+  await mockChatWorkspace(page, { job });
+  page.on("request", request => { if (request.method() === "POST") { posts.push(request.url()); } });
+  await page.goto(baseUrl);
+  await expect(page.locator("#conversation-state-detail")).toHaveText(job.runtimeRequests[0].details);
+  await expect(page.locator("#needs-response")).toHaveText("Choose next step");
+  await expect(page.locator("#composer-question")).toContainText("Choose a next step");
+  await expect(page.locator("#start-button")).toBeDisabled();
+  await page.locator("#job-form").evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await expect(page.locator("#form-error")).toContainText("Choose a next step from the offered answers");
+  await expect(page.locator("#start-button")).toBeDisabled();
+  await page.locator("#needs-response").click();
+  await expect(page.getByRole("button", { name: "Configure the target worktree", exact: true })).toBeVisible();
+  expect(posts).toEqual([]);
+  await page.locator("#new-conversation").click();
+  await expect(page.locator("#start-button")).toBeEnabled();
+  await expect(page.locator("#composer-question")).toBeHidden();
 });
 
 test("native Copilot prompts allow once, deny and answer choices in the same live job", async ({ page }) => {
@@ -779,7 +1057,7 @@ test("native Copilot prompts allow once, deny and answer choices in the same liv
       id: randomUUID()
     };
     bridge.receive(hidden);
-    await expect(page.locator("#runtime-request-details")).toContainText("authentication-related source code");
+    await expect(page.locator("#runtime-request-details")).toContainText("existing reviewed authentication helper");
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Deny and request safe recovery", exact: true }).click();
     await expect.poll(() => sent.at(-1)?.recover).toBe(true);
@@ -2123,6 +2401,11 @@ test("dashboard retries a blocked Playwright gate without shell input", async ({
     "profile-defined browser and test command"
   );
   expect(submittedInput.details).toContain("save at least one");
+  expect(submittedInput.details).toContain("Default to unmasked full-page");
+  expect(submittedInput.details).toContain("page.screenshot({ path, fullPage: true })");
+  expect(submittedInput.details).toContain("do not ask again for default screenshot capture");
+  expect(submittedInput.details).toContain("Preserve explicit privacy rules");
+  expect(submittedInput.details).not.toContain("after masking sensitive regions");
   expect(submittedInput.details).toContain("Do not skip");
 });
 
@@ -2307,12 +2590,12 @@ test("dashboard exposes explicit pull-request approval when validation is comple
 });
 
 async function mockChatWorkspace(page, { job = null, queue = [], history = [], environments,
-  profileReady = true, draftOnlyReady = false, ppeWriteConfigured = false } = {}) {
+  profileReady = true, draftOnlyReady = false, ppeWriteConfigured = false, postBaseEnvironments = [] } = {}) {
   await page.route("**/api/status", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify({
       instanceId: "workspace-owner",
-      readiness: { repositoryReady: true, profileReady, draftOnlyReady, ppeWriteConfigured,
+      readiness: { repositoryReady: true, profileReady, draftOnlyReady, ppeWriteConfigured, postBaseEnvironments,
         repository: "C:\\code\\alpha", profileName: "Alpha workspace", environments },
       runtime: { name: "copilot", supportsModelSelection: true, defaultModel: "" },
       job, queue, held: [], history
@@ -2469,6 +2752,10 @@ test("browser-only retry preserves browser scope and makes its prerequisite bloc
   expect(submitted.action).toBe("retry");
   expect(submitted.details).toContain("retained same-job script");
   expect(submitted.details).toContain("Do not retry an unchanged profile lock");
+  expect(submitted.details).toContain("Default to unmasked full-page");
+  expect(submitted.details).toContain("page.screenshot({ path, fullPage: true })");
+  expect(submitted.details).toContain("do not ask again for default screenshot capture");
+  expect(submitted.details).toContain("Preserve explicit privacy rules");
   expect(submitted.details).not.toContain("continue to pull-request creation");
 });
 

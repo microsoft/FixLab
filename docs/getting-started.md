@@ -44,6 +44,35 @@ Follow the conversation and **Run details**. When **Action needed** appears,
 read the blocker, supply the missing information, and use **Resume FixLab**
 when offered. Review runtime permission requests separately.
 
+For a live decision, the conversation shows the exact question and **Choose
+next step** opens its response panel. Choice-only questions must use an offered
+answer; the message composer cannot silently queue a different job as a reply.
+Permission waits instead offer **Review permission** and explicit allow/deny
+controls. Read-only MCP tools advertise read-only metadata; hosts still apply
+their own permission policies.
+
+Connected Copilot status shows whether execution is waiting for input or
+permission. For a non-sensitive live question, answer through the host's
+question UI; the reply targets that exact question in the same executor.
+Do not use retry or comments as an answer. Native permissions and questions
+whose details must remain private still require the dashboard browser panel.
+When offered, **Deny and request safe recovery** rejects the blocked operation
+and lets Copilot try existing reviewed tests/helpers; it does not grant access.
+Native execution can reject one eligible unreviewable operation automatically
+to try those safe alternatives. A remaining blocker clearly reports that the
+attempt was used and gives next steps; it still needs your decision. Plain
+**Deny** rejects only the operation, not the whole job, and never passes a check.
+Managed restrictions, private-state paths and offered source-edit review remain
+manual. If no authorized alternative exists, the stage stays blocked.
+
+For complete PPE scenarios, select PPE and use the reviewed **Allow all PPE API
+writes** option. Its configured PPE origins and existing authentication support
+both GET reads and POST actions, plus PUT/PATCH/DELETE when the journey needs
+them. Reviewed browser guards use `forwardApprovedBrowserRequest` for that
+business traffic. A read-only/intercepted selection or narrower POST grant
+remains narrower. Missing configuration or sign-in blocks dependent scenarios;
+requesting all scenarios never marks unexecuted ones as passed.
+
 For browser sign-in, open **Connections**, use **Check status** or
 **Connect Playwright**, and complete sign-in/MFA in the browser. Never paste
 credentials into chat. Backend-only jobs use their configured authentication.
@@ -53,6 +82,27 @@ credentials into chat. Backend-only jobs use their configured authentication.
 In **Run details**, check the changed source/branch, tests, browser/API evidence,
 and any PR link. Failed, blocked, skipped, or pending checks are not passes.
 Synthetic checks do not prove the real backend works.
+
+Portal browser evidence uses full-page Playwright screenshots (`fullPage: true`),
+unmasked by default for approved portal pages, without a separate screenshot-scope
+question. Close-ups are additional evidence, not a substitute. An existing
+crop-only journey can be supplemented in a job-owned transient wrapper without
+changing the original test or shared configuration. Native permissions still apply.
+Explicit privacy rules and sensitive content still require protection; never
+capture credentials, sign-in/MFA screens or private/customer data. Evidence stays
+local unless sharing is separately authorized.
+API-only and unit-test-only jobs do not require browser screenshots.
+
+By default, browser evidence covers the journey, not only its final grid:
+search/entry, mode selection, input/import preview, and verified result. Open
+**Selected job Playwright evidence** and choose **Refresh evidence**. Numbered
+screenshots are shown in step order, with the newest scenario directory first.
+Static labels and approved test values stay readable; full-page capture does not
+require blanket masking of unrelated page regions. For imports, evidence
+identifies the exact uploaded bytes by filename and SHA-256 and includes a labeled safe input preview;
+the original input is retained only when repository policy permits it.
+Expected/observed comparisons follow actual assertions. Save/Submit and
+persistence are not verified unless separately authorized and exercised.
 
 Fix-and-validate may produce an authorized draft PR while validation continues.
 Validate-only produces findings and evidence, not a new PR.
