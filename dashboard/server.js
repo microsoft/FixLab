@@ -1342,13 +1342,13 @@ ${RUNTIME_RECOVERY_GUIDANCE}
 ${!apiOnly && !testEvidence.unitTestsOnly ? READ_ONLY_POST_GUIDANCE : ""}
 ${apiOnly ? API_ONLY_PLAYWRIGHT_GUIDANCE : EXISTING_APPLICATION_GUIDANCE}
 ${apiOnly && useDeployedBackend ? "useDeployedBackend=true: use the configured deployed API; never start local .NET/Key Vault." : ""}
-- Skip source diagnosis, separate reproduction, implementation, diff review and unrelated non-browser gates. The diagnosis, reproduce, fix, review, and pr stages must be explicitly skipped.
-- Do not edit files except job-owned transient Playwright journeys/evidence; no commits, pushes, PR or configuration changes.
+- Skip source diagnosis, separate reproduction, implementation, diff review and unrelated non-browser gates. The diagnosis, reproduce, fix, review, and pr stages must be explicitly skipped unless their own required prerequisite fails.
+- Do not edit files other than job-owned transient Playwright journeys and runner evidence. Do not commit, push, create or update pull requests, or change repository configuration.
 - Never overwrite pre-existing tests.
-- Batch-read profile/config/fixture once; reuse scripts.
-- Keep the same-job script/results for retries. Never delete running artifacts. Clean after continuations; permanent tests need approval.
-- Never replay stale input/mutations. Do not copy browser state or credentials; human sign-in/MFA.
-- Do not reinstall dependencies that are already available. Run minimum setup required by the repository profile: verify browser authentication, apps and focused Playwright journey. Files alone do not prove sign-in.
+- Batch-read profile/config/nearest fixture; prefer an existing journey or retained script. Read only needed selectors.
+- Keep the same-job script/results through retries; fix only failing steps. Never delete running artifacts. Clean transient source after continuations; permanent tests need approval.
+- Preserve human input; never replay stale values or mutations. Do not copy browser state or credentials; human sign-in/MFA.
+- Do not reinstall dependencies that are already available. Run only minimum setup required by the repository profile: verify browser authentication, apps and focused Playwright journey. State files alone do not prove sign-in.
 ${uiScenarioGuidance}
 ${scenarioGuidance}
 ${environmentGuidance}
@@ -1360,7 +1360,7 @@ ${videoGuidance}
 ${manualLocalhostGuidance}
 - ${PORTAL_SCREENSHOT_GUIDANCE}
 - Use fixlab exec --stage live-test -- <command>; quote '--' in PowerShell. Bound diagnostics; no cached browser/auth/external-data results.
-- Ask native questions only for missing decisions/auth/access; no inferred approval/credentials.
+- Ask native questions only for missing decisions/auth/access; never infer approval or collect credentials.
 - Finish with assertion results, skipped gates, blockers and risks before task_complete.
 
 Request:

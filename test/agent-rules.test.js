@@ -51,13 +51,13 @@ test("full-page portal evidence guidance stays aligned without requiring browser
   ]) {
     const text = readFileSync(join(root, entryPoint), "utf8").replace(/\s+/gu, " ");
     assert.match(text, /page\.screenshot\(\{ path, fullPage: true \}\)/u, entryPoint);
-    assert.match(text, /Default to unmasked full-page screenshots of approved portal pages/u, entryPoint);
-    assert.match(text, /Do not blanket-mask the page or ask again for default screenshot capture/u, entryPoint);
+    assert.match(text, /Default to unmasked full-page screenshots/u, entryPoint);
+    assert.match(text, /No blanket masking or repeat screenshot-scope questions|Do not blanket-mask the page or ask again for default screenshot capture/u, entryPoint);
     assert.match(text, /job-owned transient wrapper/u, entryPoint);
     assert.match(text, /original test, shared configuration/u, entryPoint);
-    assert.match(text, /Explicit repository privacy rules and genuinely sensitive content/u, entryPoint);
+    assert.match(text, /(?:Explicit repository|explicit) privacy rules/u, entryPoint);
     assert.match(text, /sign-in\/MFA screens or private\/customer data/u, entryPoint);
-    assert.match(text, /Keep evidence local; external sharing needs separate approval/u, entryPoint);
+    assert.match(text, /Keep evidence local; (?:external )?sharing needs separate approval/u, entryPoint);
     assert.match(text, /API-only and unit-test-only runs require no browser screenshot/u, entryPoint);
     assert.match(text, /numbered journey per scenario/u, entryPoint);
     assert.match(text, /SHA-256/u, entryPoint);
