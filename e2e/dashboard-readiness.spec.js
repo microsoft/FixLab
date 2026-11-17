@@ -16,6 +16,9 @@ const { createDashboardServer } = await import(
 const { createRuntimeRequestBridge, runtimePermissionPrompt, runtimeQuestionPrompt } = await import(
   pathToFileURL(join(packageRoot, "dashboard", "runtime-requests.js")).href
 );
+const { ticketAutomationPlan, watchTickets, executeTicketAgent } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "ticket-automation.js")).href
+);
 let repository;
 let dashboard;
 let baseUrl;
@@ -151,6 +154,77 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await dashboard.close();
   rmSync(repository, { recursive: true, force: true });
+});
+
+test("watcher jobs show live recorded activity, failed checks and retained history without dashboard execution", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-ui-"));
+  const profile = {
+    name: "Synthetic watcher fixture", environments: ["dev"],
+    pullRequests: { defaultTargetBranch: "develop" },
+    ticketAutomation: { areaPaths: ["Example\\Application"] }
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  for (const args of [
+    ["init", directory], ["-C", directory, "remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]
+  ]) {
+    expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
+  }
+  const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
+  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture", comments: [] };
+  let release;
+  const result = new Promise(resolve => { release = resolve; });
+  const watching = watchTickets({
+    repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
+    execute: async ({ onActivity }) => executeTicketAgent({
+      repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
+      executor(options) {
+        options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|Investigating the reported mapping.\n");
+        options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed; live testing did not run.\n");
+        return {
+          completion: result.then(() => {
+            options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A focused check failed; the work item stays open."}\n');
+            return { code: 0 };
+          }), hasStopped: () => true, terminate() { release(); }
+        };
+      }
+    })
+  });
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {},
+    executor() { throw new Error("Opening watcher monitoring must not start a dashboard job."); }
+  });
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await page.goto(address.url);
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await expect(page.locator("#watcher-status")).toContainText("investigating");
+    const attempt = page.locator("#watcher-attempts > li > details").first();
+    await attempt.locator("summary").click();
+    await expect(attempt).toContainText("focused regression: failed");
+    await expect(attempt).toContainText("Investigating the reported mapping");
+    await expect(attempt.getByRole("link", { name: "Open work item and Discussion" })).toHaveAttribute(
+      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
+    );
+    expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
+    release();
+    await watching;
+    await expect(page.locator("#watcher-status")).toContainText("stopped");
+    await expect(attempt).toContainText("Feedback recorded - blocked");
+    await page.reload();
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await page.locator("#watcher-attempts summary").click();
+    await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
+    await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
+    await page.screenshot({ path: test.info().outputPath("watcher-history.png"), fullPage: true });
+  } finally {
+    release();
+    await watching;
+    await instance.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("unit-only dashboard starts from the default form without React warm-up or live options", async ({ page }) => {
@@ -1211,6 +1285,8 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     await expect(page.locator("#job-input-submit")).toBeHidden();
     await expect(page.locator("#permission-review")).toBeEnabled();
     await expect(page.locator("#permission-approve")).toBeHidden();
+    await expect(page.locator("#permission-allow-all-tools")).not.toBeChecked();
+    await expect(page.locator("#permission-retry-tools")).toBeDisabled();
     await page.getByLabel("Exact folder to review").fill(external);
     await page.getByRole("button", { name: "Review folder access" }).click();
     await expect(page.locator("#permission-scope")).toContainText(realpathSync(external));
@@ -1223,6 +1299,7 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     await page.getByLabel("Exact folder to review").fill(external);
     await page.getByRole("button", { name: "Review folder access" }).click();
     await expect(page.locator("#permission-approve")).toBeVisible();
+    await page.getByLabel("Allow all tool commands for this retry").check();
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Grant this folder and resume" }).click();
     await expect(page.locator("#permission-panel")).toBeHidden();
@@ -1230,6 +1307,7 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     expect(calls[1].runtimeDirectories).toEqual([realpathSync(external)]);
     expect(calls[1].sessionId).toBe(calls[0].sessionId);
     expect(calls[1].resume).toBe(true);
+    expect(calls[1].toolApprovalMode).toBe("allow-all");
     await expect.poll(async () =>
       (await (await page.request.get(`${address.url}/api/job`)).json()).job.status
     ).toBe("passed");
@@ -1240,6 +1318,25 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     await expect(page.getByRole("heading", { name: "Copilot permission required" })).toBeVisible();
     await expect(page.locator("#job-input-submit")).toBeHidden();
     await expect(page.locator("#job-input-details")).toBeHidden();
+    await expect(page.locator("#permission-allow-all-tools")).not.toBeChecked();
+    await page.getByLabel("Allow all tool commands for this retry").check();
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await page.locator("#permission-retry-tools").click();
+    expect(calls).toHaveLength(3);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.locator("#permission-retry-tools").click();
+    await expect.poll(() => calls.length).toBe(4);
+    expect(calls[3].toolApprovalMode).toBe("allow-all");
+    expect(calls[3].runtimeDirectories).toEqual([]);
+    await expect.poll(async () =>
+      (await (await page.request.get(`${address.url}/api/job`)).json()).job.status
+    ).toBe("passed");
+    await page.request.post(`${address.url}/api/jobs`, {
+      data: { request: "Keep a separate unresolved blocker paused.", mode: "validate-only" }
+    });
+    await page.reload();
+    await expect(page.locator("#permission-allow-all-tools")).not.toBeChecked();
+    await expect(page.locator("#permission-retry-tools")).toBeDisabled();
     await page.request.post(`${address.url}/api/jobs`, {
       data: { request: "Continue the queue after safe dismissal.", mode: "validate-only" }
     });
@@ -1248,8 +1345,8 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     await expect(dismiss).toBeEnabled();
     page.once("dialog", (dialog) => dialog.accept());
     await dismiss.click();
-    await expect.poll(() => calls.length).toBe(4);
-    expect(calls[3].runtimeDirectories).toEqual([]);
+    await expect.poll(() => calls.length).toBe(6);
+    expect(calls[5].runtimeDirectories).toEqual([]);
   } finally {
     await permissionDashboard.close();
     rmSync(permissionRepository, { recursive: true, force: true });
@@ -2124,6 +2221,37 @@ test("dashboard retries a blocked Playwright gate without shell input", async ({
   );
   expect(submittedInput.details).toContain("save at least one");
   expect(submittedInput.details).toContain("Do not skip");
+});
+
+test("dashboard offers post-draft live testing without a browser-failure warning", async ({ page }, testInfo) => {
+  const job = {
+    id: "published-draft", mode: "fix-and-validate", status: "blocked",
+    request: "Review the focused draft change", requestType: "bug-fix",
+    workflow: { mode: "efficient", publication: "draft" },
+    stages: Object.fromEntries([
+      "intake", "diagnosis", "reproduce", "fix", "review", "local-stack", "live-test", "pr"
+    ].map((stage) => [stage, {
+      status: stage === "live-test" ? "blocked" : "passed", message: ""
+    }])),
+    bugs: [], logs: [], canResume: true, inputCount: 0, pendingInputCount: 0
+  };
+  await page.route("**/api/status", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      readiness: { repository: "C:\\repo", repositoryReady: true,
+        profileReady: true, profileName: "Draft review", error: null },
+      job, queue: [], history: []
+    })
+  }));
+  await openWorkflowControls(page, baseUrl);
+  const guidance = page.locator("#job-input-guidance");
+  await expect(guidance).toContainText("The draft PR is available for review");
+  await expect(guidance).toContainText("developer machine");
+  await expect(guidance).not.toContainText("browser gate could not finish");
+  await expect(page.getByRole("button", { name: "Retry Playwright live test" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Skip Playwright live test" })).toBeVisible();
+  await guidance.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("draft-review-live-choice.png") });
 });
 
 test("dashboard requires explicit manual localhost confirmation", async ({

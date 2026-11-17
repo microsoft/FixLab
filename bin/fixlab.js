@@ -22,6 +22,7 @@ import {
   configuredValidationEnvironments,
   configuredTestSynthesis,
   createDashboardServer,
+  createAgencyExecutor,
   DEFAULT_DASHBOARD_PORT,
   FIXLAB_RUNTIMES,
   HYDRAFUSION_MODEL,
@@ -51,7 +52,8 @@ import { runValidationGate } from "./validation-gate-client.js";
 import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { ticketAutomationPlan, watchTickets, executeTicketAgent } from "../dashboard/ticket-automation.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -98,6 +100,7 @@ Usage:
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
   fixlab run [repository] [--runtime <agency|copilot>] [--model <model>] [--environment <name>] [--] [request...]
+  fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]
   fixlab validate [repository] --pr <number> [--runtime <agency|copilot>] [--model <model>]
   fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--runtime <agency|copilot>] [--model <model>]
   fixlab chat [repository] [--port <number>] [--runtime <agency|copilot>] [--model <model>]
@@ -108,6 +111,7 @@ Commands:
   <repository>
             Open an interactive FixLab shell for setup, fixes, and validation.
   onboard   Run the plan-first repository onboarding workflow.
+  watch     Review or run tagged ADO ticket-to-draft-PR or Discussion automation.
   init      Add the FixLab repository profile template.
   notifications
             Plan or install change-only Copilot notifications (no AI polling).
@@ -1063,7 +1067,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
         testEvidence.unitTestsOnly)) {
       throw new Error("--deployed-backend requires an explicitly selected, profile-approved DEV/SIT/UAT/PPE environment permitting live access.");
     }
-    if (choices.deferValidation || choices.skipLiveTests) {
+    if (choices.deferValidation || choices.skipLiveTests || choices.ticketAutomation) {
       workflow = { ...workflow, publication: "draft" };
     }
   } catch (validationError) {
@@ -1088,7 +1092,10 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     ...(profile.validation?.liveTestsRequired === false ? [UNIT_TEST_ONLY_GUIDANCE] : []),
     ...(readOnly ? [TRANSIENT_PLAYWRIGHT_GUIDANCE] : []),
     ...(!readOnly ? [CONCISE_PR_GUIDANCE] : []),
+    ...(!readOnly && request ? [USER_FRIENDLY_UPDATE_GUIDANCE] : []),
     ...(!readOnly && request ? [PR_LEARNING_GUIDANCE] : []),
+    ...(!readOnly && request && workflow.reviewTeams?.length
+      ? [PR_TEAM_REVIEW_GUIDANCE, `Reviewed team identities: ${JSON.stringify(workflow.reviewTeams)}. Profile changes require a fresh review.`] : []),
     ...(!readOnly && request && !choices.deferValidation ? [AUTONOMOUS_RECOVERY_GUIDANCE] : []),
     ...(profile.browserAutomation?.mode === "api" ? [API_ONLY_PLAYWRIGHT_GUIDANCE] : []),
     ...(request && !choices.deferValidation && allowsDraftIntegrationDeferral({ mode: readOnly ? "validate-only" : "fix-and-validate", workflow })
@@ -1100,8 +1107,12 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     "For known external-folder prerequisites, offer permissionPreflight before executor launch; it only opens review, never grants access. Use reviewed component path-to-gate policies for change-aware validation; unknown paths, full-validation paths, explicit full coverage, and previously executed gates retain their required checks.",
     "Use fixlab_dashboard_control for user-authorized dashboard operations. Read status first and bind its instance and current job. Do not ask again for routine steps already authorized; ask only for missing decisions or required approvals. For 'test this PR', verify the assigned checkout matches the PR source commit, then start playwright-only using the repository's Playwright configuration, selected environment and human-controlled authentication. Do not change code or use another checkout's evidence. Normal guards apply.",
     "For a connected host conversation, use fixlab_dashboard_status and fixlab_dashboard_reply to surface a recovery question using the host's question UI and submit only the user's explicit answer to the same instance and job. Never infer approval. Honor user-selected scoped iteration: full regression is explicitly deferred, not passed; for strict ready publication, PR readiness stays blocked. Draft publication follows the local/integration distinction above. Efficient delivery permits publication after focused checks and explicitly required pre-publication gates. Continue independent safe checks after unrelated failures without bypassing dependencies. Reviewed workspace reuse must preserve the current branch, uncommitted work and existing PR; a changed fingerprint requires a new review. Runtime permissions and human authentication remain separate approvals.",
+    ...(request ? [workItemValidationEvidenceGuidance({
+      mode: readOnly ? "validate-only" : "fix-and-validate", testEvidence, ...choices
+    })] : []),
     choices.deferValidation ? "Explicit unverified draft overrides the default focused-check-before-publication checkpoint; preserve every actual gate outcome." : !readOnly && workflow.mode === "efficient"
-      ? efficientWorkflowGuidance(workflow, { dashboard: false })
+      ? efficientWorkflowGuidance(workflow, { dashboard: false,
+        postPrLiveReview: Boolean(request) && allowsPostPrLiveReview({ mode: "fix-and-validate", workflow, testEvidence, ...choices }) })
       : "Use strict delivery: all applicable local gates and required approvals remain mandatory before readiness. Honor the saved draft/ready publication choice. Read-only runs never create or update a PR.",
     "Do not delete or edit transient test artifacts while validation is discovering or executing them; wait for owned validation to finish before cleanup.",
     "Before validation in a new isolated worktree, plan `fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME`. After scoped setup approval, add `--yes`. The source profile declares non-sensitive configuration in `worktreeSetup.files`. Never copy credentials or browser state. Missing configuration, authentication or denied runtime access is a blocker for the dependent check; do not retry unchanged approvals or grant blanket path access. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration; report missing prerequisites as blocked.",
@@ -1161,6 +1172,9 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
       };
   const forwardsPrompt =
     typeof invocation.input === "string" && invocation.input.length > 0;
+  if (choices.execute) {
+    return choices.execute({ repository, prompt });
+  }
   const result = spawnSync(runtime, invocation.args, {
     cwd: repository,
     stdio: forwardsPrompt ? ["pipe", "inherit", "inherit"] : "inherit",
@@ -1418,6 +1432,7 @@ async function onboard({
   console.log("");
   console.log("Review this repository-owned profile before approving setup:");
   console.log(`  ${profilePath}`);
+  console.log("Optional tagged-ticket defaults: review `fixlab watch` for Agency-based ADO bug/story/feature investigation, draft PRs when code changes are warranted, or Discussion feedback otherwise. Onboarding never starts the watcher or grants publication/tool access.");
   console.log("");
 
   if (!profileExisted) {
@@ -1739,7 +1754,7 @@ async function startDashboardForChat({
     );
     const onboardingResult = launch(
       repository, "", runtime, "", model, false,
-      `Set up this repository for FixLab. Read its instructions and manifests, configure the repository-owned profile, and review the setup plan with the user. After scoped approval, run fixlab onboard "${repository}" --runtime ${runtime} --yes. Add --authenticate only when the profile requires browser sign-in; let the user complete sign-in and MFA. Do not start a dashboard from this agent. Return only after Doctor passes, or report the exact unresolved prerequisite.`
+      `Set up this repository for FixLab. Read its instructions and manifests, configure the repository-owned profile, and review the setup plan with the user. Follow packaged read-only POST review guidance. Review optional ticketAutomation areas/tag defaults, but never start its watcher or grant tool/publication access during setup. After scoped approval, run fixlab onboard "${repository}" --runtime ${runtime} --yes. Add --authenticate only when the profile requires browser sign-in; let the user complete sign-in and MFA. Do not start a dashboard from this agent. Return only after Doctor passes, or report the exact unresolved prerequisite.`
     );
     if (onboardingResult !== 0) {
       throw new Error(
@@ -1808,6 +1823,89 @@ async function main(args) {
     const repository = resolveRepository(rest.find((value) => !value.startsWith("-")));
     console.log(JSON.stringify(installNotifications(repository, packageRoot, rest.includes("--yes")), null, 2));
     return 0;
+  }
+
+  if (command === "watch") {
+    const parsed = parseRuntimeArguments(rest);
+    if (parsed.error) {
+      throw new Error(parsed.error);
+    }
+    let repositoryArgument;
+    let environment;
+    const flags = new Set();
+    for (let index = 0; index < parsed.args.length; index += 1) {
+      const value = parsed.args[index];
+      if (value === "--environment") {
+        environment = parsed.args[++index];
+        if (!environment || environment.startsWith("-")) {
+          throw new Error("watch requires a value after --environment.");
+        }
+      } else if (["--yes", "--once", "--allow-all-tools", "--resolve-on-completion"].includes(value)) {
+        flags.add(value);
+      } else if (!value.startsWith("-") && !repositoryArgument) {
+        repositoryArgument = value;
+      } else {
+        throw new Error("Usage: fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]");
+      }
+    }
+    const repository = resolveRepository(repositoryArgument);
+    const { profile, error } = loadProfile(repository);
+    if (error) {
+      throw new Error(error);
+    }
+    const plan = ticketAutomationPlan(repository, profile, {
+      environment, runtime: parsed.runtime,
+      resolveOnCompletion: flags.has("--resolve-on-completion") || profile.ticketAutomation?.resolveOnCompletion === true
+    });
+    console.log(JSON.stringify({
+      organization: plan.organization, project: plan.project, repository: plan.repository,
+      tag: plan.tag, areaPaths: plan.areaPaths, targetBranch: plan.targetBranch, environment: plan.environment,
+      pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,
+      resolution: plan.resolveOnCompletion
+        ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
+        : "No work-item state changes.",
+      requiresConfirmation: true,
+      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. No business-data writes, production, merges or deployments.`
+    }, null, 2));
+    if (!flags.has("--yes")) {
+      console.log("Plan only. Review this scope, then add --yes --allow-all-tools to start. Installing or onboarding alone never starts a watcher.");
+      return 0;
+    }
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    try {
+      await watchTickets({
+        repository, plan, once: flags.has("--once"), confirmed: true,
+        allowAllTools: flags.has("--allow-all-tools"), signal: controller.signal,
+        execute: async ({ request, onActivity }) => {
+          const result = await launch(repository, request, parsed.runtime, environment, parsed.model, false, "", {
+            ticketAutomation: true,
+            execute: ({ repository: checkout, prompt }) => executeTicketAgent({
+              executor: createAgencyExecutor({ packageRoot }), repository: checkout, prompt,
+              runtimeDirectories: [packageRoot], signal: controller.signal,
+              onActivity,
+              idleTimeoutMs: (profile.validation?.agentIdleTimeoutMinutes ?? 20) * 60000
+            })
+          });
+          return typeof result === "object" ? result : {
+            outcome: "blocked",
+            summary: `FixLab could not start the ticket investigation (exit ${result}). Review the local setup error. No validation or PR publication is claimed.`
+          };
+        }
+      });
+      return 0;
+    } catch (error) {
+      if (controller.signal.aborted && error.name === "AbortError") {
+        console.log("Ticket watcher stopped. Any interrupted execution remains recorded for review.");
+        return 0;
+      }
+      throw error;
+    } finally {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+    }
   }
 
   if (command === "portal-api-proof" || command === "linked-api-proof") {

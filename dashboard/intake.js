@@ -353,15 +353,21 @@ function defaultTokenProvider() {
   return token;
 }
 
-function defaultRequestJson(url, token) {
+function defaultRequestJson(url, token, { method = "GET", body, contentType = "application/json" } = {}) {
   return new Promise((resolveRequest, reject) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    if (payload && Buffer.byteLength(payload) > 64 * 1024) {
+      reject(new Error("Azure DevOps request exceeded 64 KiB"));
+      return;
+    }
     const request = httpsRequest(
       url,
       {
-        method: "GET",
+        method,
         headers: {
           Accept: "application/json",
-          Authorization: `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
+          ...(payload ? { "Content-Type": contentType, "Content-Length": Buffer.byteLength(payload) } : {})
         }
       },
       (response) => {
@@ -399,7 +405,7 @@ function defaultRequestJson(url, token) {
       request.destroy(new Error("Azure DevOps request timed out"));
     });
     request.on("error", reject);
-    request.end();
+    request.end(payload);
   });
 }
 
@@ -585,6 +591,7 @@ export function createAzureDevOpsLoader({
         : fallbackWebUrl;
     return {
       id: Number(fields["System.Id"] ?? item.id ?? target.id),
+      revision: Number.isSafeInteger(item.rev) && item.rev > 0 ? item.rev : null,
       title: workItemText(fields["System.Title"], 500),
       description: workItemText(fields["System.Description"], 10000),
       reproduction: workItemText(
@@ -597,10 +604,14 @@ export function createAzureDevOpsLoader({
       ),
       state: workItemText(fields["System.State"], 200),
       workItemType: workItemText(fields["System.WorkItemType"], 200),
+      project: workItemText(fields["System.TeamProject"], 200),
+      areaPath: workItemText(fields["System.AreaPath"], 1000),
+      tags: workItemText(fields["System.Tags"], 2000),
       comments: (commentResponse?.comments ?? [])
         .filter((comment) => !comment?.isDeleted)
         .slice(0, 20)
         .map((comment) => ({
+          ...(Number.isSafeInteger(comment.id) ? { id: comment.id } : {}),
           author: workItemText(comment?.createdBy?.displayName, 200),
           createdAt:
             typeof comment?.createdDate === "string"
@@ -672,14 +683,20 @@ export function createAzureDevOpsLoader({
     }
   }
 
-  async function withToken(targets) {
+  async function withToken(targets, includeImages = true) {
     let token;
     try {
       token = await tokenProvider();
       const items = await Promise.all(
         targets.map((target) => loadTarget(target, token))
       );
-      await loadImages(items, token);
+      if (includeImages) {
+        await loadImages(items, token);
+      } else {
+        for (const item of items) {
+          delete item.imageCandidates;
+        }
+      }
       return items;
     } catch (error) {
       const message = String(error?.message ?? error);
@@ -692,10 +709,10 @@ export function createAzureDevOpsLoader({
     }
   }
 
-  const loader = async ({ workItem, profile }) => {
+  const loader = async ({ workItem, profile, includeImages = true }) => {
     const [result] = await withToken([
       parseAzureDevOpsWorkItem(workItem, profile)
-    ]);
+    ], includeImages);
     return result;
   };
   loader.loadMany = async ({ workItems, profile }) => {
@@ -714,4 +731,138 @@ export function loadRepositoryProfile(repository) {
       "utf8"
     )
   );
+}
+
+export function createAzureDevOpsTicketClient({
+  profile, tokenProvider = defaultTokenProvider, requestJson = defaultRequestJson
+}) {
+  const target = parseAzureDevOpsWorkItem("1", profile);
+  const base = `https://dev.azure.com/${encodeURIComponent(target.organization)}/${encodeURIComponent(target.project)}/_apis`;
+  const loader = createAzureDevOpsLoader({ tokenProvider, requestJson });
+  async function request(path, options) {
+    let token;
+    try {
+      token = await tokenProvider();
+      return await requestJson(`${base}/${path}`, token, options);
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      throw new Error((token ? message.split(token).join("[REDACTED]") : message)
+        .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]"));
+    } finally {
+      token = null;
+    }
+  }
+  function workItemId(id) {
+    if (!Number.isSafeInteger(id) || id < 1) {
+      throw new Error("work item ID must be a positive safe integer");
+    }
+    return id;
+  }
+  return {
+    async findTagged(tag, areaPaths) {
+      if (typeof tag !== "string" || !tag.trim() || tag.length > 100 || /[\r\n;]/u.test(tag)) {
+        throw new Error("Automation requires one bounded work-item tag.");
+      }
+      if (!Array.isArray(areaPaths) || areaPaths.length === 0 || areaPaths.length > 8 ||
+          areaPaths.some(path => typeof path !== "string" || !path.trim() || path.length > 1000 || /[\r\n]/u.test(path))) {
+        throw new Error("Automation requires explicitly reviewed Azure DevOps area paths.");
+      }
+      const quote = value => value.replaceAll("'", "''");
+      const result = await request("wit/wiql?$top=21&api-version=7.1", {
+        method: "POST",
+        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(target.project)}' AND (${areaPaths.map(path => `[System.AreaPath] UNDER '${quote(path)}'`).join(" OR ")}) AND [System.Tags] CONTAINS '${quote(tag)}' AND [System.WorkItemType] IN ('Bug', 'User Story', 'Feature', 'Product Backlog Item') AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Resolved') ORDER BY [System.ChangedDate] DESC` }
+      });
+      if (!Array.isArray(result?.workItems) || result.workItems.length > 20) {
+        throw new Error("Ticket automation requires at most 20 eligible items; narrow the configured tag before continuing.");
+      }
+      return [...new Set(result.workItems.map(item => workItemId(item.id)))];
+    },
+    async load(id) {
+      const item = await loader({ workItem: String(workItemId(id)), profile, includeImages: false });
+      if (item.id !== id || item.project.toLowerCase() !== target.project.toLowerCase()) {
+        throw new Error("The returned work item identity or project does not match the requested scope.");
+      }
+      if (item.commentsWarning) {
+        throw new Error(item.commentsWarning);
+      }
+      delete item.screenshots;
+      return item;
+    },
+    async hasComment(id, marker) {
+      if (typeof marker !== "string" || marker.length > 200 || !marker.startsWith("[FixLab automation ")) {
+        throw new Error("An exact bounded automation feedback marker is required.");
+      }
+      let continuation;
+      for (let page = 0; page < 10; page += 1) {
+        const result = await request(`wit/workItems/${workItemId(id)}/comments?$top=100&order=desc&api-version=7.1-preview.4${continuation ? `&continuationToken=${encodeURIComponent(continuation)}` : ""}`);
+        if (!Array.isArray(result?.comments)) {
+          throw new Error("Azure DevOps returned an invalid comment collection.");
+        }
+        if (result.comments.some(comment => !comment.isDeleted &&
+            sanitizeAzureDevOpsHtml(comment.text).startsWith(marker))) {
+          return true;
+        }
+        continuation = result.continuationToken;
+        if (!continuation) {
+          return false;
+        }
+        if (typeof continuation !== "string" || continuation.length > 500) {
+          throw new Error("Azure DevOps returned an invalid comments continuation token.");
+        }
+      }
+      throw new Error("Existing feedback could not be fully checked; no duplicate comment was posted.");
+    },
+    async comment(id, text) {
+      if (typeof text !== "string" || !text.trim() || text.length > 10000) {
+        throw new Error("Ticket feedback requires bounded nonempty text.");
+      }
+      const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "<br>");
+      return request(`wit/workItems/${workItemId(id)}/comments?api-version=7.1-preview.4`, {
+        method: "POST", body: { text: escaped }
+      });
+    },
+    async resolve(id, revision, workItemType) {
+      workItemId(id);
+      if (!Number.isSafeInteger(revision) || revision < 1 ||
+          !["Bug", "User Story", "Feature", "Product Backlog Item"].includes(workItemType)) {
+        throw new Error("Resolution requires a fresh work-item revision and supported type.");
+      }
+      const states = await request(`wit/workitemtypes/${encodeURIComponent(workItemType)}/states?api-version=7.1`);
+      if (!Array.isArray(states?.value) || !states.value.some(state => state.name === "Resolved")) {
+        throw new Error("This work-item workflow does not support Resolved. Its owner must review the state.");
+      }
+      const result = await request(`wit/workitems/${id}?api-version=7.1`, {
+        method: "PATCH", contentType: "application/json-patch+json",
+        body: [
+          { op: "test", path: "/rev", value: revision },
+          { op: "add", path: "/fields/System.State", value: "Resolved" }
+        ]
+      });
+      if (result?.id !== id || !Number.isSafeInteger(result.rev) || result.rev <= revision ||
+          result.fields?.["System.State"] !== "Resolved" ||
+          result.fields?.["System.TeamProject"]?.toLowerCase() !== target.project.toLowerCase()) {
+        throw new Error("Azure DevOps did not verify the requested Resolved state.");
+      }
+      return result.rev;
+    },
+    async verifyDraft(repository, id, targetBranch, ticketId) {
+      const expectedTicketId = workItemId(ticketId);
+      if (typeof repository !== "string" || !repository.trim() || repository.length > 200 ||
+          !Number.isSafeInteger(id) || id < 1) {
+        throw new Error("A configured repository and positive pull-request ID are required.");
+      }
+      const pr = await request(`git/repositories/${encodeURIComponent(repository)}/pullrequests/${id}?api-version=7.1`);
+      if (pr?.isDraft !== true || pr.status !== "active" ||
+          pr.targetRefName !== `refs/heads/${targetBranch}` ||
+          ![pr.repository?.id, pr.repository?.name].some(value =>
+            typeof value === "string" && value.toLowerCase() === repository.toLowerCase())) {
+        throw new Error("The provider did not verify an active draft PR in the approved repository and target branch.");
+      }
+      const links = await request(`git/repositories/${encodeURIComponent(repository)}/pullrequests/${id}/workitems?api-version=7.1`);
+      if (!Array.isArray(links?.value) || !links.value.some(item => String(item.id) === String(expectedTicketId))) {
+        throw new Error("The draft PR is not linked to the authorized work item.");
+      }
+      return `https://dev.azure.com/${encodeURIComponent(target.organization)}/${encodeURIComponent(target.project)}/_git/${encodeURIComponent(repository)}/pullrequest/${id}`;
+    }
+  };
 }

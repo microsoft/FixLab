@@ -52,11 +52,51 @@ import { runValidationGate } from "../bin/validation-gate-client.js";
 import { dashboardControl, dashboardConversation } from "../mcp/dashboard-client.js";
 import { compactControlResult, conversationOperations } from "../dashboard/conversation-operations.js";
 import { runJobPreflight } from "../dashboard/preflight.js";
+import { ticketAutomationPlan, watchTickets } from "../dashboard/ticket-automation.js";
 
 const packageRoot = new URL("..", import.meta.url).pathname.replace(
   /^\/([A-Za-z]:)/,
   "$1"
 );
+
+test("watcher monitoring exposes only this repository's recorded history and never starts or controls work", async () => {
+  const repository = createGitRepository();
+  git(repository, ["remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]);
+  const profile = validProfile({
+    environments: { DEV: {} }, ticketAutomation: { areaPaths: ["Example\\Application"] },
+    pullRequests: { defaultTargetBranch: "develop" }
+  });
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  const plan = ticketAutomationPlan(repository, profile, { environment: "dev" });
+  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic fixture", comments: [] };
+  await watchTickets({
+    repository, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
+    execute: async () => ({ outcome: "blocked", summary: "Human sign-in is required; no live tests ran." })
+  });
+  const current = await startDashboard(repository, () => { assert.fail("Monitoring must not execute a job."); });
+  try {
+    const response = await jsonRequest(current.url, "/api/ticket-automation");
+    assert.equal(response.response.status, 200);
+    assert.equal(response.body.environment, "DEV");
+    assert.equal(response.body.attempts[0].outcome, "blocked");
+    assert.match(response.body.attempts[0].workItemUrl, /^https:\/\/dev\.azure\.com\/example-org\/Example\//);
+    assert.equal((await jsonRequest(current.url, "/api/status")).body.job, null);
+    const denied = await jsonRequest(current.url, "/api/ticket-automation", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "retry" })
+    });
+    assert.equal(denied.response.status, 404);
+    writeFileSync(join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json"),
+      '{"private-sentinel-malformed');
+    const invalid = await jsonRequest(current.url, "/api/ticket-automation");
+    assert.equal(invalid.response.status, 503);
+    assert.doesNotMatch(JSON.stringify(invalid.body), /private-sentinel/);
+  } finally {
+    await current.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
 
 test("engineering summary validates detail fields, redacts sensitive text and rejects unsafe paths", () => {
   const detail = {
@@ -3233,6 +3273,117 @@ test("permission denial stops the executor and requires a confirmed job-bound fo
     await dashboard.close();
     rmSync(repository, { recursive: true, force: true });
     rmSync(external, { recursive: true, force: true });
+  }
+});
+
+test("permission retries require fresh tool consent and retain only reviewed folders", async () => {
+  const repository = createRepository();
+  const external = mkdtempSync(join(tmpdir(), "fixlab-tool-retry-scope-"));
+  const secondExternal = mkdtempSync(join(tmpdir(), "fixlab-tool-retry-extra-"));
+  const calls = [];
+  const { dashboard, url } = await startDashboard(repository, (input) => {
+    calls.push(input);
+    return { completion: new Promise(() => {}), terminate() {} };
+  }, undefined, { runtime: "agency" });
+  const post = (body, origin = url) => jsonRequest(url, "/api/job/permissions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
+    body: JSON.stringify(body)
+  });
+  const waitForPermission = async () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const state = (await jsonRequest(url, "/api/status")).body;
+      if (state.job.canReviewPermissions) {return state;}
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail("The denied executor did not stop for permission review.");
+  };
+  try {
+    const started = await jsonRequest(url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: "Validate after explicit runtime consent.", mode: "validate-only",
+        routineFileAccess: true, permissionPreflight: true
+      })
+    });
+    const first = await approvePreflightDirectory(url, started.body.job, external);
+    assert.equal(first.response.status, 202, first.body.error);
+    assert.equal(calls[0].toolApprovalMode, "ask");
+    calls[0].onOutput("stdout", "FIXLAB_STAGE|intake|passed|Read the request.\n");
+    calls[0].onOutput("stdout", "Denied, no one to approve MCP tool (fixlab/status)\n");
+    let state = await waitForPermission();
+    const approval = {
+      action: "approve-tools", instanceId: state.instanceId, jobId: state.job.id,
+      requestId: state.job.permissionRequest.id, confirmed: true,
+      toolApprovalMode: "allow-all", allowAllConfirmed: true
+    };
+    for (const [changes, status] of [
+      [{ instanceId: "stale-instance" }, 409], [{ jobId: "stale-job" }, 409],
+      [{ requestId: "stale-request" }, 409], [{ confirmed: false }, 400],
+      [{ toolApprovalMode: "ask" }, 400], [{ toolApprovalMode: "invalid" }, 400],
+      [{ allowAllConfirmed: false }, 400], [{ allowAllConfirmed: undefined }, 400]
+    ]) {
+      const rejected = await post({ ...approval, ...changes });
+      assert.equal(rejected.response.status, status, rejected.body.error);
+    }
+    for (const origin of ["", "https://example.invalid"]) {
+      assert.equal((await post(approval, origin)).response.status, 403);
+    }
+    assert.equal(calls.length, 1, "Rejected approvals must not start another executor.");
+    const retried = await post(approval);
+    assert.equal(retried.response.status, 202, retried.body.error);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].toolApprovalMode, "allow-all");
+    assert.equal(calls[1].resume, true);
+    assert.equal(calls[1].sessionId, calls[0].sessionId);
+    assert.deepEqual(calls[1].runtimeDirectories, [realpathSync(external)]);
+    assert.equal(retried.body.job.fileAccess.mode, "source-read");
+    assert.equal(retried.body.job.stages.intake.status, "passed");
+    assert.equal((await post(approval)).response.status, 409);
+
+    calls[1].onOutput("stdout", "Denied, no one to approve shell path (another-helper)\n");
+    state = await waitForPermission();
+    assert.equal(state.job.toolApprovalMode, "ask");
+    assert.deepEqual(state.job.runtimeDirectoryGrants, [realpathSync(external)]);
+    const reviewed = await post({
+      ...approval, action: "review-directory",
+      requestId: state.job.permissionRequest.id, directory: secondExternal
+    });
+    assert.equal(reviewed.response.status, 200, reviewed.body.error);
+    assert.equal(reviewed.body.job.toolApprovalMode, "ask", "Review alone cannot authorize tools.");
+    const combined = {
+      ...approval, action: "approve-directory",
+      requestId: reviewed.body.job.permissionRequest.id,
+      directory: reviewed.body.job.permissionRequest.scope.directory
+    };
+    assert.equal((await post({ ...combined, allowAllConfirmed: false })).response.status, 400);
+    assert.equal((await post(combined, "")).response.status, 403);
+    await assert.rejects(dashboardControl({
+      repository, port: Number(new URL(url).port), instanceId: state.instanceId,
+      jobId: state.job.id, confirmed: true, operation: "permission-approve", parameters: combined
+    }), /origin/);
+    const resumed = await post(combined);
+    assert.equal(resumed.response.status, 202, resumed.body.error);
+    assert.equal(calls[2].toolApprovalMode, "allow-all");
+    assert.deepEqual(calls[2].runtimeDirectories, [realpathSync(external), realpathSync(secondExternal)]);
+    calls[2].onOutput("stdout", "Denied, no one to approve MCP tool (fixlab/status)\n");
+    state = await waitForPermission();
+    assert.equal(state.job.toolApprovalMode, "ask");
+    assert.equal((await post(combined)).response.status, 409);
+    rmSync(secondExternal, { recursive: true, force: true });
+    const failedLaunch = await post({
+      ...approval, requestId: state.job.permissionRequest.id
+    });
+    assert.equal(failedLaunch.response.status, 409);
+    assert.match(failedLaunch.body.error, /approved folder changed/);
+    assert.equal(failedLaunch.body.job.toolApprovalMode, "ask");
+    assert.deepEqual(failedLaunch.body.job.runtimeDirectoryGrants, []);
+    assert.equal(calls.length, 3, "An invalid prior folder must prevent another executor.");
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
+    rmSync(secondExternal, { recursive: true, force: true });
   }
 });
 
@@ -7865,6 +8016,68 @@ test("dashboard gate execution rejects forged readiness and stale final-source e
     assert.equal(status.body.job.status, "blocked");
     assert.equal(status.body.job.validation.gates[0].status, "stale");
     assert.equal(status.body.job.pullRequestReadiness.ready, false);
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("published default drafts offer live testing and PR review without reporting a browser failure", async () => {
+  const repository = createGitRepository();
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"),
+    JSON.stringify(validProfile({ workflow: {} })));
+  let emit;
+  let finish;
+  const prompts = [];
+  const { dashboard, url } = await startDashboard(repository, (input) => {
+    emit = input.onOutput;
+    prompts.push(input.prompt);
+    return { completion: new Promise((resolve) => { finish = resolve; }),
+      terminate() { finish({ code: 130 }); } };
+  });
+  try {
+    const started = await jsonRequest(url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Prepare the focused draft change.", mode: "fix-and-validate" })
+    });
+    assert.equal(started.response.status, 202, started.body.error);
+    writeFileSync(join(repository, "tracked.txt"), "reviewed change\n");
+    const deferredStages = { "live-test": "blocked", "local-stack": "skipped" };
+    for (const stage of FIXLAB_STAGES) {
+      const status = deferredStages[stage] ?? "passed";
+      emit("stdout", `FIXLAB_STAGE|${stage}|${status}|Synthetic draft handoff; awaiting live-test choice.\n`);
+    }
+    finish({ code: 0 });
+    await new Promise((resolve) => setImmediate(resolve));
+    const conversation = (await jsonRequest(url, "/api/conversation")).body;
+    assert.equal(conversation.job.status, "blocked");
+    assert.equal(conversation.question.kind, "live-test");
+    assert.deepEqual(conversation.question.actions, ["retry", "skip"]);
+    assert.match(conversation.question.message, /draft PR is available for review/);
+    assert.match(conversation.question.message, /developer machine/);
+    assert.match(conversation.question.message, /unverified/);
+    assert.doesNotMatch(conversation.question.message, /could not finish/);
+    const job = (await jsonRequest(url, "/api/job")).body.job;
+    assert.equal(job.stages.pr.status, "passed");
+    assert.equal(job.stages["live-test"].status, "blocked");
+    for (const action of ["retry", "skip"]) {
+      const resumed = await jsonRequest(url, "/api/job/input", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, details: `User explicitly chose ${action} for live testing.` })
+      });
+      assert.equal(resumed.response.status, 202, resumed.body.error);
+      assert.equal(resumed.body.job.id, job.id);
+      assert.equal(resumed.body.job.stages.pr.status, "passed");
+      assert.match(prompts.at(-1), /Reuse an existing pull request/);
+      assert.doesNotMatch(prompts.at(-1), /Default draft handoff:/);
+      const status = action === "skip" ? "skipped" : "blocked";
+      emit("stdout", `FIXLAB_STAGE|live-test|${status}|Synthetic user choice; no live evidence claimed.\n`);
+      finish({ code: 0 });
+      await new Promise((resolve) => setImmediate(resolve));
+      const updated = (await jsonRequest(url, "/api/job")).body.job;
+      assert.equal(updated.stages.pr.status, "passed");
+      assert.equal(updated.stages["live-test"].status, status);
+    }
   } finally {
     await dashboard.close();
     rmSync(repository, { recursive: true, force: true });

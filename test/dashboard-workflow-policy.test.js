@@ -3,9 +3,60 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
+import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, POST_PR_LIVE_REVIEW_GUIDANCE, WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE, USER_FRIENDLY_UPDATE_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
 import { ValidationSession, selectedValidationGates, validationGates } from "../dashboard/validation-gates.js";
 import { buildJobPrompt, FIXLAB_STAGES } from "../dashboard/server.js";
+import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
+
+test("review teams are optional, bounded verified-identity inputs and invalid configuration blocks launch", () => {
+  const profile = (reviewTeams) => ({ pullRequests: { reviewTeams } });
+  assert.deepEqual(configuredReviewTeams({}), []);
+  assert.deepEqual(configuredReviewTeams(profile([])), []);
+  const teamId = "12345678-1234-1234-1234-123456789abc";
+  assert.deepEqual(configuredReviewTeams(profile(["@example-org/review-team", "@EXAMPLE-ORG/REVIEW-TEAM", teamId])),
+    ["@example-org/review-team", teamId]);
+  const workflow = configuredWorkflow(profile(["@example-org/review-team", "@EXAMPLE-ORG/REVIEW-TEAM"]));
+  assert.deepEqual(workflow.reviewTeams, ["@example-org/review-team"]);
+  assert.deepEqual(configuredWorkflow({ workflow }), workflow, "Saved jobs retain their reviewed team identities.");
+  assert.equal(configuredWorkflow({ workflow, pullRequests: { reviewTeams: [] } }).reviewTeams, undefined);
+  for (const invalid of [null, "@org/team", {}, [null], ["team display name"],
+    ["@org/team\n@everyone"], ["@org/team; execute"], ["@org/team/other"],
+    ["not-a-guid"], Array(9).fill("@org/team")]) {
+    assert.throws(() => configuredWorkflow(profile(invalid)), /pullRequests\.reviewTeams/);
+  }
+});
+
+test("approval-request comments belong to authorized code publication in every delivery mode", () => {
+  for (const mode of ["efficient", "strict"]) {
+    for (const deferValidation of [false, true]) {
+      const prompt = buildJobPrompt({
+        request: "Prepare the authorized PR.", mode: "fix-and-validate", deferValidation,
+        workflow: configuredWorkflow({ workflow: { mode, publication: "draft" },
+          pullRequests: { reviewTeams: ["@example-org/review-team"] } })
+      });
+      assert.ok(prompt.includes(PR_TEAM_REVIEW_GUIDANCE), `${mode}/${deferValidation}`);
+      assert.ok(prompt.includes('Reviewed team identities: ["@example-org/review-team"]'));
+    }
+  }
+  for (const mode of ["validate-only", "playwright-only"]) {
+    assert.ok(!buildJobPrompt({ request: "Validate without publication.", mode,
+      workflow: configuredWorkflow({ pullRequests: { reviewTeams: ["@example-org/review-team"] } }) })
+      .includes(PR_TEAM_REVIEW_GUIDANCE), mode);
+  }
+  assert.ok(!buildJobPrompt({ request: "Fix without configured review teams.", mode: "fix-and-validate" })
+    .includes(PR_TEAM_REVIEW_GUIDANCE));
+  for (const path of [
+    "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
+    ".github/agents/fixlab.agent.md", "prompts/fixlab.pr.prompt.md"
+  ]) {
+    const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8")
+      .replace(/\s+/gu, " ");
+    assert.ok(source.includes(PR_TEAM_REVIEW_GUIDANCE), path);
+  }
+  const cli = readFileSync(new URL("../bin/fixlab.js", import.meta.url), "utf8");
+  assert.match(cli, /!readOnly && request && workflow\.reviewTeams\?\.length\s+\? \[PR_TEAM_REVIEW_GUIDANCE/);
+});
 
 test("verified read-only POST searches use the default browser policy independently of write consent", () => {
   for (const mode of ["fix-and-validate", "validate-only", "playwright-only"]) {
@@ -123,6 +174,9 @@ test("PR learning stays aligned across CLI, packaged agents, initialized agents 
     const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8")
       .replace(/`/gu, "").replace(/\s+/gu, " ");
     assert.ok(source.includes(PR_LEARNING_GUIDANCE), `${path} must preserve the complete PR learning contract`);
+    assert.ok(source.includes(POST_PR_LIVE_REVIEW_GUIDANCE), `${path} must preserve the default draft/live-test handoff`);
+    assert.ok(source.includes(WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE), `${path} must preserve conditional, best-effort work-item evidence`);
+    assert.ok(source.includes(USER_FRIENDLY_UPDATE_GUIDANCE), `${path} must preserve understandable updates and verified fix links`);
   }
   const cli = readFileSync(new URL("../bin/fixlab.js", import.meta.url), "utf8");
   assert.match(cli, /!readOnly && request \? \[PR_LEARNING_GUIDANCE\]/);
@@ -239,6 +293,57 @@ test("browser-only reproduction is existing-application first without claiming d
   assert.match(prompt, /Do not commit, push, create or update pull requests/);
   assert.match(prompt, /No Save, Submit, Approve, autosave/);
 });
+test("default draft delivery publishes before asking for developer-local live tests and review", () => {
+  const job = { request: "Fix the reported defect.", mode: "fix-and-validate",
+    workflow: configuredWorkflow() };
+  const prompt = buildJobPrompt(job);
+  assert.match(prompt, /Default draft handoff:/);
+  assert.match(prompt, /verify provider isDraft=true/);
+  assert.match(prompt, /ask whether live testing is possible on the developer's machine and request PR review/);
+  assert.match(prompt, /Wait for the user's explicit choice/);
+  assert.match(prompt, /User-friendly updates:/);
+  assert.match(prompt, /issue and its impact in everyday language/);
+  assert.match(prompt, /verified clickable PR link containing the fix/);
+  assert.match(prompt, /verified commit link when available/);
+  assert.match(prompt, /Never invent links or imply an untested change is verified/);
+  assert.match(prompt, /any explicitly requested post-PR local checks/);
+  assert.match(prompt, /local-stack skipped only for unstarted applications, preserve completed startup outcomes/);
+  assert.match(prompt, /live-test blocked while awaiting the user's live-test choice/);
+  assert.doesNotMatch(prompt, /- Run the smallest repository-defined Playwright journey that proves/);
+  assert.doesNotMatch(prompt, /- Start only the applications defined by the repository profile, then execute/);
+  for (const overrides of [
+    { mode: "validate-only" }, { mode: "playwright-only" },
+    { workflow: configuredWorkflow({ workflow: { mode: "strict" } }) },
+    { workflow: configuredWorkflow({ workflow: { publication: "ready" } }) },
+    { manualLocalhostTest: true }, { runAllUiScenarios: true },
+    { skipLiveTests: true }, { deferValidation: true },
+    { testEvidence: { unitTestsOnly: true } }
+  ]) {
+    assert.doesNotMatch(buildJobPrompt({ ...job, ...overrides }), /Default draft handoff:/);
+  }
+});
+
+test("work-item screenshots require actual live assertions and remain best-effort", () => {
+  const job = { request: "Fix the originating work item.", mode: "fix-and-validate",
+    workflow: configuredWorkflow() };
+  const prompt = buildJobPrompt(job);
+  assert.match(prompt, /Work-item validation evidence:/);
+  assert.match(prompt, /only after approved live browser validation actually runs scenario assertions/);
+  assert.match(prompt, /original Azure DevOps work item/);
+  assert.match(prompt, /actual result and PR link/);
+  assert.match(prompt, /verify the attachment relation/);
+  assert.match(prompt, /Missing capture: comment the actual result and reason without an image/);
+  assert.match(prompt, /not block the draft PR or change validation outcomes/);
+  for (const overrides of [
+    { mode: "validate-only" }, { mode: "playwright-only" },
+    { skipLiveTests: true }, { deferValidation: true },
+    { testEvidence: { unitTestsOnly: true } }, { testEvidence: { apiOnly: true } },
+    { testEvidence: { productionDatabaseReadOnly: true } }
+  ]) {
+    assert.doesNotMatch(buildJobPrompt({ ...job, ...overrides }), /Work-item validation evidence:/);
+  }
+});
+
 test("draft checkpoints separate live prerequisites from required local checks without passing integration", () => {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-draft-checkpoint-"));
   const gate = (id, properties = {}) => ({

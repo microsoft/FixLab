@@ -71,6 +71,7 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /fixlab dashboard/);
   assert.match(result.stdout, /fixlab chat/);
   assert.match(result.stdout, /fixlab keep-awake/);
+  assert.match(result.stdout, /fixlab watch/);
   assert.match(result.stdout, /--keep-awake-minutes <minutes>/);
   assert.match(result.stdout, /chat \[repository\]/);
   assert.match(result.stdout, /fixlab <repository>/);
@@ -79,6 +80,44 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /FIXLAB_RUNTIME/);
   assert.match(result.stdout, /127\.0\.0\.1:4317/);
   assert.match(result.stdout, /docs\/troubleshooting\.md/);
+});
+
+test("watch is plan-only until the repository-scoped tool and publication session is explicitly approved", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-watch-"));
+  try {
+    for (const args of [
+      ["init", repository],
+      ["-C", repository, "remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/example-repo"]
+    ]) {
+      assert.equal(spawnSync("git", args, { encoding: "utf8", windowsHide: true }).status, 0);
+    }
+    mkdirSync(join(repository, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      environments: ["dev"],
+      pullRequests: { defaultTargetBranch: "develop", requireConfirmation: true },
+      ticketAutomation: { tag: "FixLab", areaPaths: ["Example\\Application"] }
+    }));
+    const args = ["watch", repository, "--runtime", "agency", "--environment", "dev"];
+    const plan = run(args, repository);
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stdout, /"requiresConfirmation": true/);
+    assert.match(plan.stdout, /"targetBranch": "develop"/);
+    assert.match(plan.stdout, /No work-item state changes/);
+    const resolutionPlan = run([...args, "--resolve-on-completion"], repository);
+    assert.equal(resolutionPlan.status, 0, resolutionPlan.stderr);
+    assert.match(resolutionPlan.stdout, /Resolved after a verified draft PR or a confirmed cause/);
+    assert.match(resolutionPlan.stdout, /Plan only/);
+    assert.equal(existsSync(join(repository, ".git", "fixlab", "ticket-automation")), false);
+    const unapproved = run([...args, "--yes", "--once"], repository);
+    assert.equal(unapproved.status, 1);
+    assert.match(unapproved.stderr, /--allow-all-tools/);
+    const unknown = run([...args, "--unknown-watch-option"], repository);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /Usage: fixlab watch/);
+    assert.equal(existsSync(join(repository, ".git", "fixlab", "ticket-automation")), false);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
 });
 
 test("direct shared-mode bug fixing requires dashboard-owned branch acquisition", () => {
@@ -1230,6 +1269,7 @@ test("run launches the Agency-resolved FixLab agent with real DEV reads from new
     );
     const profile = JSON.parse(readFileSync(profilePath, "utf8"));
     profile.workflow.publication = "ready";
+    profile.pullRequests.reviewTeams = ["@example-org/review-team"];
     writeFileSync(profilePath, JSON.stringify(profile));
     mkdirSync(executableDirectory);
     const executable = join(
@@ -1283,6 +1323,19 @@ test("run launches the Agency-resolved FixLab agent with real DEV reads from new
     assert.match(result.stdout, /Verify the PR is no longer draft before reporting the PR stage passed/);
     assert.match(result.stdout, /\*\.auth\.spec\.ts/);
     assert.match(result.stdout, /Request: repair the defect/);
+    assert.match(result.stdout, /PR team approval:/);
+    assert.match(result.stdout, /Reviewed team identities: \["@example-org\/review-team"\]/);
+    profile.workflow.publication = "draft";
+    writeFileSync(profilePath, JSON.stringify(profile));
+    const draft = run(["run", repository, "--environment", "development", "--", "fix then request live testing"],
+      repository, { PATH: `${executableDirectory}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}` });
+    assert.equal(draft.status, 0, draft.stderr);
+    assert.match(draft.stdout, /Default draft handoff:/);
+    assert.match(draft.stdout, /ask whether live testing is possible on the developer's machine and request PR review/);
+    assert.match(draft.stdout, /Wait for the user's explicit choice/);
+    assert.match(draft.stdout, /Work-item validation evidence:/);
+    assert.match(draft.stdout, /User-friendly updates:/);
+    assert.match(draft.stdout, /verified clickable PR link containing the fix/);
     const unverified = run([
       "run", repository, "--environment", "development", "--draft-without-checks",
       "--skip-live-tests", "--deployed-backend", "--", "prepare the code-only draft"
@@ -1294,6 +1347,8 @@ test("run launches the Agency-resolved FixLab agent with real DEV reads from new
     assert.match(unverified.stdout, /deferValidation=true; skipLiveTests=true; useDeployedBackend=true/);
     assert.match(unverified.stdout, /isDraft=true/);
     assert.doesNotMatch(unverified.stdout, /publish the authorized PR by marking it ready/);
+    assert.doesNotMatch(unverified.stdout, /Default draft handoff:/);
+    assert.doesNotMatch(unverified.stdout, /Work-item validation evidence:/);
     assert.match(unverified.stdout, /Request: prepare the code-only draft/);
     const validation = run(
       ["validate", repository, "--pr", "123", "--runtime", "agency"],
@@ -1303,6 +1358,9 @@ test("run launches the Agency-resolved FixLab agent with real DEV reads from new
     assert.equal(validation.status, 0);
     assert.match(validation.stdout, /Do not publish a pull request or change its draft status in read-only mode/);
     assert.doesNotMatch(validation.stdout, /gh pr ready|az repos pr update/);
+    assert.doesNotMatch(validation.stdout, /Default draft handoff:/);
+    assert.doesNotMatch(validation.stdout, /Work-item validation evidence:/);
+    assert.doesNotMatch(validation.stdout, /User-friendly updates:/);
   } finally {
     rmSync(repository, { recursive: true, force: true });
   }
@@ -1459,6 +1517,10 @@ test("run launches the FixLab plugin directly through Copilot", () => {
 
   try {
     assert.equal(run(["init", repository], repository).status, 0);
+    const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+    const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+    profile.pullRequests.reviewTeams = ["@example-org/review-team"];
+    writeFileSync(profilePath, JSON.stringify(profile));
     mkdirSync(executableDirectory);
     const executable = join(
       executableDirectory,
@@ -1497,6 +1559,8 @@ test("run launches the FixLab plugin directly through Copilot", () => {
       /--plugin-dir [^\r\n]+ --agent fixlab:fixlab/
     );
     assert.match(result.stdout, /--autopilot/);
+    assert.match(result.stdout, /PR team approval:/);
+    assert.match(result.stdout, /Reviewed team identities: \["@example-org\/review-team"\]/);
     assert.match(result.stdout, /transient validation artifacts/);
     assert.match(result.stdout, /authorized DRAFT pull request now/);
     assert.match(result.stdout, /read back provider isDraft=true before reporting publication passed/);
@@ -1512,6 +1576,7 @@ test("run launches the FixLab plugin directly through Copilot", () => {
     );
     assert.equal(validation.status, 0);
     assert.match(validation.stdout, /Do not publish a pull request or change its draft status in read-only mode/);
+    assert.doesNotMatch(validation.stdout, /PR team approval:|Reviewed team identities:/);
     assert.doesNotMatch(validation.stdout, /gh pr ready|az repos pr update/);
   } finally {
     rmSync(repository, { recursive: true, force: true });
@@ -1609,6 +1674,7 @@ test("run without a request keeps Agency guidance interactive", () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /--interactive/);
     assert.doesNotMatch(result.stdout, /Reusable PR learning:/);
+    assert.doesNotMatch(result.stdout, /Default draft handoff:|Work-item validation evidence:/);
     assert.doesNotMatch(result.stdout, /--session-id/);
     assert.doesNotMatch(result.stdout, /--no-ask-user/);
   } finally {
@@ -1656,6 +1722,7 @@ test("run without a request keeps Copilot environment guidance interactive", () 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /--interactive/);
     assert.doesNotMatch(result.stdout, /Reusable PR learning:/);
+    assert.doesNotMatch(result.stdout, /Default draft handoff:|Work-item validation evidence:/);
     assert.match(
       result.stdout,
       /Use development as the user-selected validation environment/

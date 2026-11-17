@@ -5,6 +5,12 @@ import { apiScope, apiSessionHelper } from "./api-authentication.js";
 import { safeRuntimeText } from "./runtime-requests.js";
 import { SETUP_PROFILE_PATH, setupPath } from "./repository-setup.js";
 
+export function configuredPostSafety(profile, targetEnvironment) {
+  const environment = targetEnvironment.toLowerCase();
+  const safety = profile.browserAutomation?.dataSafety;
+  return safety?.post?.[environment] ?? (environment === "dev" ? safety?.devPost : undefined);
+}
+
 function configurationAt(repository, environment = "dev", jobConsent = false, originWrites = false) {
   const label = environment.toUpperCase();
   const operation = originWrites ? `${label} write` : "POST";
@@ -19,8 +25,7 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
     throw new Error(`${operation} requires a valid JSON repository profile.`);
   }
   const safety = profile.browserAutomation?.dataSafety;
-  const configuration = originWrites ? safety?.[`${environment}Write`] : safety?.post?.[environment] ??
-    (environment === "dev" ? safety?.devPost : undefined);
+  const configuration = originWrites ? safety?.[`${environment}Write`] : configuredPostSafety(profile, environment);
   if (!configuration) { return null; }
   const environments = Array.isArray(profile.environments)
     ? profile.environments : Object.keys(profile.environments ?? {});

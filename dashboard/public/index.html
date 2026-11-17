@@ -23,6 +23,7 @@
           <button type="button" data-open="chat-view" aria-current="page">Chat</button>
           <button type="button" data-open="queue-panel">Queue <span id="queue-nav-count">0</span></button>
           <button type="button" data-open="details-group">Run details</button>
+          <button type="button" data-open="watcher-group">Watcher jobs</button>
           <button type="button" data-open="memory-group">Repository memory</button>
           <button type="button" data-open="connections-group">Connections</button>
           <button type="button" data-open="settings-group">Settings</button>
@@ -81,6 +82,15 @@
         <details id="connections-group" class="inspector-group">
           <summary>Connections <span class="detail-hint">Browser &amp; sessions</span></summary>
           <div id="connections-view"></div>
+        </details>
+        <details id="watcher-group" class="inspector-group">
+          <summary>Watcher jobs <span class="detail-hint">Status &amp; history</span></summary>
+          <section aria-label="Tagged-ticket watcher history">
+            <p id="watcher-status" class="guidance" role="status">Loading watcher history.</p>
+            <p class="guidance">Read-only monitoring. Opening this view does not start or retry work, approve access, or run tests. Last reported status is not a process health check.</p>
+            <ol id="watcher-attempts"></ol>
+            <p class="guidance">Finished means feedback was recorded, not that tests passed. Check and scenario messages are agent-reported, not independent runner proof. Detailed history is bounded to recent attempts; older attempts may have basic status only. See each work item's Discussion for published feedback.</p>
+          </section>
         </details>
         <details id="settings-group" class="inspector-group">
           <summary>Settings <span class="detail-hint">Repository setup &amp; usage</span></summary>
@@ -492,7 +502,13 @@
         <input id="permission-directory" type="text" maxlength="2048" autocomplete="off" spellcheck="false">
         <button id="permission-review" type="button">Review folder access</button>
         <pre id="permission-scope" hidden></pre>
+        <label class="checkbox-row">
+          <input id="permission-allow-all-tools" type="checkbox">
+          Allow all tool commands for this retry
+        </label>
+        <p class="guidance">Fresh, privileged opt-in for the next executor only: commands can change files and contact services without individual tool prompts. This does not add folders or URL access, override organization policy, or approve sign-in, production changes, publication or required checks. It expires when the executor stops. Leave unchecked to approve only the reviewed folder.</p>
         <button id="permission-approve" type="button" hidden>Grant this folder and resume</button>
+        <button id="permission-retry-tools" type="button" disabled>Allow tools and retry without adding folders</button>
         <p class="guidance">Leave the job paused if the scope is unclear. A folder grant cannot resolve a tool-policy or organization-policy denial; FixLab will not bypass those policies.</p>
         <p id="permission-message" class="guidance" role="status" aria-live="polite"></p>
       </section>

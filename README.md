@@ -47,6 +47,16 @@ establish application readiness or grant permissions.
 | Fix a bug or small enhancement | Scoped changes, validation evidence, and an authorized pull request |
 | Validate an existing change or PR | Findings and evidence without source or PR changes |
 | Run focused Playwright validation | Browser or configured API assertions without an implementation job |
+| Watch explicitly tagged ADO tickets (Agency) | Reviewed local polling produces a draft PR or feedback on the existing ticket's Discussion |
+
+The optional [tagged-ticket watcher](docs/commands.md#tagged-ticket-watcher)
+starts only after a separate scope review and explicit session approval.
+Onboarding supplies defaults, not automatic activation. IcM requires a linked
+ADO item; no direct IcM listener is installed.
+Use **Watcher jobs** in the existing dashboard for read-only attempt status,
+recorded activity, check outcomes and work-item/PR links. Older attempts may
+have basic history only. Optional `--resolve-on-completion` hands off a verified
+draft PR or confirmed cause as `Resolved`; this is not merge or deployment.
 
 ## Architecture and benefits
 
@@ -71,6 +81,9 @@ If there is no new reusable learning, the PR says so instead of adding a file.
 ![FixLab workflow: intake, diagnosis, reproduction, change, review, local stack, live test, and outcome](assets/fixlab-workflow-diagram.png)
 
 Efficient delivery defaults to focused checks and an authorized **draft PR**.
+After draft publication, FixLab shares the PR and asks for review and whether
+developer-local live testing is possible. It waits for the user's choice before
+optional live startup, sign-in or tests; unavailable live evidence stays unverified.
 Optional broad tests/builds are controlled by saved preferences; required
 repository checks and CI/merge policies still apply. Failed, deferred, stale,
 or skipped checks are never reported as passed.
@@ -78,6 +91,29 @@ or skipped checks are never reported as passed.
 See [architecture and benefits](docs/architecture-overview.md) for components,
 benefits, deployment, recovery, and trust boundaries, or the
 [architecture reference](docs/architecture.md) for runtime and MCP contracts.
+
+### Automatic team approval requests
+
+For PRs FixLab creates or updates, optionally request team approval in a PR
+comment. Add `pullRequests.reviewTeams` to the reviewed repository profile:
+
+```json
+{
+  "pullRequests": {
+    "reviewTeams": ["@example-org/review-team"]
+  }
+}
+```
+
+GitHub uses `@org/team` handles; Azure DevOps uses verified team identity GUIDs.
+FixLab verifies the teams in the PR's scope, includes the actual validation
+status, and reuses its own marked comment on retries to avoid duplicate
+notifications. Unverified teams or uncertain posting results remain unconfirmed.
+
+Omit the setting or use `[]` to disable it. Read-only and validation-only jobs
+never post. This requests approval; it does not approve, mark ready, merge,
+or grant publication permissions. Configure it in the profile, not dashboard
+Settings. See [configuration and recovery details](docs/repository-onboarding.md#automatic-pr-approval-request-comments).
 
 ## Work in the dashboard
 

@@ -3,6 +3,33 @@
 FixLab must not assume that every React and .NET repository has the same layout.
 The target repository owns a versioned profile.
 
+## Optional tagged-ticket automation
+
+New profiles include `ticketAutomation` defaults for the `FixLab` tag,
+five-minute polling and `draft-pr-or-discussion` outcomes. Before enabling the
+watcher, configure one to eight `areaPaths` below the checkout's ADO project,
+the existing PR target branch and a non-production environment:
+
+```json
+{
+  "ticketAutomation": {
+    "tag": "FixLab",
+    "areaPaths": ["Example Project\\Application"],
+    "pollSeconds": 300,
+    "outcome": "draft-pr-or-discussion"
+  }
+}
+```
+
+The empty default area list intentionally does not authorize an entire shared
+ADO project. Installing or onboarding never starts the watcher or grants its
+session access. `fixlab watch` prints the plan; starting it separately requires
+`--yes --allow-all-tools`. While running, the exact tag triggers eligible ADO
+bugs/stories/features in those areas, including IcM represented by a linked ADO
+item. A justified fix produces a draft PR and Discussion feedback; analysis,
+already-fixed and blocked outcomes update the existing Discussion only.
+See [watcher commands and limitations](commands.md#tagged-ticket-watcher).
+
 ## Dashboard chat setup
 
 Choose **Add local repository** in the repository sidebar and enter the absolute
@@ -223,6 +250,40 @@ Configure repository branch ownership explicitly:
 FixLab replaces `{userId}` with the configured value and instructs the agent to
 create branches beneath the resolved prefix. It never substitutes `copilot`,
 `fixlab`, or another runtime name for the repository user's ID.
+
+### Automatic PR approval-request comments
+
+Configure up to eight review teams in the reviewed repository profile:
+
+```json
+{
+  "pullRequests": {
+    "reviewTeams": ["@example-org/review-team"]
+  }
+}
+```
+
+GitHub entries use `@org/team` handles. For Azure DevOps, use team identity
+GUIDs verified in the PR's organization/project; FixLab resolves their native
+mentions rather than guessing from display names. Omit the setting or use `[]`
+to disable approval-request comments. Existing profiles need no migration.
+This setting is edited in the profile, not the dashboard Settings form.
+Configured teams are captured in the saved job workflow; a profile change
+requires fresh review and never restores runtime permissions.
+
+After authorized PR creation or update, the existing agent-driven PR workflow
+verifies each configured team against the actual PR scope, then posts an
+approval-request comment with the PR link and accurate validation status.
+It reads comments first and reuses only its own `<!-- fixlab:team-review -->`
+comment so retries do not repeatedly notify reviewers. Provider readback is
+required before it reports the request posted. Missing permissions, unresolved
+teams or uncertain acknowledgements are reported as unconfirmed, not blindly
+retried; an already-created PR remains available.
+
+This applies to dashboard, direct CLI and tagged-ticket code jobs in both
+runtimes. It does not post in validation-only jobs, bypass runtime permissions,
+assign reviewers, approve or merge, change draft status, or waive required
+checks. The watcher still owns work-item Discussion feedback separately.
 
 ## API-only Playwright validation
 

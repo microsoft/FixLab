@@ -8,6 +8,12 @@
   },
   "name": "Example React and .NET repository",
   "architecture": "React frontend with ASP.NET Core backend",
+  "ticketAutomation": {
+    "tag": "FixLab",
+    "areaPaths": [],
+    "pollSeconds": 300,
+    "outcome": "draft-pr-or-discussion"
+  },
   "components": [
     {
       "name": "frontend",
@@ -113,6 +119,7 @@
   "pullRequests": {
     "defaultTargetBranch": "develop",
     "requireConfirmation": true,
+    "reviewTeams": [],
     "branchNaming": {
       "userId": "your-user-id",
       "prefixTemplate": "users/{userId}"

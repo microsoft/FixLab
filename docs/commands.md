@@ -8,6 +8,23 @@ default in efficient mode, `ready` by default in strict mode),
 `workflow.unitTestsAfterPr` (default `false`) and `workflow.optionalBuilds`
 (default `false`) once. Marking a draft ready requires a separate reviewed
 decision. No per-stage workflow selection is needed.
+After the default draft is published and verified, FixLab shares its URL, requests
+PR review and asks whether focused live testing is possible on the developer's
+machine. Optional application startup, sign-in and live tests wait for explicit
+acceptance. Retry runs the focused live check; Skip keeps the draft and records
+missing live evidence, never a pass. Existing strict/ready, validation-only,
+manual/all-UI, unit-test-only and explicit validation choices retain their contracts.
+After an approved browser validation actually executes assertions for the source
+Azure DevOps work item, the agent uses authorized Azure DevOps tools to attach an
+available reviewed, non-sensitive screenshot and record the actual result and PR
+link. If capture is unavailable, it records the result and reason without an image.
+Blocked/skipped validation, API-only and unit-only runs do not upload screenshots.
+Attachment access and publication are verified; unavailable capture or upload is
+reported, never fabricated, and does not block the draft PR or waive required gates.
+Human updates explain the issue's impact, the change, actual checks and next action
+in everyday language, with a verified PR link or a commit link when available.
+Review recipients come from assigned PR reviewers; Teams delivery still requires
+an approved configured connection and verified identities.
 Required local `validation.gates` remain publication-blocking in efficient
 mode. For editing jobs with saved `publication: "draft"` (efficient or strict),
 unavailable live integration does not block authorized frontend/backend code work
@@ -717,6 +734,81 @@ section:
   }
 }
 ```
+
+### Tagged-ticket watcher
+
+```powershell
+fixlab watch "C:\source\application" --runtime agency --environment dev
+```
+
+This prints a plan only: checkout-derived ADO organization/project/repository,
+reviewed area paths, tag, target branch, environment and installed helper
+directory. Set the profile's `pullRequests.defaultTargetBranch` and
+`ticketAutomation.areaPaths` first. The default trigger is the exact `FixLab`
+tag, the interval is 300 seconds, and the outcome is `draft-pr-or-discussion`.
+New profiles include those defaults but no authorized areas or auto-start.
+
+After reviewing that scope, explicitly start the session:
+
+```powershell
+fixlab watch "C:\source\application" --runtime agency --environment dev --yes --allow-all-tools
+```
+
+Adding `FixLab` to an active Bug, User Story, Feature or Product Backlog Item
+in a configured area or descendant makes it eligible at the next poll.
+The first poll includes existing eligible tagged items. Only one investigation
+runs per poll. A justified fix produces a work-item-linked **draft PR** plus
+Discussion feedback; otherwise the existing ticket receives diagnosis,
+evidence, limitations and next steps, not an empty PR or a new story.
+Meaningful ticket edits or new human Discussion comments can trigger another
+investigation. FixLab's own feedback does not retrigger it.
+
+Open **Watcher jobs** in the existing dashboard to see read-only attempt history,
+timestamps, safe activity, recorded checks, actual resolution status and
+work-item/verified PR links. This does not start a watcher or grant permissions.
+Finished means feedback was recorded, not that tests passed. Check/scenario
+messages are agent-reported, not independent runner proof. Old attempts may
+have basic history only. Detailed history retains the latest 20 attempts,
+20 activity and 10 check updates per attempt; raw console output is not stored.
+Worker status is the last reported state, not a process health check.
+
+To opt into automatic investigation handoff, first review the plan with
+`--resolve-on-completion`, then add the normal session confirmations:
+
+```powershell
+fixlab watch "C:\source\application" --runtime agency --environment dev --resolve-on-completion
+fixlab watch "C:\source\application" --runtime agency --environment dev --resolve-on-completion --yes --allow-all-tools
+```
+
+The equivalent reviewed profile setting is `ticketAutomation.resolveOnCompletion: true`.
+This sets `Resolved` only after a verified draft PR or an explicitly confirmed
+cause with evidence and next steps. It never resolves an access blocker,
+inconclusive analysis, unverified PR or old completed attempt. Resolved means
+investigation handed off for human review, not a merged/deployed or fully
+live-tested fix. Unsupported workflows remain unchanged and receive an explicit
+follow-up. Revision conflicts do not overwrite human edits; uncertain state
+updates are checked before any further action. Existing sessions without this
+opt-in retain their no-state-change behavior. Resolved items are no longer picked up.
+Reopening an automatically resolved item at a newer work-item revision permits
+one new attempt even if its problem text is unchanged; own feedback remains deduplicated.
+
+This version requires Agency and a locally authenticated Azure CLI identity
+with the relevant ADO permissions. IcM enters through a tagged linked ADO
+record, not a direct IcM connector. Watcher intake is text-only. It is not a
+dashboard job, hosted service, webhook or boot-time task: the local command
+must remain running. Ctrl+C stops it; `--once` permits at most one investigation.
+More than 20 eligible candidates explicitly stops the scan; narrow the tag or
+areas instead of silently omitting tickets.
+
+Session approval covers tool commands/helper access and draft/comment outcomes,
+plus the Resolved handoff only when explicitly selected, for the displayed scope.
+It does not grant application business writes,
+production access, ready/merge/deployment permission or normal dashboard jobs'
+future approvals. Configuration/helper changes stop for a new review. Private
+Git state deduplicates completed revisions and uncertain comment acknowledgements.
+An interrupted investigation or unverified owned-process stop requires review
+of its branch/PR and retained journal/lock before retrying; do not blindly remove
+that state. See [the security model](security.md).
 
 Azure DevOps loading uses the local developer's authenticated Azure CLI
 identity and never exposes or stores the bearer token. It loads safe work-item
