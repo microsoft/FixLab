@@ -152,11 +152,15 @@ test("credential-bearing ticket fields and comments never reach executor input o
     for (const [field, value] of [
       ["title", `token=${synthetic}`],
       ["description", `Authorization: Basic ${synthetic}`],
+      ["description", `Bearer\t${synthetic}`],
+      ["description", `password\n=${synthetic}`],
       ["reproduction", `https://user:${synthetic}@example.invalid/`],
       ["acceptanceCriteria", `-----BEGIN PRIVATE KEY-----\n${synthetic}\n-----END PRIVATE KEY-----`],
       ["webUrl", `https://example.invalid/?access_token=${synthetic}`],
       ["webUrl", `https://${synthetic}@example.invalid/`],
       ["comments", [{ id: 2, text: `Bearer ${synthetic}` }]],
+      ["comments", [{ id: 2, text: `Bearer\n${synthetic}` }]],
+      ["comments", [{ id: 2, text: `password\t=\n${synthetic}` }]],
       ["comments", [1, 2, 3].map(id => ({ id, text: "Safe discussion." }))
         .concat({ id: 4, text: `password=${synthetic}` })]
     ]) {
@@ -173,6 +177,13 @@ test("credential-bearing ticket fields and comments never reach executor input o
     assert.ok(!events.join("\n").includes(synthetic));
     assert.equal(JSON.parse(journal).entries.length, 0);
     assert.equal(fixture.posted.length, 0);
+    for (const key of Object.keys(fixture.item)) { delete fixture.item[key]; }
+    Object.assign(fixture.item, structuredClone(original), { description: "Safe description.\nSecond line with\ta tab." });
+    await fixture.run({ execute: async ({ item, request }) => {
+      assert.equal(item.description, fixture.item.description);
+      assert.ok(request.includes(JSON.stringify(item.description)));
+      return { outcome: "analysis", summary: "Safe multiline input was retained." };
+    } });
   } finally { fixture.cleanup(); }
 });
 

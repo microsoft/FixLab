@@ -341,8 +341,17 @@ export async function executeTicketAgent({
 }
 
 function ticketRequest(item, plan) {
-  if (!safeTicketText(JSON.stringify(item), 80 * 1024)) {
-    throw new Error("The work item contains credential-like, unsupported or oversized content. Redact it and review the ticket before launching an investigation.");
+  const contentError = () => new Error("The work item contains credential-like, unsupported or oversized content. Redact it and review the ticket before launching an investigation.");
+  const serialized = JSON.stringify(item, (key, value) => {
+    // Inspect original strings before JSON escapes credential-significant whitespace.
+    if (!safeTicketText(key, 80 * 1024) ||
+        (typeof value === "string" && !safeTicketText(value, 80 * 1024))) {
+      throw contentError();
+    }
+    return value;
+  });
+  if (!safeTicketText(serialized, 80 * 1024)) {
+    throw contentError();
   }
   const reviewTeams = configuredReviewTeams(plan.profile);
   const context = {
