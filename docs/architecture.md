@@ -19,6 +19,24 @@ acknowledgements without silently rerunning interrupted work. This explicitly
 approved local session is separate from dashboard jobs and normal per-executor
 tool consent. Setup only supplies defaults; it never starts a watcher.
 
+The existing dashboard's **Watcher jobs** panel reads the scope-checked private
+journal through `GET /api/ticket-automation`; it never starts, retries or controls
+watcher work. Future attempts retain timestamps, safe structured activity and
+agent-reported check/scenario outcomes. Raw output is not retained. The latest
+20 attempts retain at most 20 activity and 10 check updates each; older entries
+keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown.
+Last reported worker status is not a process-liveness assertion.
+
+Explicit `--resolve-on-completion` (or reviewed `ticketAutomation.resolveOnCompletion`)
+permits the watcher, not the agent, to set `Resolved` after a separately verified
+draft PR or an analysis with a confirmed cause, evidence and next steps. Feedback
+explains that this is a human-review handoff, not merge/deployment/live-test proof.
+The client checks workflow support, tests the fresh work-item revision in JSON
+Patch and verifies the returned state/project. Unsupported workflows and changed
+scope remain unresolved. Uncertain acknowledgements are read back, never blindly
+patched again; inconclusive/blocked outcomes and legacy completed attempts are not
+resolved. Resolved items are excluded from subsequent scans.
+
 Native runtime request classification supplies redacted, reason-specific
 diagnostics. Eligible blocked operations expose **Deny and request safe recovery**:
 the runtime receives a rejection with fixed recovery feedback, not a permission

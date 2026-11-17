@@ -23,6 +23,7 @@
           <button type="button" data-open="chat-view" aria-current="page">Chat</button>
           <button type="button" data-open="queue-panel">Queue <span id="queue-nav-count">0</span></button>
           <button type="button" data-open="details-group">Run details</button>
+          <button type="button" data-open="watcher-group">Watcher jobs</button>
           <button type="button" data-open="memory-group">Repository memory</button>
           <button type="button" data-open="connections-group">Connections</button>
           <button type="button" data-open="settings-group">Settings</button>
@@ -81,6 +82,15 @@
         <details id="connections-group" class="inspector-group">
           <summary>Connections <span class="detail-hint">Browser &amp; sessions</span></summary>
           <div id="connections-view"></div>
+        </details>
+        <details id="watcher-group" class="inspector-group">
+          <summary>Watcher jobs <span class="detail-hint">Status &amp; history</span></summary>
+          <section aria-label="Tagged-ticket watcher history">
+            <p id="watcher-status" class="guidance" role="status">Loading watcher history.</p>
+            <p class="guidance">Read-only monitoring. Opening this view does not start or retry work, approve access, or run tests. Last reported status is not a process health check.</p>
+            <ol id="watcher-attempts"></ol>
+            <p class="guidance">Finished means feedback was recorded, not that tests passed. Check and scenario messages are agent-reported, not independent runner proof. Detailed history is bounded to recent attempts; older attempts may have basic status only. See each work item's Discussion for published feedback.</p>
+          </section>
         </details>
         <details id="settings-group" class="inspector-group">
           <summary>Settings <span class="detail-hint">Repository setup &amp; usage</span></summary>

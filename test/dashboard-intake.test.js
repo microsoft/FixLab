@@ -3,6 +3,9 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
+  renameSync,
+  symlinkSync,
   writeFileSync,
   rmSync
 } from "node:fs";
@@ -21,7 +24,7 @@ import {
   sanitizeAzureDevOpsHtml,
   storeScreenshots
 } from "../dashboard/intake.js";
-import { executeTicketAgent, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
+import { executeTicketAgent, readTicketAutomationHistory, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
@@ -45,7 +48,7 @@ function ticketFixture() {
   writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
   const plan = ticketAutomationPlan(repository, profile, { environment: "dev" });
   const item = {
-    id: 42, project: plan.project, areaPath: plan.areaPaths[0], tags: "Other; FixLab", workItemType: "Bug", state: "Active",
+    id: 42, revision: 1, project: plan.project, areaPath: plan.areaPaths[0], tags: "Other; FixLab", workItemType: "Bug", state: "Active",
     title: "Name validation", description: "Accept plus and reject exclamation.",
     comments: [{ id: 1, text: "Check the create-name flow." }]
   };
@@ -57,6 +60,15 @@ function ticketFixture() {
     async comment(id, text) {
       posted.push({ id, text });
       item.comments.unshift({ id: 100 + posted.length, text });
+      item.revision += 1;
+    },
+    async resolve(id, revision, type) {
+      assert.equal(id, item.id);
+      assert.equal(revision, item.revision);
+      assert.equal(type, item.workItemType);
+      item.state = "Resolved";
+      item.revision += 1;
+      return item.revision;
     },
     verifyDraft: async (repository, id, branch) => {
       assert.equal(repository, "example-repo");
@@ -125,14 +137,195 @@ test("ticket watcher posts verified draft links but reports an unverified PR as 
   try {
     await fixture.run({ execute: async () => ({ outcome: "draft-pr", summary: "Scoped fix and focused tests passed. Browser evidence is unavailable.", pullRequestId: 17 }) });
     assert.match(fixture.posted[0].text, /Draft PR: https:\/\/dev\.azure\.com\/.*\/pullrequest\/17/);
+    assert.match(readTicketAutomationHistory(fixture.repository).attempts[0].pullRequestUrl, /pullrequest\/17$/);
     fixture.item.description = "Check a second scenario.";
     fixture.client.verifyDraft = async () => { throw new Error("PR is not draft."); };
     await fixture.run({ execute: async () => ({ outcome: "draft-pr", summary: "A result needs verification.", pullRequestId: 18 }) });
     assert.match(fixture.posted[1].text, /Outcome: blocked/);
     assert.match(fixture.posted[1].text, /Publication is unconfirmed/);
     assert.doesNotMatch(fixture.posted[1].text, /Draft PR:/);
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].pullRequestUrl, null);
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("watcher history persists bounded safe activity and check results without starting another execution", async () => {
+  const fixture = ticketFixture();
+  try {
+    await fixture.run({
+      execute: async ({ onActivity }) => executeTicketAgent({
+        repository: fixture.repository, prompt: "Fixture", onOutput() {}, onActivity,
+        executor(options) {
+          options.onOutput("stdout", "Raw console private-sentinel must not be persisted.\n");
+          for (let index = 0; index < 25; index += 1) {
+            options.onOutput("stdout", `FIXLAB_ACTIVITY|diagnosis|Recorded update ${index}.\n`);
+          }
+          options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed.\n");
+          options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|password=private-sentinel\n");
+          options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|See https://private.example.test/path and user@example.test.\n");
+          options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A regression still fails; live testing did not run."}\n');
+          return { completion: Promise.resolve({ code: 0 }), hasStopped: () => true, terminate() {} };
+        }
+      })
+    });
+    const history = readTicketAutomationHistory(fixture.repository);
+    assert.equal(history.status, "stopped");
+    const [attempt] = history.attempts;
+    assert.equal(attempt.status, "complete");
+    assert.equal(attempt.outcome, "blocked");
+    assert.equal(attempt.activity.length, 20);
+    assert.ok(attempt.omittedActivity > 0);
+    assert.equal(attempt.checks[0].status, "failed");
+    assert.ok(attempt.startedAt && attempt.finishedAt);
+    assert.doesNotMatch(JSON.stringify(history), /private-sentinel|private\.example|user@example/);
+    const journal = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    assert.doesNotMatch(readFileSync(journal, "utf8"), /private-sentinel|private\.example|user@example/);
+    const original = JSON.parse(readFileSync(journal, "utf8"));
+    delete original.entries[0].details;
+    delete original.watcher;
+    writeFileSync(journal, JSON.stringify(original));
+    const legacy = readTicketAutomationHistory(fixture.repository);
+    assert.equal(legacy.status, "unknown");
+    assert.equal(legacy.attempts[0].historyAvailable, false);
+    assert.deepEqual(legacy.attempts[0].checks, []);
+    fixture.profile.ticketAutomation.tag = "AnotherTag";
+    writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+    assert.throws(() => readTicketAutomationHistory(fixture.repository), /does not match/);
+    fixture.profile.ticketAutomation.tag = "FixLab";
+    writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+    const root = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation");
+    const moved = join(fixture.repository, "moved-history");
+    renameSync(root, moved);
+    symlinkSync(moved, root, "junction");
+    assert.throws(() => readTicketAutomationHistory(fixture.repository), /linked directories/);
+  } finally { fixture.cleanup(); }
+});
+
+test("automatic resolution requires an opted-in verified draft or a complete confirmed cause", async () => {
+  const cause = { cause: "The mapping configuration is missing.", evidence: "The reviewed source requires that mapping.", nextSteps: "The configuration owner must add it and validate the flow." };
+  for (const [result, optedIn, expected] of [
+    [{ outcome: "draft-pr", summary: "Focused checks passed; live testing is pending.", pullRequestId: 17 }, true, true],
+    [{ outcome: "analysis", summary: "The configuration cause is confirmed.", confirmedCause: cause }, true, true],
+    [{ outcome: "analysis", summary: "More information is needed." }, true, false],
+    [{ outcome: "blocked", summary: "Access is unavailable." }, true, false],
+    [{ outcome: "draft-pr", summary: "A draft is available.", pullRequestId: 17 }, false, false]
+  ]) {
+    const fixture = ticketFixture();
+    fixture.plan.resolveOnCompletion = optedIn;
+    let executions = 0;
+    try {
+      const execute = async () => { executions += 1; return result; };
+      await fixture.run({ execute });
+      await fixture.run({ execute });
+      assert.equal(fixture.item.state === "Resolved", expected);
+      assert.equal(executions, 1, "own feedback/state must not repeat the investigation");
+      const attempt = readTicketAutomationHistory(fixture.repository).attempts[0];
+      assert.equal(attempt.resolution?.status === "resolved", expected);
+      if (result.confirmedCause) { assert.deepEqual(attempt.confirmedCause, cause); }
+      if (expected) { assert.match(fixture.posted[0].text, /not that a fix is merged, deployed or fully live-tested/); }
+    } finally { fixture.cleanup(); }
+  }
+  assert.throws(() => ticketOutcome({ outcome: "analysis", summary: "Unproven.", confirmedCause: { cause: "An assumption." } }), /valid bounded/);
+  assert.throws(() => ticketOutcome({ outcome: "blocked", summary: "Blocked.", confirmedCause: cause }), /valid bounded/);
+});
+
+test("pending resolution is read back after restart even when new state changes are disabled", async () => {
+  const fixture = ticketFixture();
+  fixture.plan.resolveOnCompletion = true;
+  const load = fixture.client.load;
+  let unavailable = false;
+  let patches = 0;
+  fixture.client.load = async (...args) => {
+    if (unavailable) { unavailable = false; throw new Error("Read-back is temporarily unavailable."); }
+    return load(...args);
+  };
+  fixture.client.resolve = async () => {
+    patches += 1;
+    fixture.item.state = "Resolved";
+    unavailable = true;
+    throw new Error("State submission acknowledgement was lost.");
+  };
+  try {
+    await assert.rejects(fixture.run({
+      execute: async () => ({ outcome: "draft-pr", summary: "Draft ready for review.", pullRequestId: 17 })
+    }), /Read-back is temporarily/);
+    fixture.plan.resolveOnCompletion = false;
+    await fixture.run({ execute() { assert.fail("An uncertain acknowledgement must not rerun the agent."); } });
+    const [attempt] = readTicketAutomationHistory(fixture.repository).attempts;
+    assert.equal(attempt.status, "complete");
+    assert.equal(attempt.resolution.status, "resolved");
+    assert.equal(patches, 1);
+    assert.equal(fixture.posted.length, 1);
+  } finally { fixture.cleanup(); }
+});
+
+test("reopening an automatically resolved story starts one new attempt without losing deduplication", async () => {
+  const fixture = ticketFixture();
+  fixture.plan.resolveOnCompletion = true;
+  let executions = 0;
+  const execute = async () => {
+    executions += 1;
+    return { outcome: "draft-pr", summary: "Draft ready for review; live testing remains pending.", pullRequestId: 17 };
+  };
+  try {
+    await fixture.run({ execute });
+    await fixture.run({ execute });
+    assert.equal(executions, 1);
+    fixture.item.state = "Active";
+    fixture.item.revision += 1;
+    await fixture.run({ execute });
+    await fixture.run({ execute });
+    assert.equal(executions, 2);
+    assert.equal(fixture.posted.length, 2);
+    const history = readTicketAutomationHistory(fixture.repository);
+    assert.equal(history.attempts.length, 2);
+    assert.notEqual(history.attempts[0].id, history.attempts[1].id);
+    assert.equal(fixture.item.state, "Resolved");
+  } finally { fixture.cleanup(); }
+});
+
+test("resolution handles unsupported workflows and lost acknowledgements without a blind second patch", async () => {
+  for (const changed of [false, true]) {
+    const fixture = ticketFixture();
+    fixture.plan.resolveOnCompletion = true;
+    let patches = 0;
+    fixture.client.resolve = async () => {
+      patches += 1;
+      if (changed) { fixture.item.state = "Resolved"; }
+      throw new Error(changed ? "Connection ended after submission." : "This workflow does not support Resolved.");
+    };
+    try {
+      await fixture.run({ execute: async () => ({ outcome: "draft-pr", summary: "Draft ready; live testing pending.", pullRequestId: 17 }) });
+      assert.equal(patches, 1);
+      const attempt = readTicketAutomationHistory(fixture.repository).attempts[0];
+      assert.equal(attempt.resolution.status, changed ? "resolved" : "blocked");
+      assert.equal(fixture.posted.length, changed ? 1 : 2);
+      if (!changed) { assert.match(fixture.posted[1].text, /automatic resolution could not finish/); }
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("unverified drafts and changed or out-of-scope work items cannot be automatically resolved", async () => {
+  for (const mode of ["unverified", "edited", "out-of-scope"]) {
+    const fixture = ticketFixture();
+    fixture.plan.resolveOnCompletion = true;
+    let resolutions = 0;
+    fixture.client.resolve = async () => { resolutions += 1; };
+    if (mode === "unverified") { fixture.client.verifyDraft = async () => { throw new Error("Not draft."); }; }
+    const comment = fixture.client.comment;
+    fixture.client.comment = async (...args) => {
+      await comment(...args);
+      if (mode === "edited") { fixture.item.description = "A different scenario now needs review."; }
+      if (mode === "out-of-scope") { fixture.item.tags = ""; }
+    };
+    try {
+      const execution = fixture.run({ execute: async () => ({ outcome: "draft-pr", summary: "Draft proposed.", pullRequestId: 17 }) });
+      if (mode === "out-of-scope") { await assert.rejects(execution, /left the reviewed scope/); }
+      else { await execution; }
+      assert.equal(resolutions, 0);
+      assert.notEqual(fixture.item.state, "Resolved");
+    } finally { fixture.cleanup(); }
   }
 });
 
@@ -266,6 +459,39 @@ test("ADO automation client confines reads and feedback to the configured projec
   linkedTicketId = "43";
   await assert.rejects(client.verifyDraft("example-repo", 17, "develop", 42), /not linked/);
   await assert.rejects(client.comment(-1, "Not authorized."), /positive safe integer/);
+});
+
+test("ADO resolution checks workflow support, uses a revision test and verifies the returned state", async () => {
+  const calls = [];
+  let supported = true;
+  let project = "Example Project";
+  const client = createAzureDevOpsTicketClient({
+    profile: { azureDevOps: { organization: "example-org", project } },
+    tokenProvider: () => "private-test-token",
+    async requestJson(url, _token, options = {}) {
+      assert.match(url, /^https:\/\/dev\.azure\.com\/example-org\/Example%20Project\/_apis\//);
+      calls.push({ url, options });
+      if (url.includes("/states?")) { return { value: supported ? [{ name: "Resolved" }] : [{ name: "Done" }] }; }
+      assert.equal(options.method, "PATCH");
+      assert.equal(options.contentType, "application/json-patch+json");
+      assert.deepEqual(options.body, [
+        { op: "test", path: "/rev", value: 7 },
+        { op: "add", path: "/fields/System.State", value: "Resolved" }
+      ]);
+      return { id: 42, rev: 8, fields: { "System.State": "Resolved", "System.TeamProject": project } };
+    }
+  });
+  await assert.rejects(client.resolve(42, null, "Bug"), /fresh work-item revision/);
+  assert.equal(calls.length, 0);
+  await client.resolve(42, 7, "User Story");
+  assert.match(calls[0].url, /User%20Story\/states/);
+  supported = false;
+  const before = calls.length;
+  await assert.rejects(client.resolve(42, 7, "User Story"), /does not support/);
+  assert.equal(calls.length, before + 1, "unsupported workflows must not receive a patch");
+  supported = true;
+  project = "Another Project";
+  await assert.rejects(client.resolve(42, 7, "Bug"), /did not verify/);
 });
 
 function screenshot(overrides = {}) {

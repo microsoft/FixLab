@@ -55,6 +55,7 @@ import { compactControlResult, conversationOperations } from "./conversation-ope
 const windowsOwnedTrees = new WeakMap();
 import { ValidationSession, validationGates, selectedValidationGates, defaultValidationIntent } from "./validation-gates.js";
 import { repositoryState } from "../bin/structured-command.js";
+import { readTicketAutomationHistory } from "./ticket-automation.js";
 import {
   newPermissionRequest,
   permissionRequest,
@@ -4964,6 +4965,17 @@ export function createDashboardServer({
         sendJson(response, 503, { error: `Could not verify session ownership: ${error.message}` });
         return;
       }
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/ticket-automation") {
+      try {
+        sendJson(response, 200, readTicketAutomationHistory(resolvedRepository));
+      } catch {
+        sendJson(response, 503, {
+          error: "Watcher history could not be read. Review the private journal and repository scope. Nothing was started or changed."
+        });
+      }
+      return;
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/api/status") {

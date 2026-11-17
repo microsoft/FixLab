@@ -763,6 +763,35 @@ evidence, limitations and next steps, not an empty PR or a new story.
 Meaningful ticket edits or new human Discussion comments can trigger another
 investigation. FixLab's own feedback does not retrigger it.
 
+Open **Watcher jobs** in the existing dashboard to see read-only attempt history,
+timestamps, safe activity, recorded checks, actual resolution status and
+work-item/verified PR links. This does not start a watcher or grant permissions.
+Finished means feedback was recorded, not that tests passed. Check/scenario
+messages are agent-reported, not independent runner proof. Old attempts may
+have basic history only. Detailed history retains the latest 20 attempts,
+20 activity and 10 check updates per attempt; raw console output is not stored.
+Worker status is the last reported state, not a process health check.
+
+To opt into automatic investigation handoff, first review the plan with
+`--resolve-on-completion`, then add the normal session confirmations:
+
+```powershell
+fixlab watch "C:\source\application" --runtime agency --environment dev --resolve-on-completion
+fixlab watch "C:\source\application" --runtime agency --environment dev --resolve-on-completion --yes --allow-all-tools
+```
+
+The equivalent reviewed profile setting is `ticketAutomation.resolveOnCompletion: true`.
+This sets `Resolved` only after a verified draft PR or an explicitly confirmed
+cause with evidence and next steps. It never resolves an access blocker,
+inconclusive analysis, unverified PR or old completed attempt. Resolved means
+investigation handed off for human review, not a merged/deployed or fully
+live-tested fix. Unsupported workflows remain unchanged and receive an explicit
+follow-up. Revision conflicts do not overwrite human edits; uncertain state
+updates are checked before any further action. Existing sessions without this
+opt-in retain their no-state-change behavior. Resolved items are no longer picked up.
+Reopening an automatically resolved item at a newer work-item revision permits
+one new attempt even if its problem text is unchanged; own feedback remains deduplicated.
+
 This version requires Agency and a locally authenticated Azure CLI identity
 with the relevant ADO permissions. IcM enters through a tagged linked ADO
 record, not a direct IcM connector. Watcher intake is text-only. It is not a
@@ -771,8 +800,9 @@ must remain running. Ctrl+C stops it; `--once` permits at most one investigation
 More than 20 eligible candidates explicitly stops the scan; narrow the tag or
 areas instead of silently omitting tickets.
 
-Session approval covers tool commands/helper access and draft/comment outcomes
-only for the displayed scope. It does not grant application business writes,
+Session approval covers tool commands/helper access and draft/comment outcomes,
+plus the Resolved handoff only when explicitly selected, for the displayed scope.
+It does not grant application business writes,
 production access, ready/merge/deployment permission or normal dashboard jobs'
 future approvals. Configuration/helper changes stop for a new review. Private
 Git state deduplicates completed revisions and uncertain comment acknowledgements.

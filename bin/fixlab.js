@@ -100,7 +100,7 @@ Usage:
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
   fixlab run [repository] [--runtime <agency|copilot>] [--model <model>] [--environment <name>] [--] [request...]
-  fixlab watch [repository] --runtime agency --environment <name> [--once] [--yes --allow-all-tools]
+  fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]
   fixlab validate [repository] --pr <number> [--runtime <agency|copilot>] [--model <model>]
   fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--runtime <agency|copilot>] [--model <model>]
   fixlab chat [repository] [--port <number>] [--runtime <agency|copilot>] [--model <model>]
@@ -1838,12 +1838,12 @@ async function main(args) {
         if (!environment || environment.startsWith("-")) {
           throw new Error("watch requires a value after --environment.");
         }
-      } else if (["--yes", "--once", "--allow-all-tools"].includes(value)) {
+      } else if (["--yes", "--once", "--allow-all-tools", "--resolve-on-completion"].includes(value)) {
         flags.add(value);
       } else if (!value.startsWith("-") && !repositoryArgument) {
         repositoryArgument = value;
       } else {
-        throw new Error("Usage: fixlab watch [repository] --runtime agency --environment <name> [--once] [--yes --allow-all-tools]");
+        throw new Error("Usage: fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]");
       }
     }
     const repository = resolveRepository(repositoryArgument);
@@ -1851,13 +1851,19 @@ async function main(args) {
     if (error) {
       throw new Error(error);
     }
-    const plan = ticketAutomationPlan(repository, profile, { environment, runtime: parsed.runtime });
+    const plan = ticketAutomationPlan(repository, profile, {
+      environment, runtime: parsed.runtime,
+      resolveOnCompletion: flags.has("--resolve-on-completion") || profile.ticketAutomation?.resolveOnCompletion === true
+    });
     console.log(JSON.stringify({
       organization: plan.organization, project: plan.project, repository: plan.repository,
       tag: plan.tag, areaPaths: plan.areaPaths, targetBranch: plan.targetBranch, environment: plan.environment,
       pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,
+      resolution: plan.resolveOnCompletion
+        ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
+        : "No work-item state changes.",
       requiresConfirmation: true,
-      permissions: "One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets only. No business-data writes, production, merges or deployments."
+      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. No business-data writes, production, merges or deployments.`
     }, null, 2));
     if (!flags.has("--yes")) {
       console.log("Plan only. Review this scope, then add --yes --allow-all-tools to start. Installing or onboarding alone never starts a watcher.");
@@ -1871,12 +1877,13 @@ async function main(args) {
       await watchTickets({
         repository, plan, once: flags.has("--once"), confirmed: true,
         allowAllTools: flags.has("--allow-all-tools"), signal: controller.signal,
-        execute: async ({ request }) => {
+        execute: async ({ request, onActivity }) => {
           const result = await launch(repository, request, parsed.runtime, environment, parsed.model, false, "", {
             ticketAutomation: true,
             execute: ({ repository: checkout, prompt }) => executeTicketAgent({
               executor: createAgencyExecutor({ packageRoot }), repository: checkout, prompt,
               runtimeDirectories: [packageRoot], signal: controller.signal,
+              onActivity,
               idleTimeoutMs: (profile.validation?.agentIdleTimeoutMinutes ?? 20) * 60000
             })
           });

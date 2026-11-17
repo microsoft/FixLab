@@ -102,6 +102,11 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     assert.equal(plan.status, 0, plan.stderr);
     assert.match(plan.stdout, /"requiresConfirmation": true/);
     assert.match(plan.stdout, /"targetBranch": "develop"/);
+    assert.match(plan.stdout, /No work-item state changes/);
+    const resolutionPlan = run([...args, "--resolve-on-completion"], repository);
+    assert.equal(resolutionPlan.status, 0, resolutionPlan.stderr);
+    assert.match(resolutionPlan.stdout, /Resolved after a verified draft PR or a confirmed cause/);
+    assert.match(resolutionPlan.stdout, /Plan only/);
     assert.equal(existsSync(join(repository, ".git", "fixlab", "ticket-automation")), false);
     const unapproved = run([...args, "--yes", "--once"], repository);
     assert.equal(unapproved.status, 1);

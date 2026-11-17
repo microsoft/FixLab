@@ -153,6 +153,10 @@ const historyRetentionDays = document.querySelector(
 );
 const purgeJobHistoryButton = document.querySelector("#purge-job-history");
 const jobControlsMessage = document.querySelector("#job-controls-message");
+const watcherStatus = document.querySelector("#watcher-status");
+const watcherAttempts = document.querySelector("#watcher-attempts");
+const expandedWatcherAttempts = new Set();
+let watcherHistorySignature = "";
 const bugResultsPanel = document.querySelector("#bug-results-panel");
 const bugResultsElement = document.querySelector("#bug-results");
 const agentActivityPanel = document.querySelector("#agent-activity-panel");
@@ -2700,6 +2704,104 @@ async function refreshMetrics() {
   }
 }
 
+async function refreshWatcherHistory() {
+  try {
+    const body = await fetchJson("/api/ticket-automation");
+    const signature = JSON.stringify(body);
+    if (signature === watcherHistorySignature) { return; }
+    watcherHistorySignature = signature;
+    const labels = {
+      "not-configured": "Tagged-ticket watching is not configured for this repository.",
+      "not-started": "No watcher history is recorded yet. Opening the dashboard does not start the watcher.",
+      unknown: "Watcher status was not recorded by the older worker."
+    };
+    const reported = body.updatedAt ? new Date(body.updatedAt).toLocaleString() : "time not recorded";
+    watcherStatus.textContent = labels[body.status] ??
+      `Last reported: ${body.status} at ${reported}. Scan interval: ${body.pollSeconds} seconds. ${body.message || ""}`;
+    watcherAttempts.replaceChildren();
+    const link = (text, url) => {
+      if (!/^https:\/\/dev\.azure\.com\//u.test(url)) { throw new Error("Recorded watcher link is invalid."); }
+      const element = document.createElement("a");
+      element.textContent = text;
+      element.href = url;
+      element.target = "_blank";
+      element.rel = "noopener noreferrer";
+      return element;
+    };
+    for (const attempt of body.attempts) {
+      const row = document.createElement("li");
+      const detail = document.createElement("details");
+      detail.open = expandedWatcherAttempts.has(attempt.id);
+      detail.addEventListener("toggle", () => {
+        if (detail.open) { expandedWatcherAttempts.add(attempt.id); }
+        else { expandedWatcherAttempts.delete(attempt.id); }
+      });
+      const heading = document.createElement("summary");
+      let status = "Investigation running (last recorded)";
+      if (attempt.status === "feedback-pending") { status = "Result ready; feedback pending"; }
+      if (attempt.status === "complete") {
+        status = `Feedback recorded - ${attempt.outcome || "validation status unknown"}`;
+      } else if (body.status === "blocked" || body.status === "stopped") {
+        status = `Review required - last recorded ${attempt.status}`;
+      }
+      heading.textContent = `Work item ${attempt.workItemId} - ${status}`;
+      const links = document.createElement("p");
+      links.append(link("Open work item and Discussion", attempt.workItemUrl));
+      if (attempt.pullRequestUrl) {
+        links.append(" | ", link("Recorded PR", attempt.pullRequestUrl));
+      }
+      const timing = document.createElement("p");
+      timing.textContent = `Started: ${attempt.startedAt ? new Date(attempt.startedAt).toLocaleString() : "not recorded"}. Finished: ${attempt.finishedAt ? new Date(attempt.finishedAt).toLocaleString() : "not recorded"}.`;
+      const summary = document.createElement("p");
+      summary.textContent = attempt.historyAvailable
+        ? attempt.summary || "No final summary recorded yet."
+        : "Detailed history was not recorded or has expired. See the work item's Discussion.";
+      detail.append(heading, links, timing, summary);
+      if (attempt.confirmedCause) {
+        for (const [label, field] of [["Confirmed cause (agent-reported)", "cause"], ["Recorded evidence", "evidence"], ["Next steps", "nextSteps"]]) {
+          const description = document.createElement("p");
+          description.textContent = `${label}: ${attempt.confirmedCause[field]}`;
+          detail.append(description);
+        }
+      }
+      if (attempt.resolution) {
+        const resolution = document.createElement("p");
+        resolution.textContent = `Work-item resolution: ${attempt.resolution.status}. ${attempt.resolution.message}`;
+        detail.append(resolution);
+      }
+      for (const [title, events] of [
+        ["Validation results (agent-reported)", attempt.checks],
+        ["Recorded activity", attempt.activity]
+      ]) {
+        const label = document.createElement("h4");
+        label.textContent = title;
+        const list = document.createElement("ol");
+        for (const event of events) {
+          const item = document.createElement("li");
+          item.textContent = `${new Date(event.timestamp).toLocaleTimeString()} - ${event.name}${event.status ? `: ${event.status}` : ""} - ${event.message}`;
+          list.append(item);
+        }
+        if (!events.length) {
+          const item = document.createElement("li");
+          item.textContent = "No results recorded; do not infer a pass.";
+          list.append(item);
+        }
+        detail.append(label, list);
+      }
+      if (attempt.omittedActivity) {
+        const omitted = document.createElement("p");
+        omitted.textContent = `${attempt.omittedActivity} earlier activity update(s) omitted by the history limit.`;
+        detail.append(omitted);
+      }
+      row.append(detail);
+      watcherAttempts.append(row);
+    }
+  } catch (error) {
+    watcherHistorySignature = "";
+    watcherStatus.textContent = `${error.message} Previously displayed history may be stale.`;
+  }
+}
+
 metricsPeriod.addEventListener("change", refreshMetrics);
 
 form.addEventListener("submit", async (event) => {
@@ -3270,6 +3372,8 @@ refreshOnboarding();
 void refreshRepositories();
 setInterval(refresh, 1000);
 setInterval(refreshMetrics, 5000);
+refreshWatcherHistory();
+setInterval(refreshWatcherHistory, 5000);
 setInterval(refreshPlaywrightStatus, 5000);
 setInterval(refreshFrontendStatus, 5000);
 void refreshSessions();

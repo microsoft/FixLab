@@ -4,12 +4,15 @@ import { join, relative, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createAzureDevOpsTicketClient, loadRepositoryProfile, resolveArtifactRoot } from "./intake.js";
 import { spawnSync } from "node:child_process";
+import { safeRuntimeText } from "./runtime-requests.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
 const supportedTypes = new Set(["Bug", "User Story", "Feature", "Product Backlog Item"]);
 
-export function ticketAutomationPlan(repository, profile, { environment, runtime = "agency" } = {}) {
+export function ticketAutomationPlan(repository, profile, {
+  environment, runtime = "agency", resolveOnCompletion = profile.ticketAutomation?.resolveOnCompletion ?? false
+} = {}) {
   if (runtime !== "agency") {
     throw new Error("Unattended ticket automation currently requires --runtime agency.");
   }
@@ -52,7 +55,9 @@ export function ticketAutomationPlan(repository, profile, { environment, runtime
   const tag = policy.tag ?? "FixLab";
   const areaPaths = policy.areaPaths;
   const pollSeconds = policy.pollSeconds ?? 300;
-  if (typeof tag !== "string" || !tag.trim() || tag.length > 100 || /[\r\n;]/u.test(tag) ||
+  if (typeof resolveOnCompletion !== "boolean" ||
+      (policy.resolveOnCompletion !== undefined && typeof policy.resolveOnCompletion !== "boolean") ||
+      typeof tag !== "string" || !tag.trim() || tag.length > 100 || /[\r\n;]/u.test(tag) ||
       !Number.isInteger(pollSeconds) || pollSeconds < 60 || pollSeconds > 3600 ||
       (policy.outcome !== undefined && policy.outcome !== "draft-pr-or-discussion")) {
     throw new Error("ticketAutomation requires one bounded tag, a 60–3600 second poll interval, and draft-pr-or-discussion outcomes.");
@@ -64,7 +69,7 @@ export function ticketAutomationPlan(repository, profile, { environment, runtime
     throw new Error("Configure ticketAutomation.areaPaths beneath this ADO project; a shared-project-wide watcher is not implied by repository onboarding.");
   }
   return {
-    ...identity, targetBranch, environment, runtime, tag, pollSeconds, areaPaths,
+    ...identity, targetBranch, environment, runtime, tag, pollSeconds, areaPaths, resolveOnCompletion,
     outcome: "draft-pr-or-discussion",
     profile: { ...profile, azureDevOps: identity }
   };
@@ -77,7 +82,42 @@ function eligible(item, plan) {
     plan.areaPaths.some(path => item.areaPath?.toLowerCase() === path.toLowerCase() ||
       item.areaPath?.toLowerCase().startsWith(`${path.toLowerCase()}\\`)) &&
     supportedTypes.has(item.workItemType) &&
-    !["closed", "done", "removed"].includes(item.state?.toLowerCase());
+    !["closed", "done", "removed", "resolved"].includes(item.state?.toLowerCase());
+}
+
+function automationScope(plan) {
+  return hash(JSON.stringify({
+    organization: plan.organization, project: plan.project, repository: plan.repository,
+    targetBranch: plan.targetBranch, tag: plan.tag, environment: plan.environment, areaPaths: plan.areaPaths
+  }));
+}
+
+function recordedText(value, limit = 600) {
+  if (!safeRuntimeText(value, 10000) ||
+      /\b(?:password|passwd|secret|token|cookie|authorization|connection.?string|private.?key|api[_-]?key)\b/iu.test(value)) {
+    return "[Sensitive detail omitted]";
+  }
+  return value.replace(/https?:\/\/\S+/giu, "[link omitted]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu, "[identity omitted]")
+    .replace(/(?:[A-Z]:[\\/]|\/(?:home|Users)\/)[^\s|]+/giu, "[local path omitted]")
+    .replace(/\s+/gu, " ").trim().slice(0, limit);
+}
+
+function ticketActivity(line) {
+  const marker = line.trim().match(/^FIXLAB_(STAGE|ACTIVITY|CHECK|TEST)\|([^|]+)\|(.*)$/u);
+  if (!marker) { return null; }
+  const [, type, name, rest] = marker;
+  const event = { timestamp: new Date().toISOString(), kind: type.toLowerCase(), name: recordedText(name, 160) };
+  if (type === "ACTIVITY") {
+    return { ...event, message: recordedText(rest) };
+  }
+  const separator = rest.indexOf("|");
+  if (separator < 0) { return null; }
+  const status = rest.slice(0, separator);
+  if (type !== "TEST" && !["pending", "running", "passed", "failed", "blocked", "skipped"].includes(status)) {
+    return null;
+  }
+  return { ...event, status: recordedText(status, 80), message: recordedText(rest.slice(separator + 1)) };
 }
 
 export function ticketRevision(item, previous) {
@@ -89,26 +129,40 @@ export function ticketRevision(item, previous) {
   return {
     fingerprint: hash(JSON.stringify({
       title: item.title, description: item.description, reproduction: item.reproduction,
-      acceptanceCriteria: item.acceptanceCriteria, state: item.state, type: item.workItemType, comment
+      acceptanceCriteria: item.acceptanceCriteria, state: item.state, type: item.workItemType, comment,
+      reopenedRevision: previous?.reopenedRevision
     })),
-    comment
+    comment,
+    ...(previous?.reopenedRevision ? { reopenedRevision: previous.reopenedRevision } : {})
   };
 }
 
 export function ticketOutcome(value) {
   if (!value || !["draft-pr", "analysis", "blocked", "failed"].includes(value.outcome) ||
       typeof value.summary !== "string" || !value.summary.trim() || value.summary.length > 6000 ||
-      /Bearer\s+\S+|(?:access[_-]?token|password|client[_-]?secret)\s*[:=]\s*\S+/iu.test(value.summary) ||
+      !safeRuntimeText(value.summary, 6000) ||
+      (value.confirmedCause !== undefined && (value.outcome !== "analysis" ||
+        !["cause", "evidence", "nextSteps"].every(field =>
+          typeof value.confirmedCause?.[field] === "string" && value.confirmedCause[field].trim() &&
+          safeRuntimeText(value.confirmedCause[field], 1000) &&
+          recordedText(value.confirmedCause[field], 1000) !== "[Sensitive detail omitted]"))) ||
       (value.outcome === "draft-pr" &&
         (!Number.isSafeInteger(value.pullRequestId) || value.pullRequestId < 1))) {
     throw new Error("The executor did not provide a valid bounded ticket outcome; no result was published.");
   }
-  return { outcome: value.outcome, summary: value.summary, ...(value.outcome === "draft-pr" ? { pullRequestId: value.pullRequestId } : {}) };
+  return {
+    outcome: value.outcome, summary: recordedText(value.summary, 6000),
+    ...(value.confirmedCause ? { confirmedCause: Object.fromEntries(
+      ["cause", "evidence", "nextSteps"].map(field => [field, recordedText(value.confirmedCause[field], 1000)])
+    ) } : {}),
+    ...(value.outcome === "draft-pr" ? { pullRequestId: value.pullRequestId } : {})
+  };
 }
 
 export async function executeTicketAgent({
   executor, repository, prompt, runtimeDirectories, signal,
-  idleTimeoutMs = 20 * 60 * 1000, onOutput = (stream, text) => process[stream].write(text)
+  idleTimeoutMs = 20 * 60 * 1000, onOutput = (stream, text) => process[stream].write(text),
+  onActivity = () => {}
 }) {
   signal?.throwIfAborted();
   if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 100 || idleTimeoutMs > 86400000) {
@@ -140,6 +194,14 @@ export async function executeTicketAgent({
   };
   const interrupted = () => stop("The owner stopped the ticket investigation.");
   const line = text => {
+    const activity = ticketActivity(text);
+    if (activity) {
+      try {
+        onActivity(activity);
+      } catch {
+        stop("The private watcher history could not be saved. Review local storage before retrying.");
+      }
+    }
     const match = text.trim().match(/^FIXLAB_TICKET_RESULT\|(\{.*\})$/u);
     if (!match) {
       return;
@@ -228,6 +290,8 @@ function ticketRequest(item, plan) {
     "When no PR is appropriate (already fixed, configuration/access issue, insufficient information, or analysis-only outcome), provide diagnosis, evidence, validation actually performed and concrete next steps. Never claim blocked or skipped checks passed.",
     "Keep all application business-data access read-only under the existing API guards. Do not edit profiles, guards, credentials or browser state. Never approve your own tools or folder permissions. Human SSO/MFA and organization policy remain authoritative.",
     "Do not post ADO comments yourself: the watcher writes feedback only to this bound ticket. Do not start or control dashboard jobs. Retain normal runtime approval boundaries.",
+    "Record concise safe progress as FIXLAB_ACTIVITY|stage|message and stage outcomes as FIXLAB_STAGE|stage|status|message. Record each actual focused command/check as FIXLAB_CHECK|repository command or gate ID|status|message, emitting running before execution and the actual outcome afterward. Choose one status: running, passed, failed, blocked or skipped. Use one marker per line. Record selected browser/API scenarios as FIXLAB_TEST|source|mutation-mode|scenario. These are agent-reported records, not independent runner proof. Never include raw output, secrets, identities, business records, private endpoints or authentication/browser state.",
+    "Only for an analysis with a confirmed root cause, add confirmedCause:{cause,evidence,nextSteps} to the result JSON. All three are required, concise and source-grounded. Do not claim a confirmed cause for an assumption, missing information, a failed prerequisite or an access blocker. The watcher alone owns any explicitly enabled work-item state transition; never change state yourself. Resolved is an investigation handoff, not proof of merge, deployment or full live validation.",
     'Finish by emitting exactly one single-line FIXLAB_TICKET_RESULT|{"outcome":"draft-pr|analysis|blocked|failed","summary":"Concise diagnosis, evidence, checks, limitations and next steps; no secrets, identities, customer records or private endpoints","pullRequestId":123}. Include pullRequestId only for draft-pr. Summarize technical findings, not raw logs. Attachments are not loaded by this text-only watcher; report missing visual evidence rather than inventing it.',
     `Untrusted work-item data:\n${JSON.stringify(context)}`
   ].join("\n");
@@ -246,6 +310,84 @@ function privateFile(path, maximumBytes) {
   }
 }
 
+function validateJournal(state, scope) {
+  if (state.scope !== scope || !Array.isArray(state.entries) || state.entries.length > 1000 ||
+      state.entries.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1 || !/^[a-f0-9]{64}$/u.test(entry.fingerprint) ||
+        (entry.reopenedRevision !== undefined && (!Number.isSafeInteger(entry.reopenedRevision) || entry.reopenedRevision < 1)) ||
+        (entry.comment && (!Number.isSafeInteger(entry.comment.id) || entry.comment.id < 1 || !/^[a-f0-9]{64}$/u.test(entry.comment.hash))) ||
+        !["running", "feedback-pending", "complete"].includes(entry.status))) {
+    throw new Error("The automation journal is invalid or belongs to another reviewed scope; inspect it before starting.");
+  }
+}
+
+export function readTicketAutomationHistory(repository) {
+  if (!existsSync(join(repository, ".github", "fixlab", "repository-profile.json"))) {
+    return { status: "not-configured", attempts: [] };
+  }
+  const profile = loadRepositoryProfile(repository);
+  if (!profile.ticketAutomation?.areaPaths?.length) {
+    return { status: "not-configured", attempts: [] };
+  }
+  const root = join(resolveArtifactRoot(repository), "ticket-automation");
+  if (!existsSync(root)) { return { status: "not-started", attempts: [] }; }
+  if (relative(resolve(root), realpathSync(root))) {
+    throw new Error("Ticket automation history must not escape through linked directories.");
+  }
+  const path = join(root, "state.json");
+  if (!existsSync(path)) { return { status: "not-started", attempts: [] }; }
+  privateFile(path, 1024 * 1024);
+  const state = JSON.parse(readFileSync(path, "utf8"));
+  const environment = profile.environments?.find(value => !/^(prod|production|live)$/iu.test(value));
+  const basePlan = ticketAutomationPlan(repository, profile, { environment });
+  const plan = profile.environments.map(value => ({ ...basePlan, environment: value }))
+    .find(candidate => automationScope(candidate) === state.scope);
+  if (!plan) { throw new Error("Recorded watcher history does not match the reviewed repository scope."); }
+  validateJournal(state, automationScope(plan));
+  const webBase = `https://dev.azure.com/${encodeURIComponent(plan.organization)}/${encodeURIComponent(plan.project)}`;
+  const attempts = state.entries.map(entry => {
+    const details = entry.details;
+    if (details && (!Array.isArray(details.activity) || details.activity.length > 20 ||
+        !Array.isArray(details.checks) || details.checks.length > 10)) {
+      throw new Error("Recorded watcher activity has an invalid shape.");
+    }
+    const events = values => (values ?? []).map(event => {
+      if (!["activity", "stage", "check", "test"].includes(event.kind) ||
+          typeof event.name !== "string" || typeof event.message !== "string" ||
+          !Number.isFinite(Date.parse(event.timestamp))) {
+        throw new Error("Recorded watcher activity is invalid.");
+      }
+      return { timestamp: event.timestamp, kind: event.kind, name: recordedText(event.name, 160),
+        status: event.status ? recordedText(event.status, 80) : null, message: recordedText(event.message) };
+    });
+    const date = value => typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+    const resolution = entry.resolution;
+    return {
+      id: `${entry.id}:${entry.fingerprint}`, workItemId: entry.id,
+      workItemUrl: `${webBase}/_workitems/edit/${entry.id}`, status: entry.status,
+      startedAt: date(entry.startedAt), finishedAt: date(entry.finishedAt), updatedAt: date(entry.updatedAt),
+      outcome: ["draft-pr", "analysis", "blocked", "failed"].includes(entry.outcome) ? entry.outcome : null,
+      pullRequestUrl: Number.isSafeInteger(entry.pullRequestId) && entry.pullRequestId > 0
+        ? `${webBase}/_git/${encodeURIComponent(plan.repository)}/pullrequest/${entry.pullRequestId}` : null,
+      resolution: resolution && ["pending", "resolved", "blocked"].includes(resolution.status)
+        ? { status: resolution.status, message: recordedText(resolution.message ?? "", 200) } : null,
+      historyAvailable: Boolean(details), summary: details ? recordedText(details.summary ?? "", 2000) : "",
+      confirmedCause: details?.confirmedCause ? Object.fromEntries(
+        ["cause", "evidence", "nextSteps"].map(field => [field, recordedText(details.confirmedCause[field], 1000)])
+      ) : null,
+      activity: events(details?.activity), checks: events(details?.checks),
+      omittedActivity: Number.isSafeInteger(details?.omittedActivity) ? details.omittedActivity : 0
+    };
+  }).reverse();
+  return {
+    status: ["idle", "investigating", "stopped", "blocked"].includes(state.watcher?.status)
+      ? state.watcher.status : "unknown",
+    updatedAt: typeof state.watcher?.updatedAt === "string" && Number.isFinite(Date.parse(state.watcher.updatedAt))
+      ? state.watcher.updatedAt : null,
+    message: recordedText(state.watcher?.message ?? ""),
+    tag: plan.tag, environment: plan.environment, pollSeconds: plan.pollSeconds, attempts
+  };
+}
+
 export async function watchTickets({
   repository, plan, once = false, confirmed = false, allowAllTools = false,
   client = createAzureDevOpsTicketClient({ profile: plan.profile }),
@@ -254,10 +396,7 @@ export async function watchTickets({
   if (!confirmed || !allowAllTools || typeof execute !== "function") {
     throw new Error("Review the plan, then explicitly pass --yes --allow-all-tools for this watcher session. This permits its selected ticket jobs, not production, business-data writes, merges or deployments.");
   }
-  const scope = hash(JSON.stringify({
-    organization: plan.organization, project: plan.project, repository: plan.repository,
-    targetBranch: plan.targetBranch, tag: plan.tag, environment: plan.environment, areaPaths: plan.areaPaths
-  }));
+  const scope = automationScope(plan);
   const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
   const approvedProfile = hash(readFileSync(profilePath));
   const helper = plan.profile.browserAutomation?.dataSafety?.post?.[plan.environment]?.sessionHelper;
@@ -290,15 +429,11 @@ export async function watchTickets({
   };
   privateFile(path, 1024 * 1024);
   const state = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { scope, entries: [] };
-  if (state.scope !== scope || !Array.isArray(state.entries) || state.entries.length > 1000 ||
-      state.entries.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1 || !/^[a-f0-9]{64}$/u.test(entry.fingerprint) ||
-        (entry.comment && (!Number.isSafeInteger(entry.comment.id) || entry.comment.id < 1 || !/^[a-f0-9]{64}$/u.test(entry.comment.hash))) ||
-        !["running", "feedback-pending", "complete"].includes(entry.status))) {
-    throw new Error("The automation journal is invalid or belongs to another reviewed scope; inspect it before starting.");
-  }
+  validateJournal(state, scope);
   writeFileSync(lock, owner, { flag: "wx", mode: 0o600 });
   const save = () => {
     privateFile(path, 1024 * 1024);
+    for (const entry of state.entries.slice(0, -20)) { delete entry.details; }
     const contents = JSON.stringify(state);
     if (Buffer.byteLength(contents) > 1024 * 1024) {
       throw new Error("The automation journal reached its size limit; review and archive it before continuing.");
@@ -313,35 +448,114 @@ export async function watchTickets({
       }
     }
   };
+  const report = (status, message = "") => {
+    state.watcher = { status, message: recordedText(message), updatedAt: new Date().toISOString() };
+    save();
+  };
+  const record = (entry, event) => {
+    entry.updatedAt = new Date().toISOString();
+    entry.details ??= { summary: "", activity: [], checks: [], omittedActivity: 0 };
+    const sanitized = { ...event, name: recordedText(event.name, 160), message: recordedText(event.message) };
+    entry.details.activity.push(sanitized);
+    if (entry.details.activity.length > 20) {
+      entry.details.activity.shift();
+      entry.details.omittedActivity += 1;
+    }
+    if (event.kind === "check") {
+      entry.details.checks.push(sanitized);
+      if (entry.details.checks.length > 10) { entry.details.checks.shift(); }
+    }
+    report("investigating");
+  };
   async function feedback(entry) {
     verifyScope();
     const current = await client.load(entry.id);
-    if (!eligible(current, plan)) {
+    const ownResolution = entry.resolution?.status === "pending" && current.state === "Resolved";
+    const reviewedCurrent = ownResolution ? { ...current, state: entry.resolution.previousState } : current;
+    if (!eligible(reviewedCurrent, plan)) {
       throw new Error(`Work item ${entry.id} is no longer eligible; feedback was not posted.`);
     }
+    if (ticketRevision(reviewedCurrent, entry).fingerprint !== entry.fingerprint) {
+      throw new Error(`Work item ${entry.id} changed before feedback; review its existing result.`);
+    }
     const marker = `${ownComment}${entry.id}:${entry.fingerprint}]`;
-    if (!await client.hasComment(entry.id, marker)) {
-      const result = ticketOutcome(entry.result);
-      if (result.outcome === "draft-pr") {
-        try {
-          result.pullRequestUrl = await client.verifyDraft(plan.repository, result.pullRequestId, plan.targetBranch, entry.id);
-        } catch (error) {
-          onEvent(`Work item ${entry.id}: draft verification failed: ${error.message}`);
-          result.outcome = "blocked";
-          result.summary = `The proposed draft PR could not be verified in the approved repository and target branch. Publication is unconfirmed. Analysis excerpt:\n${result.summary.slice(0, 5000)}`;
-        }
+    const result = ticketOutcome(entry.result);
+    if (result.outcome === "draft-pr") {
+      try {
+        result.pullRequestUrl = await client.verifyDraft(plan.repository, result.pullRequestId, plan.targetBranch, entry.id);
+        entry.pullRequestId = result.pullRequestId;
+      } catch (error) {
+        onEvent(`Work item ${entry.id}: draft verification failed: ${recordedText(error.message)}`);
+        result.outcome = "blocked";
+        result.summary = `The proposed draft PR could not be verified in the approved repository and target branch. Publication is unconfirmed. Analysis excerpt:\n${result.summary.slice(0, 5000)}`;
+        delete entry.pullRequestId;
       }
+    }
+    entry.outcome = result.outcome;
+    entry.details ??= { summary: "", activity: [], checks: [], omittedActivity: 0 };
+    entry.details.summary = recordedText(result.summary, 2000);
+    if (result.confirmedCause) { entry.details.confirmedCause = result.confirmedCause; }
+    save();
+    const resolveItem = plan.resolveOnCompletion && (result.outcome === "draft-pr" || Boolean(result.confirmedCause));
+    if (!resolveItem && ownResolution) {
+      entry.resolution = { status: "resolved", revision: current.revision,
+        message: "Existing Resolved state verified; no further state update was requested." };
+    }
+    if (!await client.hasComment(entry.id, marker)) {
       signal?.throwIfAborted();
       verifyScope();
-      await client.comment(entry.id, `${marker}\nOutcome: ${result.outcome}\n\n${result.summary}${result.pullRequestUrl ? `\n\nDraft PR: ${result.pullRequestUrl}` : ""}`);
+      const cause = result.confirmedCause;
+      await client.comment(entry.id, `${marker}\nOutcome: ${result.outcome}\n\n${result.summary}${result.pullRequestUrl ? `\n\nDraft PR: ${result.pullRequestUrl}` : ""}${cause ? `\n\nConfirmed cause: ${cause.cause}\nEvidence: ${cause.evidence}\nNext steps: ${cause.nextSteps}` : ""}${resolveItem ? "\n\nAutomatic resolution is requested after this feedback. Resolved means the investigation is handed off for human review, not that a fix is merged, deployed or fully live-tested. Check the work item's actual state." : ""}`);
+    }
+    if (resolveItem) {
+      entry.resolution ??= { status: "pending", previousState: current.state };
+      save();
+      try {
+        const latest = await client.load(entry.id);
+        const alreadyResolved = latest.state === "Resolved";
+        const reviewedLatest = { ...latest, state: entry.resolution.previousState };
+        if (!eligible(reviewedLatest, plan) || ticketRevision(reviewedLatest, entry).fingerprint !== entry.fingerprint ||
+            (!alreadyResolved && latest.state !== entry.resolution.previousState)) {
+          throw new Error("The work item changed before resolution. Its owner must review the state.");
+        }
+        signal?.throwIfAborted();
+        verifyScope();
+        const resolvedRevision = alreadyResolved ? latest.revision
+          : await client.resolve(entry.id, latest.revision, latest.workItemType);
+        entry.resolution = { status: "resolved", revision: resolvedRevision,
+          message: "Investigation handed off for review; merge, deployment and full live validation are not implied." };
+      } catch (error) {
+        signal?.throwIfAborted();
+        const latest = await client.load(entry.id);
+        const reviewedLatest = { ...latest, state: entry.resolution.previousState };
+        if (!eligible(reviewedLatest, plan)) {
+          throw new Error("The work item left the reviewed scope. No further state update or feedback was attempted.");
+        }
+        if (latest.state === "Resolved" &&
+            ticketRevision(reviewedLatest, entry).fingerprint === entry.fingerprint) {
+          entry.resolution = { status: "resolved", revision: latest.revision,
+            message: "Resolved state verified after an uncertain acknowledgement; no state update was repeated." };
+        } else {
+          entry.resolution = { status: "blocked", message: recordedText(error.message, 200) };
+          save();
+          const failureMarker = `${ownComment}${entry.id}:resolution-${entry.fingerprint}]`;
+          if (!await client.hasComment(entry.id, failureMarker)) {
+            verifyScope();
+            await client.comment(entry.id, `${failureMarker}\nThe investigation result is recorded, but automatic resolution could not finish: ${entry.resolution.message}\nPlease have the work-item owner review its state. No merged, deployed or fully validated fix is claimed.`);
+          }
+        }
+      }
     }
     entry.status = "complete";
+    entry.finishedAt = new Date().toISOString();
+    entry.updatedAt = entry.finishedAt;
     delete entry.result;
     save();
     onEvent(`Work item ${entry.id}: feedback recorded.`);
   }
   let releaseLock = true;
   try {
+    report("idle");
     do {
       signal?.throwIfAborted();
       verifyScope();
@@ -357,7 +571,10 @@ export async function watchTickets({
             continue;
           }
           const previous = [...state.entries].reverse().find(entry => entry.id === id);
-          const revision = ticketRevision(item, previous);
+          const reopened = previous?.resolution?.status === "resolved" &&
+            Number.isSafeInteger(item.revision) && Number.isSafeInteger(previous.resolution.revision) &&
+            item.revision > previous.resolution.revision;
+          const revision = ticketRevision(item, reopened ? { ...previous, reopenedRevision: item.revision } : previous);
           if (state.entries.some(entry => entry.id === id && entry.status === "running")) {
             throw new Error(`Work item ${id} has an interrupted execution. Review its branch and PR before retrying; it will not be launched twice.`);
           }
@@ -368,18 +585,20 @@ export async function watchTickets({
             throw new Error("The automation journal reached its 1000-execution limit; review and archive it before continuing.");
           }
           const request = ticketRequest(item, plan);
-          const entry = { id, ...revision, status: "running" };
+          const entry = { id, ...revision, status: "running", startedAt: new Date().toISOString(),
+            details: { summary: "", activity: [], checks: [], omittedActivity: 0 } };
           state.entries.push(entry);
-          save();
+          report("investigating");
           verifyScope();
           onEvent(`Work item ${id}: starting one authorized ${plan.runtime} investigation.`);
-          const result = ticketOutcome(await execute({ item, request }));
+          const result = ticketOutcome(await execute({ item, request, onActivity: event => record(entry, event) }));
           signal?.throwIfAborted();
           verifyScope();
           const current = await client.load(id);
           if (!eligible(current, plan) || ticketRevision(current, entry).fingerprint !== entry.fingerprint) {
             throw new Error(`Work item ${id} changed during execution. Inspect its result before processing another revision.`);
           }
+          report("idle");
           entry.result = result;
           entry.status = "feedback-pending";
           save();
@@ -394,8 +613,10 @@ export async function watchTickets({
     } while (true);
   } catch (error) {
     releaseLock = !error.ownedExecutorRunning;
+    report(signal?.aborted && error.name === "AbortError" ? "stopped" : "blocked", error.message);
     throw error;
   } finally {
+    if (state.watcher?.status !== "blocked") { report("stopped"); }
     if (releaseLock && existsSync(lock) && readFileSync(lock, "utf8") === owner) {
       unlinkSync(lock);
     }

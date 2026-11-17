@@ -16,6 +16,9 @@ const { createDashboardServer } = await import(
 const { createRuntimeRequestBridge, runtimePermissionPrompt, runtimeQuestionPrompt } = await import(
   pathToFileURL(join(packageRoot, "dashboard", "runtime-requests.js")).href
 );
+const { ticketAutomationPlan, watchTickets, executeTicketAgent } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "ticket-automation.js")).href
+);
 let repository;
 let dashboard;
 let baseUrl;
@@ -151,6 +154,77 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await dashboard.close();
   rmSync(repository, { recursive: true, force: true });
+});
+
+test("watcher jobs show live recorded activity, failed checks and retained history without dashboard execution", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-ui-"));
+  const profile = {
+    name: "Synthetic watcher fixture", environments: ["dev"],
+    pullRequests: { defaultTargetBranch: "develop" },
+    ticketAutomation: { areaPaths: ["Example\\Application"] }
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  for (const args of [
+    ["init", directory], ["-C", directory, "remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]
+  ]) {
+    expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
+  }
+  const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
+  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture", comments: [] };
+  let release;
+  const result = new Promise(resolve => { release = resolve; });
+  const watching = watchTickets({
+    repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
+    execute: async ({ onActivity }) => executeTicketAgent({
+      repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
+      executor(options) {
+        options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|Investigating the reported mapping.\n");
+        options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed; live testing did not run.\n");
+        return {
+          completion: result.then(() => {
+            options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A focused check failed; the work item stays open."}\n');
+            return { code: 0 };
+          }), hasStopped: () => true, terminate() { release(); }
+        };
+      }
+    })
+  });
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {},
+    executor() { throw new Error("Opening watcher monitoring must not start a dashboard job."); }
+  });
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await page.goto(address.url);
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await expect(page.locator("#watcher-status")).toContainText("investigating");
+    const attempt = page.locator("#watcher-attempts > li > details").first();
+    await attempt.locator("summary").click();
+    await expect(attempt).toContainText("focused regression: failed");
+    await expect(attempt).toContainText("Investigating the reported mapping");
+    await expect(attempt.getByRole("link", { name: "Open work item and Discussion" })).toHaveAttribute(
+      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
+    );
+    expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
+    release();
+    await watching;
+    await expect(page.locator("#watcher-status")).toContainText("stopped");
+    await expect(attempt).toContainText("Feedback recorded - blocked");
+    await page.reload();
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await page.locator("#watcher-attempts summary").click();
+    await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
+    await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
+    await page.screenshot({ path: test.info().outputPath("watcher-history.png"), fullPage: true });
+  } finally {
+    release();
+    await watching;
+    await instance.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("unit-only dashboard starts from the default form without React warm-up or live options", async ({ page }) => {

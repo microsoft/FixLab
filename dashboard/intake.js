@@ -353,7 +353,7 @@ function defaultTokenProvider() {
   return token;
 }
 
-function defaultRequestJson(url, token, { method = "GET", body } = {}) {
+function defaultRequestJson(url, token, { method = "GET", body, contentType = "application/json" } = {}) {
   return new Promise((resolveRequest, reject) => {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     if (payload && Buffer.byteLength(payload) > 64 * 1024) {
@@ -367,7 +367,7 @@ function defaultRequestJson(url, token, { method = "GET", body } = {}) {
         headers: {
           Accept: "application/json",
           Authorization: `Bearer ${token}`,
-          ...(payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {})
+          ...(payload ? { "Content-Type": contentType, "Content-Length": Buffer.byteLength(payload) } : {})
         }
       },
       (response) => {
@@ -591,6 +591,7 @@ export function createAzureDevOpsLoader({
         : fallbackWebUrl;
     return {
       id: Number(fields["System.Id"] ?? item.id ?? target.id),
+      revision: Number.isSafeInteger(item.rev) && item.rev > 0 ? item.rev : null,
       title: workItemText(fields["System.Title"], 500),
       description: workItemText(fields["System.Description"], 10000),
       reproduction: workItemText(
@@ -769,7 +770,7 @@ export function createAzureDevOpsTicketClient({
       const quote = value => value.replaceAll("'", "''");
       const result = await request("wit/wiql?$top=21&api-version=7.1", {
         method: "POST",
-        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(target.project)}' AND (${areaPaths.map(path => `[System.AreaPath] UNDER '${quote(path)}'`).join(" OR ")}) AND [System.Tags] CONTAINS '${quote(tag)}' AND [System.WorkItemType] IN ('Bug', 'User Story', 'Feature', 'Product Backlog Item') AND [System.State] NOT IN ('Closed', 'Done', 'Removed') ORDER BY [System.ChangedDate] DESC` }
+        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(target.project)}' AND (${areaPaths.map(path => `[System.AreaPath] UNDER '${quote(path)}'`).join(" OR ")}) AND [System.Tags] CONTAINS '${quote(tag)}' AND [System.WorkItemType] IN ('Bug', 'User Story', 'Feature', 'Product Backlog Item') AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Resolved') ORDER BY [System.ChangedDate] DESC` }
       });
       if (!Array.isArray(result?.workItems) || result.workItems.length > 20) {
         throw new Error("Ticket automation requires at most 20 eligible items; narrow the configured tag before continuing.");
@@ -819,6 +820,30 @@ export function createAzureDevOpsTicketClient({
       return request(`wit/workItems/${workItemId(id)}/comments?api-version=7.1-preview.4`, {
         method: "POST", body: { text: escaped }
       });
+    },
+    async resolve(id, revision, workItemType) {
+      workItemId(id);
+      if (!Number.isSafeInteger(revision) || revision < 1 ||
+          !["Bug", "User Story", "Feature", "Product Backlog Item"].includes(workItemType)) {
+        throw new Error("Resolution requires a fresh work-item revision and supported type.");
+      }
+      const states = await request(`wit/workitemtypes/${encodeURIComponent(workItemType)}/states?api-version=7.1`);
+      if (!Array.isArray(states?.value) || !states.value.some(state => state.name === "Resolved")) {
+        throw new Error("This work-item workflow does not support Resolved. Its owner must review the state.");
+      }
+      const result = await request(`wit/workitems/${id}?api-version=7.1`, {
+        method: "PATCH", contentType: "application/json-patch+json",
+        body: [
+          { op: "test", path: "/rev", value: revision },
+          { op: "add", path: "/fields/System.State", value: "Resolved" }
+        ]
+      });
+      if (result?.id !== id || !Number.isSafeInteger(result.rev) || result.rev <= revision ||
+          result.fields?.["System.State"] !== "Resolved" ||
+          result.fields?.["System.TeamProject"]?.toLowerCase() !== target.project.toLowerCase()) {
+        throw new Error("Azure DevOps did not verify the requested Resolved state.");
+      }
+      return result.rev;
     },
     async verifyDraft(repository, id, targetBranch, ticketId) {
       const expectedTicketId = workItemId(ticketId);

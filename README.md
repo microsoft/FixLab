@@ -53,6 +53,10 @@ The optional [tagged-ticket watcher](docs/commands.md#tagged-ticket-watcher)
 starts only after a separate scope review and explicit session approval.
 Onboarding supplies defaults, not automatic activation. IcM requires a linked
 ADO item; no direct IcM listener is installed.
+Use **Watcher jobs** in the existing dashboard for read-only attempt status,
+recorded activity, check outcomes and work-item/PR links. Older attempts may
+have basic history only. Optional `--resolve-on-completion` hands off a verified
+draft PR or confirmed cause as `Resolved`; this is not merge or deployment.
 
 ## Architecture and benefits
 

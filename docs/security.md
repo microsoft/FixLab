@@ -40,6 +40,16 @@ operations. Treat every runner as privileged engineering infrastructure.
   Pending feedback is deduplicated after uncertain network acknowledgements.
   Interrupted jobs require owner inspection; an unverified owned-executor stop
   retains the lock instead of admitting another investigation.
+- Dashboard watcher monitoring is read-only and bound to the checkout's
+  reviewed journal scope. It retains bounded sanitized structured progress,
+  not raw output, credentials or browser state. Check messages remain
+  agent-reported; completed feedback is never proof of passing validation.
+  Explicit `--resolve-on-completion` or reviewed profile opt-in additionally
+  permits only the documented `Resolved` investigation handoff, after verified
+  draft linkage or a confirmed cause with evidence/next steps. The watcher
+  checks workflow support and fresh revision, verifies the returned project/state,
+  and reads back uncertain acknowledgements without a blind retry. Blocked,
+  inconclusive, out-of-scope and legacy completed attempts cannot trigger it.
 - Profile/helper changes require a new scope review. Watcher approval never
   grants ready/merge/deploy operations, production or business writes, and
   does not persist an allow-all grant into ordinary dashboard jobs.

@@ -52,11 +52,50 @@ import { runValidationGate } from "../bin/validation-gate-client.js";
 import { dashboardControl, dashboardConversation } from "../mcp/dashboard-client.js";
 import { compactControlResult, conversationOperations } from "../dashboard/conversation-operations.js";
 import { runJobPreflight } from "../dashboard/preflight.js";
+import { ticketAutomationPlan, watchTickets } from "../dashboard/ticket-automation.js";
 
 const packageRoot = new URL("..", import.meta.url).pathname.replace(
   /^\/([A-Za-z]:)/,
   "$1"
 );
+
+test("watcher monitoring exposes only this repository's recorded history and never starts or controls work", async () => {
+  const repository = createGitRepository();
+  git(repository, ["remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]);
+  const profile = validProfile({
+    environments: ["dev"], ticketAutomation: { areaPaths: ["Example\\Application"] },
+    pullRequests: { defaultTargetBranch: "develop" }
+  });
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  const plan = ticketAutomationPlan(repository, profile, { environment: "dev" });
+  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic fixture", comments: [] };
+  await watchTickets({
+    repository, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
+    execute: async () => ({ outcome: "blocked", summary: "Human sign-in is required; no live tests ran." })
+  });
+  const current = await startDashboard(repository, () => { assert.fail("Monitoring must not execute a job."); });
+  try {
+    const response = await jsonRequest(current.url, "/api/ticket-automation");
+    assert.equal(response.response.status, 200);
+    assert.equal(response.body.attempts[0].outcome, "blocked");
+    assert.match(response.body.attempts[0].workItemUrl, /^https:\/\/dev\.azure\.com\/example-org\/Example\//);
+    assert.equal((await jsonRequest(current.url, "/api/status")).body.job, null);
+    const denied = await jsonRequest(current.url, "/api/ticket-automation", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "retry" })
+    });
+    assert.equal(denied.response.status, 404);
+    writeFileSync(join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json"),
+      '{"private-sentinel-malformed');
+    const invalid = await jsonRequest(current.url, "/api/ticket-automation");
+    assert.equal(invalid.response.status, 503);
+    assert.doesNotMatch(JSON.stringify(invalid.body), /private-sentinel/);
+  } finally {
+    await current.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
 
 test("engineering summary validates detail fields, redacts sensitive text and rejects unsafe paths", () => {
   const detail = {
