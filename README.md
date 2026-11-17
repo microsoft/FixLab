@@ -88,13 +88,32 @@ Optional broad tests/builds are controlled by saved preferences; required
 repository checks and CI/merge policies still apply. Failed, deferred, stale,
 or skipped checks are never reported as passed.
 
-Configure [`pullRequests.reviewTeams`](docs/repository-onboarding.md#automatic-pr-approval-request-comments)
-to automatically mention verified review teams in a PR approval-request comment.
-Retries reuse the same owned comment; publication and merge permissions stay unchanged.
-
 See [architecture and benefits](docs/architecture-overview.md) for components,
 benefits, deployment, recovery, and trust boundaries, or the
 [architecture reference](docs/architecture.md) for runtime and MCP contracts.
+
+### Automatic team approval requests
+
+For PRs FixLab creates or updates, optionally request team approval in a PR
+comment. Add `pullRequests.reviewTeams` to the reviewed repository profile:
+
+```json
+{
+  "pullRequests": {
+    "reviewTeams": ["@example-org/review-team"]
+  }
+}
+```
+
+GitHub uses `@org/team` handles; Azure DevOps uses verified team identity GUIDs.
+FixLab verifies the teams in the PR's scope, includes the actual validation
+status, and reuses its own marked comment on retries to avoid duplicate
+notifications. Unverified teams or uncertain posting results remain unconfirmed.
+
+Omit the setting or use `[]` to disable it. Read-only and validation-only jobs
+never post. This requests approval; it does not approve, mark ready, merge,
+or grant publication permissions. Configure it in the profile, not dashboard
+Settings. See [configuration and recovery details](docs/repository-onboarding.md#automatic-pr-approval-request-comments).
 
 ## Work in the dashboard
 
