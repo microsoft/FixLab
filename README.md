@@ -71,6 +71,9 @@ If there is no new reusable learning, the PR says so instead of adding a file.
 ![FixLab workflow: intake, diagnosis, reproduction, change, review, local stack, live test, and outcome](assets/fixlab-workflow-diagram.png)
 
 Efficient delivery defaults to focused checks and an authorized **draft PR**.
+After draft publication, FixLab shares the PR and asks for review and whether
+developer-local live testing is possible. It waits for the user's choice before
+optional live startup, sign-in or tests; unavailable live evidence stays unverified.
 Optional broad tests/builds are controlled by saved preferences; required
 repository checks and CI/merge policies still apply. Failed, deferred, stale,
 or skipped checks are never reported as passed.

@@ -1800,6 +1800,12 @@ function renderJob(job, currentActiveJob = job) {
     job?.status === "blocked" &&
     job?.stages?.["live-test"]?.status === "blocked" &&
     !job?.manualLocalhostPending;
+  const postPrLiveReviewPending = canRetryLiveTest &&
+    job?.workflow?.mode === "efficient" && job?.workflow?.publication === "draft" &&
+    job?.stages?.pr?.status === "passed" &&
+    job?.mode === "fix-and-validate" && !job?.runAllUiScenarios &&
+    !job?.skipLiveTests && !job?.deferValidation &&
+    !job?.testEvidence?.unitTestsOnly && !job?.testEvidence?.productionDatabaseReadOnly;
   const canConfirmManualLocalhost =
     canResume &&
     job?.status === "blocked" &&
@@ -1884,6 +1890,8 @@ function renderJob(job, currentActiveJob = job) {
           : job?.manualLocalhostPending &&
               job?.stages?.["live-test"]?.status === "blocked"
             ? `The React app is running at ${job.manualLocalhostUrl || "the profile-defined localhost URL"}. Validate it in the browser, then confirm Passed or Failed before FixLab closes the job.`
+          : postPrLiveReviewPending
+            ? "The draft PR is available for review. Run focused live tests on your developer machine if possible: choose Connect Playwright if sign-in is needed, then Retry. Otherwise choose Skip and review the PR with live validation explicitly unverified. Keep it draft until the required checks and review are complete."
           : job?.stages?.["live-test"]?.status === "blocked"
           ? "The browser gate could not finish. If authentication is needed, choose Connect Playwright, then retry: sign in in the Edge window and FixLab retries automatically. Retry reuses saved authentication and runs only Playwright; Skip records the missing browser evidence and continues under repository PR policy."
           : "Provide the missing authentication, safe data, approval, or manual result, then resume the same FixLab session.";

@@ -67,12 +67,37 @@ export const AUTONOMOUS_RECOVERY_GUIDANCE =
 export const DRAFT_INTEGRATION_GUIDANCE =
   "Draft integration deferral: for fix-and-validate jobs with saved draft publication only, continue authorized frontend or backend code work and local checks when live integration is unavailable. A configured backend does not require local .NET/Key Vault startup for a frontend-only draft. Verify the complete diff; start only applications needed by the actual checks. Existing approved DEV APIs may support authenticated reads without a local backend; deployed APIs never prove unpublished backend changes. Identity-only SSO does not authorize business reads: preserve its guards and require separately reviewed API access. After focused regression, required local gates and diff review pass, publish only the authorized DRAFT PR. Disclose every unavailable startup, authentication, browser/API check and unverified integration. Mark deferred stages skipped with the exact prerequisite, never passed; retain all gate results. Live-test gates and explicitly marked requiresLiveIntegration gates remain required for full validation, not draft publication. Explicit manual/all-UI requests, production read-only approval, ready/merge gates, repository instructions and runtime permissions remain authoritative. Do not disable guards, change the profile to fake readiness, widen SSO scopes or manufacture live evidence.";
 
-export function efficientWorkflowGuidance(workflow, { dashboard = true } = {}) {
+export function allowsPostPrLiveReview(job) {
+  return job.workflow?.mode === "efficient" && allowsDraftIntegrationDeferral(job) &&
+    !job.skipLiveTests && !job.deferValidation && !job.testEvidence?.unitTestsOnly;
+}
+
+export const POST_PR_LIVE_REVIEW_GUIDANCE =
+  "Default draft handoff: for efficient fix-and-validate jobs with draft publication, finish focused regression, required local gates and diff review, then create or update the authorized draft PR and verify provider isDraft=true. Before optional application startup, browser/API authentication or live testing, share the PR URL and ask whether live testing is possible on the developer's machine and request PR review. Wait for the user's explicit choice; do not infer consent from ticket assignment, available authentication or a running portal. If live testing is unavailable or declined, keep the same PR draft and record live checks as pending or skipped, never passed. If accepted, validate the matching checkout and update that same PR with actual results. Explicit strict/ready, validation-only, manual/all-UI, unit-test-only and per-job validation choices remain authoritative; required gates and merge policy are never waived.";
+
+export const WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE =
+  "Work-item validation evidence: in authorized code jobs only, only after approved live browser validation actually runs scenario assertions for the original Azure DevOps work item, use existing authorized Azure DevOps tools to attach an available genuine, reviewed non-sensitive screenshot and comment the actual result and PR link. Verify the exact work-item identity and scenario; verify the attachment relation before claiming publication. Never upload intake images, stale artifacts, login screens, browser state or invented screenshots. If validation cannot run, is skipped or is API/unit-only, do not upload screenshots. Missing capture: comment the actual result and reason without an image. Missing upload permission or an ambiguous result: report the exact limitation locally; never bypass access controls or blindly retry. Missing screenshots or evidence publication must not block the draft PR or change validation outcomes; required validation/merge gates remain authoritative.";
+
+export const USER_FRIENDLY_UPDATE_GUIDANCE =
+  "User-friendly updates: explain the issue and its impact in everyday language, what changed, and what was actually checked. State plainly when checks failed, could not run or were skipped, and say what the user needs to do next. Avoid unexplained jargon, stage IDs, stack traces and command dumps. Include a verified clickable PR link containing the fix; if no PR exists, use a verified commit link when available. Never invent links or imply an untested change is verified. For review requests, identify the PR's explicitly assigned reviewers rather than guessing; Teams delivery requires an approved configured connection and verified recipient identities.";
+
+export function workItemValidationEvidenceGuidance(job) {
+  return job.mode === "fix-and-validate" && !job.skipLiveTests && !job.deferValidation &&
+    !job.testEvidence?.unitTestsOnly && !job.testEvidence?.apiOnly &&
+    !job.testEvidence?.productionDatabaseReadOnly
+    ? WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE : "";
+}
+
+export function efficientWorkflowGuidance(workflow, {
+  dashboard = true, postPrLiveReview = workflow.publication === "draft"
+} = {}) {
   return `Saved efficient delivery policy (applies without repeated job/stage questions):
 - Inspect the effective diff, make the smallest fix, run the focused regression checks that cover it, and self-review the checkpoint.
 - Explicitly required repository checks (validation.gates entries with required: true), repository instructions, human PR authorization, managed policy and branch/merge policies remain authoritative. Efficient mode never waives them.
 - After that reviewed focused checkpoint and any explicitly required pre-publication checks, create or update the authorized ${workflow.publication === "ready" ? "READY-FOR-REVIEW" : "DRAFT"} pull request now. Do not wait for optional broad local tests or builds. Never create an empty PR or stage unrelated files.
 - Verify provider isDraft is ${workflow.publication !== "ready"} before reporting the PR stage passed. Publication is not proof of completed validation or permission to mark ready, merge, deploy or force-push.
+${postPrLiveReview ? `- ${POST_PR_LIVE_REVIEW_GUIDANCE}
+${dashboard ? "- After verified draft publication and any explicitly requested post-PR local checks, emit local-stack skipped only for unstarted applications, preserve completed startup outcomes, and emit live-test blocked while awaiting the user's live-test choice. Preserve pr passed and exit for same-job input. This is a planned handoff, not a failed browser run. Retry may run the focused live gate; Skip records missing live evidence and keeps the PR draft. Do not repeat completed checks or create another PR.\n" : ""}` : ""}
 - ${workflow.unitTestsAfterPr ? `After creating the PR, run the broader local unit-test gates against the same checkout through ${dashboard ? "dashboard-owned execution" : "fixlab exec with compact structured evidence"}. Update the same PR with actual results; do not delay PR creation while those tests run.` : "Broader local unit tests are optional and are not automatically requested. Leave their status not run/pending and report required remote CI separately."}
 - ${workflow.optionalBuilds ? "The saved repository preference requests optional builds after PR creation; run them and report their actual outcomes." : "Optional builds are not automatically requested. Offer the saved repository Settings preference once when needed, not a question for every job or stage. Never run a full build merely to decide whether a PR may be created."}
 - Keep every pending, failed, stale, skipped or not-run check explicit in the PR and dashboard. Never convert an optional check into passed, reuse stale evidence, bypass an explicitly required gate, or disable a CI/merge policy.

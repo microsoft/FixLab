@@ -8,6 +8,23 @@ default in efficient mode, `ready` by default in strict mode),
 `workflow.unitTestsAfterPr` (default `false`) and `workflow.optionalBuilds`
 (default `false`) once. Marking a draft ready requires a separate reviewed
 decision. No per-stage workflow selection is needed.
+After the default draft is published and verified, FixLab shares its URL, requests
+PR review and asks whether focused live testing is possible on the developer's
+machine. Optional application startup, sign-in and live tests wait for explicit
+acceptance. Retry runs the focused live check; Skip keeps the draft and records
+missing live evidence, never a pass. Existing strict/ready, validation-only,
+manual/all-UI, unit-test-only and explicit validation choices retain their contracts.
+After an approved browser validation actually executes assertions for the source
+Azure DevOps work item, the agent uses authorized Azure DevOps tools to attach an
+available reviewed, non-sensitive screenshot and record the actual result and PR
+link. If capture is unavailable, it records the result and reason without an image.
+Blocked/skipped validation, API-only and unit-only runs do not upload screenshots.
+Attachment access and publication are verified; unavailable capture or upload is
+reported, never fabricated, and does not block the draft PR or waive required gates.
+Human updates explain the issue's impact, the change, actual checks and next action
+in everyday language, with a verified PR link or a commit link when available.
+Review recipients come from assigned PR reviewers; Teams delivery still requires
+an approved configured connection and verified identities.
 Required local `validation.gates` remain publication-blocking in efficient
 mode. For editing jobs with saved `publication: "draft"` (efficient or strict),
 unavailable live integration does not block authorized frontend/backend code work

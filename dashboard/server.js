@@ -41,7 +41,7 @@ import { canonicalExecutionRepository, createExecutorLease } from "./executor-le
 import { spawnWindowsExecutor } from "./windows-executor.js";
 import { createRuntimeRequestBridge, MAX_RUNTIME_FRAME_BYTES, recordedSourceEditReview, safeRuntimeText, sourceEditAuthorization, validateRuntimeUsage, validateToolApprovalMode } from "./runtime-requests.js";
 import { validateJobFileAccess } from "./runtime-permission-policy.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsUnverifiedDraft, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "./workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, allowsUnverifiedDraft, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "./workflow-policy.js";
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval, inspectPpeWriteConfiguration, isOriginWriteApproval } from "./dev-post.js";
@@ -1199,6 +1199,9 @@ export function buildJobPrompt({
   const readOnly = validateOnly || playwrightOnly;
   const apiOnly = testEvidence.apiOnly === true;
   const efficient = !readOnly && workflow?.mode === "efficient";
+  const postPrLiveReview = allowsPostPrLiveReview({
+    mode, workflow, manualLocalhostTest, runAllUiScenarios, testEvidence, skipLiveTests, deferValidation
+  });
   const unverifiedDraft = allowsUnverifiedDraft({
     mode, workflow, deferValidation, manualLocalhostTest, runAllUiScenarios, testEvidence
   });
@@ -1248,7 +1251,9 @@ export function buildJobPrompt({
     : pullRequestStrategy === "per-bug"
       ? "- Process each selected bug as an isolated delivery unit: separate code, focused tests, browser evidence, commit and authorized draft PR. Apply the delivery policy below per bug; never combine unrelated changes."
       : "- Treat all selected bugs as one common-PR batch: implement every required fix and protect the combined diff with focused regression checks. Apply the delivery policy below to one authorized PR.";
-  const uiScenarioGuidance = apiOnly
+  const uiScenarioGuidance = postPrLiveReview
+    ? "- Live application startup and the focused Playwright journey wait until the draft PR is published and the user explicitly accepts live testing."
+    : apiOnly
     ? "- Run the smallest repository-defined Playwright API journey that proves the selected behavior."
     : runAllUiScenarios
     ? `- After implementation and non-browser validation are complete, run every repository-defined Playwright/UI scenario at the end, not only the focused defect journey.
@@ -1414,24 +1419,26 @@ ${readOnly ? "" : `- Saved delivery workflow: ${unverifiedDraft ? "explicit unve
 - ${unverifiedDraft ? "Do not run local checks or live tests for this explicitly unverified draft. Preserve every gate as not run or its actual previous outcome." : playwrightOnly ? "Run only setup commands strictly required to launch the profile-defined applications and focused Playwright journey. Do not reinstall dependencies that are already available." : "Run the focused repository-owned tests, type-checks, and builds needed for the affected surface and risk. Preserve exact results."}
 - Run verbose repository-owned tests, builds, linters, type checks, and package validation through \`fixlab exec --stage <stage> -- <command> [args...]\`. In Windows PowerShell quote the separator (\`'--'\`) because an unquoted \`--\` is dropped, and never wrap \`fixlab exec\` in \`cmd /c\`; that wrapper is denied in non-interactive sessions. Keep its compact result in context and inspect the private evidence path only when an exact diagnostic is needed.
 - Add \`--reuse\` only for deterministic local validation when command, arguments, Git state, working directory, profile, and stage are unchanged. Never reuse startup, health, authentication, Playwright or live-environment validation, external-data checks, dependency installation, deployments, or mutating commands.
-- Do not skip Playwright merely because an unrelated non-browser test, build, or backend startup is failed or blocked. If frontend startup, authentication, safe data, and the selected browser journey are independently ready, run the live-test gate and preserve the other blocker separately.
+- ${postPrLiveReview ? "After the user accepts post-PR live testing, run the independently ready focused live gate and preserve unrelated blockers separately." : "Do not skip Playwright merely because an unrelated non-browser test, build, or backend startup is failed or blocked. If frontend startup, authentication, safe data, and the selected browser journey are independently ready, run the live-test gate and preserve the other blocker separately."}
 - Use local-stack only for profile-defined application startup and health. Do not mark local-stack failed because a separate test, type-check, lint, or production build reports unrelated baseline diagnostics; preserve that exact validation limitation separately and continue browser execution when startup is healthy.
 - Before browser execution, synthesize the smallest focused Playwright scenario and measurable assertions from the reported behavior and expected outcome when an equivalent repository-owned scenario does not already exist.
 - Treat a synthesized Playwright scenario as a transient validation artifact by default. Remove its source file and any validation-only configuration edits before diff review, commit, push, or pull-request creation.
 - Do not add a newly generated authenticated test such as \`*.auth.spec.ts\` to the product change unless the user explicitly requests permanent browser-test coverage or repository instructions require that exact persisted test.
 - Existing repository-owned Playwright tests may be changed only when the reported product behavior directly requires that regression update; do not broaden the pull request to repair unrelated or stale browser journeys.
 ${testDataGuidance}
-${readOnly ? "" : unverifiedDraft ? UNVERIFIED_DRAFT_GUIDANCE : efficient ? efficientWorkflowGuidance(workflow) : `- After focused regression, transient-artifact cleanup and diff review, commit/push the authorized checkpoint and create or update a draft pull request before remaining independent validation completes.
+${readOnly ? "" : unverifiedDraft ? UNVERIFIED_DRAFT_GUIDANCE : efficient ? efficientWorkflowGuidance(workflow, { postPrLiveReview }) : `- After focused regression, transient-artifact cleanup and diff review, commit/push the authorized checkpoint and create or update a draft pull request before remaining independent validation completes.
 - Start long-running independent validation commands in parallel when supported. Update the same draft PR with actual passed/pending checks, risks and later reviewed checkpoints; never create duplicates.
 - Keep the pull request draft and clearly marked validation-in-progress while required validation/approval is pending, blocked, failed or skipped with unaccepted risk. Mark ready/pr passed only after required gates pass or repository policy explicitly accepts the outcome.`}
 - ${readOnly ? "Do not publish a pull request or change its draft status in read-only mode." : workflow?.publication === "draft" ? "Keep the published PR draft and read back provider isDraft=true before reporting publication passed. Marking ready requires a separate reviewed decision. Strict required checks remain mandatory." : "After required local validation and approval gates pass or have an explicitly accepted outcome, publish the authorized PR by marking it ready for review. Do not wait for remote PR CI or build completion before publication; publication can trigger those checks. Verify the PR is no longer draft before reporting the PR stage passed. Report remote checks as pending, not passed, and leave merge policies intact. Use `gh pr ready <number>` for GitHub or `az repos pr update --id <id> --draft false` for Azure DevOps, then read back `isDraft` from the provider to confirm it is false. If publication or state verification fails, report the PR stage blocked or failed, not passed."}
 ${readOnly ? "" : "- Prefix FixLab-created pull-request titles with FLAB: followed by a concise description of the coding change. Format the body with the repository's PR template, clear Markdown sections for the problem, changes, validation and risks, and accurate validation checkboxes."}
 ${readOnly ? "" : CONCISE_PR_GUIDANCE}
+${readOnly ? "" : USER_FRIENDLY_UPDATE_GUIDANCE}
 ${readOnly ? "" : PR_LEARNING_GUIDANCE}
-- Start only the applications defined by the repository profile, then execute the repository-defined live test against the allowed required system or environment from that profile. Do not invent or hardcode environment choices.
+${workItemValidationEvidenceGuidance({ mode, testEvidence, skipLiveTests, deferValidation })}
+- ${postPrLiveReview ? "Only after the user accepts live testing, start the required profile-defined applications and validate the matching PR checkout. Do not invent environments or treat a deployed baseline as proof of the unpublished change." : "Start only the applications defined by the repository profile, then execute the repository-defined live test against the allowed required system or environment from that profile. Do not invent or hardcode environment choices."}
 - For every Playwright browser live test, save at least one non-sensitive screenshot under the test's repository-owned test-results directory so the dashboard can display the browser evidence. API-only journeys preserve sanitized API assertion evidence instead.
 - ${playwrightOnly ? "Collect evidence for required setup, authentication readiness, application startup, the focused Playwright result, skipped gates, blockers, and remaining risks." : "Collect evidence for diagnosis or surface inspection, the effective diff, review, local validation, application startup, live testing, skipped gates, and remaining risks."}
-- Human interaction is limited to authentication, unsafe-data approval, deployment or pull-request approval, and genuine blockers that cannot be resolved from repository evidence.
+- Human interaction is limited to ${postPrLiveReview ? "the post-PR live-test choice and PR review, " : ""}authentication, unsafe-data approval, deployment or pull-request approval, and genuine blockers that cannot be resolved from repository evidence.
 - When one of those human actions is required, emit FIXLAB_STAGE|stage|blocked|exact action needed, emit blocked outcomes for affected bugs when applicable, mark later stages skipped because of the blocker, and exit. The dashboard will collect user input and resume this same session.
 - Keep stage messages and retained logs concise. Summarize relevant command evidence and preserve exact errors, but do not feed unbounded raw output back into prompts.
 - Keep all execution local unless the repository profile and existing authorization explicitly require an allowed external action.
@@ -3592,7 +3599,13 @@ function listPlaywrightArtifacts(repository, { since = null } = {}) {
     .slice(0, MAX_PLAYWRIGHT_ARTIFACTS);
 }
 
+function isPostPrLiveReviewPending(job) {
+  return job?.status === "blocked" && allowsPostPrLiveReview(job) &&
+    job.stages?.pr?.status === "passed" && job.stages?.["live-test"]?.status === "blocked";
+}
+
 function resetJobForResume(job) {
+  const preserveDraftPublication = isPostPrLiveReviewPending(job);
   job.toolApprovalMode = "ask";
   job.postWriteApproval = null;
   const restartIndex =
@@ -3616,6 +3629,9 @@ function resetJobForResume(job) {
           )
         );
   for (const stage of FIXLAB_STAGES.slice(restartIndex)) {
+    if (stage === "pr" && preserveDraftPublication) {
+      continue;
+    }
     job.stages[stage] = { status: "pending", message: "" };
   }
   for (const bug of job.bugs) {
@@ -4685,6 +4701,12 @@ export function createDashboardServer({
         kind: "workspace",
         message: "Review the current branch and diff. Explicitly reuse it with its existing PR, or preserve the work and resolve the blocker in the dashboard. No branch switch, reset or stash will be performed.",
         actions: job.canResume && workspaceReview ? ["continue"] : []
+      };
+    } else if (job?.canResume && isPostPrLiveReviewPending(job)) {
+      question = {
+        kind: "live-test",
+        message: "The draft PR is available for review. Can you run focused live testing on your developer machine? Retry runs the live check; Skip leaves live evidence unverified and keeps the same PR draft. Review the PR before marking it ready.",
+        actions: ["retry", "skip"]
       };
     } else if (job?.canResume && ["blocked", "failed"].includes(job.status)) {
       question = {

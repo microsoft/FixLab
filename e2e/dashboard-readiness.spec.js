@@ -2126,6 +2126,37 @@ test("dashboard retries a blocked Playwright gate without shell input", async ({
   expect(submittedInput.details).toContain("Do not skip");
 });
 
+test("dashboard offers post-draft live testing without a browser-failure warning", async ({ page }, testInfo) => {
+  const job = {
+    id: "published-draft", mode: "fix-and-validate", status: "blocked",
+    request: "Review the focused draft change", requestType: "bug-fix",
+    workflow: { mode: "efficient", publication: "draft" },
+    stages: Object.fromEntries([
+      "intake", "diagnosis", "reproduce", "fix", "review", "local-stack", "live-test", "pr"
+    ].map((stage) => [stage, {
+      status: stage === "live-test" ? "blocked" : "passed", message: ""
+    }])),
+    bugs: [], logs: [], canResume: true, inputCount: 0, pendingInputCount: 0
+  };
+  await page.route("**/api/status", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({
+      readiness: { repository: "C:\\repo", repositoryReady: true,
+        profileReady: true, profileName: "Draft review", error: null },
+      job, queue: [], history: []
+    })
+  }));
+  await openWorkflowControls(page, baseUrl);
+  const guidance = page.locator("#job-input-guidance");
+  await expect(guidance).toContainText("The draft PR is available for review");
+  await expect(guidance).toContainText("developer machine");
+  await expect(guidance).not.toContainText("browser gate could not finish");
+  await expect(page.getByRole("button", { name: "Retry Playwright live test" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Skip Playwright live test" })).toBeVisible();
+  await guidance.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("draft-review-live-choice.png") });
+});
+
 test("dashboard requires explicit manual localhost confirmation", async ({
   page
 }) => {

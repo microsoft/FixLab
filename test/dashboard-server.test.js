@@ -7871,6 +7871,68 @@ test("dashboard gate execution rejects forged readiness and stale final-source e
   }
 });
 
+test("published default drafts offer live testing and PR review without reporting a browser failure", async () => {
+  const repository = createGitRepository();
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"),
+    JSON.stringify(validProfile({ workflow: {} })));
+  let emit;
+  let finish;
+  const prompts = [];
+  const { dashboard, url } = await startDashboard(repository, (input) => {
+    emit = input.onOutput;
+    prompts.push(input.prompt);
+    return { completion: new Promise((resolve) => { finish = resolve; }),
+      terminate() { finish({ code: 130 }); } };
+  });
+  try {
+    const started = await jsonRequest(url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Prepare the focused draft change.", mode: "fix-and-validate" })
+    });
+    assert.equal(started.response.status, 202, started.body.error);
+    writeFileSync(join(repository, "tracked.txt"), "reviewed change\n");
+    const deferredStages = { "live-test": "blocked", "local-stack": "skipped" };
+    for (const stage of FIXLAB_STAGES) {
+      const status = deferredStages[stage] ?? "passed";
+      emit("stdout", `FIXLAB_STAGE|${stage}|${status}|Synthetic draft handoff; awaiting live-test choice.\n`);
+    }
+    finish({ code: 0 });
+    await new Promise((resolve) => setImmediate(resolve));
+    const conversation = (await jsonRequest(url, "/api/conversation")).body;
+    assert.equal(conversation.job.status, "blocked");
+    assert.equal(conversation.question.kind, "live-test");
+    assert.deepEqual(conversation.question.actions, ["retry", "skip"]);
+    assert.match(conversation.question.message, /draft PR is available for review/);
+    assert.match(conversation.question.message, /developer machine/);
+    assert.match(conversation.question.message, /unverified/);
+    assert.doesNotMatch(conversation.question.message, /could not finish/);
+    const job = (await jsonRequest(url, "/api/job")).body.job;
+    assert.equal(job.stages.pr.status, "passed");
+    assert.equal(job.stages["live-test"].status, "blocked");
+    for (const action of ["retry", "skip"]) {
+      const resumed = await jsonRequest(url, "/api/job/input", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, details: `User explicitly chose ${action} for live testing.` })
+      });
+      assert.equal(resumed.response.status, 202, resumed.body.error);
+      assert.equal(resumed.body.job.id, job.id);
+      assert.equal(resumed.body.job.stages.pr.status, "passed");
+      assert.match(prompts.at(-1), /Reuse an existing pull request/);
+      assert.doesNotMatch(prompts.at(-1), /Default draft handoff:/);
+      const status = action === "skip" ? "skipped" : "blocked";
+      emit("stdout", `FIXLAB_STAGE|live-test|${status}|Synthetic user choice; no live evidence claimed.\n`);
+      finish({ code: 0 });
+      await new Promise((resolve) => setImmediate(resolve));
+      const updated = (await jsonRequest(url, "/api/job")).body.job;
+      assert.equal(updated.stages.pr.status, "passed");
+      assert.equal(updated.stages["live-test"].status, status);
+    }
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test("unverified drafts bypass neither validation evidence nor merge policy and need no live authentication or local tools", async () => {
   const repository = createGitRepository();
   git(repository, ["checkout", "-b", "users/fixlab-test/unverified"]);
