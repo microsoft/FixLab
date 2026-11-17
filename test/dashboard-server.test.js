@@ -63,7 +63,7 @@ test("watcher monitoring exposes only this repository's recorded history and nev
   const repository = createGitRepository();
   git(repository, ["remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]);
   const profile = validProfile({
-    environments: ["dev"], ticketAutomation: { areaPaths: ["Example\\Application"] },
+    environments: { DEV: {} }, ticketAutomation: { areaPaths: ["Example\\Application"] },
     pullRequests: { defaultTargetBranch: "develop" }
   });
   writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
@@ -79,6 +79,7 @@ test("watcher monitoring exposes only this repository's recorded history and nev
   try {
     const response = await jsonRequest(current.url, "/api/ticket-automation");
     assert.equal(response.response.status, 200);
+    assert.equal(response.body.environment, "DEV");
     assert.equal(response.body.attempts[0].outcome, "blocked");
     assert.match(response.body.attempts[0].workItemUrl, /^https:\/\/dev\.azure\.com\/example-org\/Example\//);
     assert.equal((await jsonRequest(current.url, "/api/status")).body.job, null);

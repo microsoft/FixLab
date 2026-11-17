@@ -5,6 +5,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { createAzureDevOpsTicketClient, loadRepositoryProfile, resolveArtifactRoot } from "./intake.js";
 import { spawnSync } from "node:child_process";
 import { safeRuntimeText } from "./runtime-requests.js";
+import { stripVTControlCharacters } from "node:util";
+import { configuredPostSafety } from "./dev-post.js";
+import { createExecutorLease } from "./executor-lease.js";
+import { configuredValidationEnvironments, validateTargetEnvironment } from "./validation-environments.js";
+import { sanitizeCommandOutput } from "../bin/structured-command.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
@@ -41,8 +46,8 @@ export function ticketAutomationPlan(repository, profile, {
       throw new Error("The Azure DevOps automation scope does not match this checkout's Git origin.");
     }
   }
-  if (!environment || !profile.environments?.includes(environment) ||
-      /^(prod|production|live)$/iu.test(environment)) {
+  environment = validateTargetEnvironment(environment, configuredValidationEnvironments(profile));
+  if (!environment || /^live$/iu.test(environment)) {
     throw new Error("Select an explicitly configured non-production --environment for ticket automation.");
   }
   const targetBranch = profile.pullRequests?.defaultTargetBranch;
@@ -92,8 +97,12 @@ function automationScope(plan) {
   }));
 }
 
+function safeTicketText(value, limit) {
+  return safeRuntimeText(value, limit) && sanitizeCommandOutput(value) === value;
+}
+
 function recordedText(value, limit = 600) {
-  if (!safeRuntimeText(value, 10000) ||
+  if (!safeTicketText(value, 10000) ||
       /\b(?:password|passwd|secret|token|cookie|authorization|connection.?string|private.?key|api[_-]?key)\b/iu.test(value)) {
     return "[Sensitive detail omitted]";
   }
@@ -140,11 +149,11 @@ export function ticketRevision(item, previous) {
 export function ticketOutcome(value) {
   if (!value || !["draft-pr", "analysis", "blocked", "failed"].includes(value.outcome) ||
       typeof value.summary !== "string" || !value.summary.trim() || value.summary.length > 6000 ||
-      !safeRuntimeText(value.summary, 6000) ||
+      !safeTicketText(value.summary, 6000) ||
       (value.confirmedCause !== undefined && (value.outcome !== "analysis" ||
         !["cause", "evidence", "nextSteps"].every(field =>
           typeof value.confirmedCause?.[field] === "string" && value.confirmedCause[field].trim() &&
-          safeRuntimeText(value.confirmedCause[field], 1000) &&
+          safeTicketText(value.confirmedCause[field], 1000) &&
           recordedText(value.confirmedCause[field], 1000) !== "[Sensitive detail omitted]"))) ||
       (value.outcome === "draft-pr" &&
         (!Number.isSafeInteger(value.pullRequestId) || value.pullRequestId < 1))) {
@@ -168,7 +177,14 @@ export async function executeTicketAgent({
   if (!Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 100 || idleTimeoutMs > 86400000) {
     throw new Error("Ticket executor idleTimeoutMs must be an integer between 100 and 86400000.");
   }
-  let buffer = "";
+  if (typeof executor !== "function") {
+    throw new Error("Ticket execution requires an owned executor.");
+  }
+  const buffers = { stdout: "", stderr: "" };
+  let privateKey = false;
+  const sessionId = randomUUID();
+  const lease = createExecutorLease(repository, randomUUID()).acquire(sessionId);
+  let releaseLease = false;
   let outcome;
   let problem = "";
   let handle;
@@ -177,6 +193,14 @@ export async function executeTicketAgent({
   let completed = false;
   let rejectStop;
   const stopFailure = new Promise((_resolve, reject) => { rejectStop = reject; });
+  const stopped = () => {
+    try {
+      return handle?.hasStopped?.() === true;
+    } catch (error) {
+      error.ownedExecutorRunning = true;
+      throw error;
+    }
+  };
   const stop = reason => {
     if (problem) {
       return;
@@ -185,7 +209,13 @@ export async function executeTicketAgent({
     if (completed) {
       return;
     }
-    handle?.terminate();
+    try {
+      handle?.terminate();
+    } catch (error) {
+      error.ownedExecutorRunning = true;
+      rejectStop(error);
+      return;
+    }
     stopTimer = setTimeout(() => {
       const error = new Error("Owned ticket executor termination is unverified; its watcher lock must be retained.");
       error.ownedExecutorRunning = true;
@@ -219,30 +249,43 @@ export async function executeTicketAgent({
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => stop("The ticket executor exceeded its no-output timeout."), idleTimeoutMs);
   };
+  const outputLine = (stream, text) => {
+    if (/Denied, no one to approve|Permission denied because no interactive user response/iu.test(text)) {
+      stop("Runtime permission was denied. Review the exact tool or folder restriction; no additional access was granted.");
+    }
+    if (stream === "stdout") { line(text); }
+    const display = stripVTControlCharacters(text);
+    if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/u.test(display)) { privateKey = true; }
+    onOutput(stream, `${privateKey ? "[Sensitive detail omitted]" : recordedText(display, 10000)}\n`);
+    if (/-----END [A-Z ]*PRIVATE KEY-----/u.test(display)) { privateKey = false; }
+  };
   try {
     handle = executor({
-      repository, prompt, sessionId: randomUUID(), runtimeDirectories,
+      repository, prompt, sessionId, runtimeDirectories,
       toolApprovalMode: "allow-all", mode: "fix-and-validate",
       onOutput(stream, text) {
-        onOutput(stream, text);
         refresh();
         if (/Denied, no one to approve|Permission denied because no interactive user response/iu.test(text)) {
           stop("Runtime permission was denied. Review the exact tool or folder restriction; no additional access was granted.");
         }
-        if (stream !== "stdout") {
-          return;
-        }
-        buffer += text;
+        if (problem) { return; }
+        buffers[stream] += text;
         let newline;
-        while ((newline = buffer.indexOf("\n")) >= 0) {
-          line(buffer.slice(0, newline));
-          buffer = buffer.slice(newline + 1);
+        while ((newline = buffers[stream].indexOf("\n")) >= 0) {
+          const text = buffers[stream].slice(0, newline);
+          buffers[stream] = buffers[stream].slice(newline + 1);
+          if (Buffer.byteLength(text) > 128 * 1024) {
+            stop("The executor output exceeded the bounded ticket protocol.");
+            return;
+          }
+          outputLine(stream, text);
         }
-        if (Buffer.byteLength(buffer) > 128 * 1024) {
+        if (Buffer.byteLength(buffers[stream]) > 128 * 1024) {
           stop("The executor output exceeded the bounded ticket protocol.");
         }
       }
     });
+    lease.update("running", handle.pid);
     if (problem) {
       handle.terminate();
     }
@@ -253,8 +296,10 @@ export async function executeTicketAgent({
     }
     const result = await Promise.race([handle.completion, stopFailure]);
     completed = true;
-    line(buffer);
-    if (handle.hasStopped?.() === false) {
+    for (const [stream, text] of Object.entries(buffers)) {
+      if (text && Buffer.byteLength(text) <= 128 * 1024) { outputLine(stream, text); }
+    }
+    if (!stopped()) {
       const error = new Error("The owned ticket executor has not stopped; retain its watcher lock.");
       error.ownedExecutorRunning = true;
       throw error;
@@ -263,15 +308,31 @@ export async function executeTicketAgent({
       ? { outcome: "blocked", summary: problem || `The executor exited without a verified ticket result (exit ${result.code ?? "unknown"}). Inspect the local runner output. No successful validation or PR publication is claimed.` }
       : outcome;
   } catch (error) {
-    if (handle && handle.hasStopped?.() !== true) {
+    releaseLease = !handle && error.executorNotStarted === true;
+    if (!releaseLease && !stopped()) {
       error.ownedExecutorRunning = true;
-      handle.terminate();
+      try {
+        handle?.terminate();
+      } catch (terminationError) {
+        terminationError.ownedExecutorRunning = true;
+        throw terminationError;
+      }
     }
     throw error;
   } finally {
     clearTimeout(idleTimer);
     clearTimeout(stopTimer);
     signal?.removeEventListener("abort", interrupted);
+    if (releaseLease || stopped()) {
+      lease.release();
+    } else {
+      try {
+        lease.update("termination-unverified", handle?.pid);
+      } catch (error) {
+        error.ownedExecutorRunning = true;
+        throw error;
+      }
+    }
   }
 }
 
@@ -337,9 +398,10 @@ export function readTicketAutomationHistory(repository) {
   if (!existsSync(path)) { return { status: "not-started", attempts: [] }; }
   privateFile(path, 1024 * 1024);
   const state = JSON.parse(readFileSync(path, "utf8"));
-  const environment = profile.environments?.find(value => !/^(prod|production|live)$/iu.test(value));
+  const environments = configuredValidationEnvironments(profile).filter(value => !/^live$/iu.test(value));
+  const environment = environments[0];
   const basePlan = ticketAutomationPlan(repository, profile, { environment });
-  const plan = profile.environments.map(value => ({ ...basePlan, environment: value }))
+  const plan = environments.map(value => ({ ...basePlan, environment: value }))
     .find(candidate => automationScope(candidate) === state.scope);
   if (!plan) { throw new Error("Recorded watcher history does not match the reviewed repository scope."); }
   validateJournal(state, automationScope(plan));
@@ -399,7 +461,7 @@ export async function watchTickets({
   const scope = automationScope(plan);
   const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
   const approvedProfile = hash(readFileSync(profilePath));
-  const helper = plan.profile.browserAutomation?.dataSafety?.post?.[plan.environment]?.sessionHelper;
+  const helper = configuredPostSafety(plan.profile, plan.environment)?.sessionHelper;
   let helperPath;
   if (helper !== undefined) {
     if (typeof helper !== "string" || !/\.(?:mjs|cjs|js)$/u.test(helper)) {
@@ -422,15 +484,15 @@ export async function watchTickets({
   const owner = randomUUID();
   const verifyScope = () => {
     if (hash(readFileSync(profilePath)) !== approvedProfile ||
-        (helperPath && hash(readFileSync(helperPath)) !== approvedHelper) ||
+        (helperPath && (realpathSync(resolve(repository, helper)) !== helperPath ||
+          hash(readFileSync(helperPath)) !== approvedHelper)) ||
         JSON.stringify(ticketAutomationPlan(repository, loadRepositoryProfile(repository), plan)) !== JSON.stringify(plan)) {
       throw new Error("The reviewed repository configuration or Git origin changed. Stop and review a new watcher plan.");
     }
   };
-  privateFile(path, 1024 * 1024);
-  const state = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { scope, entries: [] };
-  validateJournal(state, scope);
   writeFileSync(lock, owner, { flag: "wx", mode: 0o600 });
+  let state;
+  let initialized = false;
   const save = () => {
     privateFile(path, 1024 * 1024);
     for (const entry of state.entries.slice(0, -20)) { delete entry.details; }
@@ -470,7 +532,7 @@ export async function watchTickets({
   async function feedback(entry) {
     verifyScope();
     const current = await client.load(entry.id);
-    const ownResolution = entry.resolution?.status === "pending" && current.state === "Resolved";
+    const ownResolution = Boolean(entry.resolution) && current.state === "Resolved";
     const reviewedCurrent = ownResolution ? { ...current, state: entry.resolution.previousState } : current;
     if (!eligible(reviewedCurrent, plan)) {
       throw new Error(`Work item ${entry.id} is no longer eligible; feedback was not posted.`);
@@ -497,32 +559,45 @@ export async function watchTickets({
     if (result.confirmedCause) { entry.details.confirmedCause = result.confirmedCause; }
     save();
     const resolveItem = plan.resolveOnCompletion && (result.outcome === "draft-pr" || Boolean(result.confirmedCause));
-    if (!resolveItem && ownResolution) {
-      entry.resolution = { status: "resolved", revision: current.revision,
-        message: "Existing Resolved state verified; no further state update was requested." };
-    }
     if (!await client.hasComment(entry.id, marker)) {
       signal?.throwIfAborted();
       verifyScope();
       const cause = result.confirmedCause;
       await client.comment(entry.id, `${marker}\nOutcome: ${result.outcome}\n\n${result.summary}${result.pullRequestUrl ? `\n\nDraft PR: ${result.pullRequestUrl}` : ""}${cause ? `\n\nConfirmed cause: ${cause.cause}\nEvidence: ${cause.evidence}\nNext steps: ${cause.nextSteps}` : ""}${resolveItem ? "\n\nAutomatic resolution is requested after this feedback. Resolved means the investigation is handed off for human review, not that a fix is merged, deployed or fully live-tested. Check the work item's actual state." : ""}`);
     }
-    if (resolveItem) {
+    if (resolveItem || entry.resolution) {
+      const previousAttempt = Boolean(entry.resolution);
       entry.resolution ??= { status: "pending", previousState: current.state };
-      save();
+      const confirmedResolution = latest => latest.state === "Resolved" &&
+        (entry.resolution.submittedRevision === undefined ||
+          latest.revision === entry.resolution.submittedRevision + 1) &&
+        ticketRevision({ ...latest, state: entry.resolution.previousState }, entry).fingerprint === entry.fingerprint;
       try {
         const latest = await client.load(entry.id);
-        const alreadyResolved = latest.state === "Resolved";
         const reviewedLatest = { ...latest, state: entry.resolution.previousState };
         if (!eligible(reviewedLatest, plan) || ticketRevision(reviewedLatest, entry).fingerprint !== entry.fingerprint ||
-            (!alreadyResolved && latest.state !== entry.resolution.previousState)) {
+            (latest.state !== "Resolved" && latest.state !== entry.resolution.previousState)) {
           throw new Error("The work item changed before resolution. Its owner must review the state.");
         }
         signal?.throwIfAborted();
         verifyScope();
-        const resolvedRevision = alreadyResolved ? latest.revision
-          : await client.resolve(entry.id, latest.revision, latest.workItemType);
-        entry.resolution = { status: "resolved", revision: resolvedRevision,
+        let resolvedRevision;
+        if (previousAttempt) {
+          if (!confirmedResolution(latest)) {
+            throw new Error("A previous resolution submission is uncertain and the current revision cannot confirm it. No PATCH was repeated; its owner must review the state.");
+          }
+          resolvedRevision = latest.revision;
+        } else {
+          if (latest.state !== entry.resolution.previousState ||
+              !Number.isSafeInteger(latest.revision) || latest.revision < 1) {
+            throw new Error("Resolution requires the unchanged state and a fresh work-item revision.");
+          }
+          entry.resolution.submittedRevision = latest.revision;
+          entry.resolution.attemptedState = "Resolved";
+          save();
+          resolvedRevision = await client.resolve(entry.id, entry.resolution.submittedRevision, latest.workItemType);
+        }
+        entry.resolution = { ...entry.resolution, status: "resolved", revision: resolvedRevision,
           message: "Investigation handed off for review; merge, deployment and full live validation are not implied." };
       } catch (error) {
         signal?.throwIfAborted();
@@ -531,12 +606,11 @@ export async function watchTickets({
         if (!eligible(reviewedLatest, plan)) {
           throw new Error("The work item left the reviewed scope. No further state update or feedback was attempted.");
         }
-        if (latest.state === "Resolved" &&
-            ticketRevision(reviewedLatest, entry).fingerprint === entry.fingerprint) {
-          entry.resolution = { status: "resolved", revision: latest.revision,
+        if (confirmedResolution(latest)) {
+          entry.resolution = { ...entry.resolution, status: "resolved", revision: latest.revision,
             message: "Resolved state verified after an uncertain acknowledgement; no state update was repeated." };
         } else {
-          entry.resolution = { status: "blocked", message: recordedText(error.message, 200) };
+          entry.resolution = { ...entry.resolution, status: "blocked", message: recordedText(error.message, 200) };
           save();
           const failureMarker = `${ownComment}${entry.id}:resolution-${entry.fingerprint}]`;
           if (!await client.hasComment(entry.id, failureMarker)) {
@@ -555,6 +629,10 @@ export async function watchTickets({
   }
   let releaseLock = true;
   try {
+    privateFile(path, 1024 * 1024);
+    state = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : { scope, entries: [] };
+    validateJournal(state, scope);
+    initialized = true;
     report("idle");
     do {
       signal?.throwIfAborted();
@@ -613,12 +691,17 @@ export async function watchTickets({
     } while (true);
   } catch (error) {
     releaseLock = !error.ownedExecutorRunning;
-    report(signal?.aborted && error.name === "AbortError" ? "stopped" : "blocked", error.message);
+    if (initialized) {
+      report(signal?.aborted && error.name === "AbortError" ? "stopped" : "blocked", error.message);
+    }
     throw error;
   } finally {
-    if (state.watcher?.status !== "blocked") { report("stopped"); }
-    if (releaseLock && existsSync(lock) && readFileSync(lock, "utf8") === owner) {
-      unlinkSync(lock);
+    try {
+      if (initialized && state.watcher?.status !== "blocked") { report("stopped"); }
+    } finally {
+      if (releaseLock && existsSync(lock) && readFileSync(lock, "utf8") === owner) {
+        unlinkSync(lock);
+      }
     }
   }
 }

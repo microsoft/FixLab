@@ -10,9 +10,11 @@ import {
   rmSync
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import {
   createAzureDevOpsLoader,
   createAzureDevOpsTicketClient,
@@ -25,6 +27,7 @@ import {
   storeScreenshots
 } from "../dashboard/intake.js";
 import { executeTicketAgent, readTicketAutomationHistory, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
+import { createExecutorLease } from "../dashboard/executor-lease.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
@@ -129,6 +132,90 @@ test("ticket watcher persists deduplication, ignores its own feedback and respon
     assert.match(fixture.posted[0].text, /Outcome: analysis/);
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("watcher reads the latest journal under its lock and releases ownership on initialization failure", async () => {
+  const fixture = ticketFixture();
+  let replacement;
+  try {
+    await fixture.run({ execute: async () => ({ outcome: "analysis", summary: "Already investigated." }) });
+    const root = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation");
+    const journal = join(root, "state.json");
+    const lock = join(root, "watcher.lock");
+    const completed = readFileSync(journal, "utf8");
+    const stale = { ...JSON.parse(completed), entries: [] };
+    writeFileSync(journal, JSON.stringify(stale));
+    const write = fs.writeFileSync;
+    replacement = mock.method(fs, "writeFileSync", (path, data, options) => {
+      if (path === lock && options?.flag === "wx") {
+        write(journal, completed);
+      }
+      return write(path, data, options);
+    });
+    syncBuiltinESMExports();
+    await fixture.run({ execute() { assert.fail("A completed revision must not be rerun."); } });
+    assert.deepEqual(JSON.parse(readFileSync(journal, "utf8")).entries, JSON.parse(completed).entries);
+    replacement.mock.restore();
+    syncBuiltinESMExports();
+    writeFileSync(lock, "another-owner");
+    writeFileSync(journal, "invalid journal");
+    await assert.rejects(fixture.run({ execute() { assert.fail("Not the owner."); } }), { code: "EEXIST" });
+    assert.equal(readFileSync(lock, "utf8"), "another-owner");
+    assert.equal(readFileSync(journal, "utf8"), "invalid journal");
+    fs.unlinkSync(lock);
+    await assert.rejects(fixture.run({ execute() { assert.fail("Invalid state."); } }), SyntaxError);
+    assert.equal(existsSync(lock), false);
+    assert.equal(readFileSync(journal, "utf8"), "invalid journal");
+  } finally {
+    replacement?.mock.restore();
+    syncBuiltinESMExports();
+    fixture.cleanup();
+  }
+});
+
+test("watcher plans and history normalize array and keyed environments without selecting production", async () => {
+  for (const environments of [["DEV", "dev", "Production"], { DEV: {}, Production: {} }]) {
+    const fixture = ticketFixture();
+    try {
+      fixture.profile.environments = environments;
+      writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+      const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: " dev " });
+      assert.equal(plan.environment, "DEV");
+      await fixture.run({ plan, execute: async () => ({ outcome: "analysis", summary: "No change needed." }) });
+      const history = readTicketAutomationHistory(fixture.repository);
+      assert.equal(history.environment, "DEV");
+      assert.equal(history.attempts.length, 1);
+      assert.throws(() => ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "production" }), /non-production/);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("watcher binds legacy and normalized POST helpers and rejects helper changes and linked escapes", async () => {
+  for (const legacy of [false, true]) {
+    const fixture = ticketFixture();
+    try {
+      const helper = join(fixture.repository, ".github", "fixlab", "helper.mjs");
+      writeFileSync(helper, "export const version = 1;\n");
+      fixture.profile.environments = { DEV: {} };
+      const configuration = { sessionHelper: ".github/fixlab/helper.mjs" };
+      fixture.profile.browserAutomation = { dataSafety: legacy
+        ? { devPost: configuration } : { post: { dev: configuration } } };
+      const profilePath = join(fixture.repository, ".github", "fixlab", "repository-profile.json");
+      writeFileSync(profilePath, JSON.stringify(fixture.profile));
+      let plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+      await assert.rejects(fixture.run({ plan, execute: async () => {
+        writeFileSync(helper, "export const version = 2;\n");
+        return { outcome: "analysis", summary: "The helper changed during this attempt." };
+      } }), /configuration or Git origin changed/);
+      assert.equal(fixture.posted.length, 0);
+      const linked = join(fixture.repository, "linked-helper");
+      symlinkSync(join(fixture.repository, ".github", "fixlab"), linked, "junction");
+      configuration.sessionHelper = "linked-helper/helper.mjs";
+      writeFileSync(profilePath, JSON.stringify(fixture.profile));
+      plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "DEV" });
+      await assert.rejects(fixture.run({ plan, execute() { assert.fail("Linked helper."); } }), /without linked escapes/);
+    } finally { fixture.cleanup(); }
   }
 });
 
@@ -243,6 +330,7 @@ test("pending resolution is read back after restart even when new state changes 
   fixture.client.resolve = async () => {
     patches += 1;
     fixture.item.state = "Resolved";
+    fixture.item.revision += 1;
     unavailable = true;
     throw new Error("State submission acknowledgement was lost.");
   };
@@ -257,6 +345,48 @@ test("pending resolution is read back after restart even when new state changes 
     assert.equal(attempt.resolution.status, "resolved");
     assert.equal(patches, 1);
     assert.equal(fixture.posted.length, 1);
+  } finally { fixture.cleanup(); }
+});
+
+test("uncertain resolution recovery never patches a human's newer reopened revision", async () => {
+  const fixture = ticketFixture();
+  fixture.plan.resolveOnCompletion = true;
+  const load = fixture.client.load;
+  let unavailable = false;
+  let patches = 0;
+  let submittedRevision;
+  fixture.client.load = async (...args) => {
+    if (unavailable) { unavailable = false; throw new Error("Read-back unavailable."); }
+    return load(...args);
+  };
+  fixture.client.resolve = async (_id, revision) => {
+    patches += 1;
+    submittedRevision = revision;
+    const path = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const [entry] = JSON.parse(readFileSync(path, "utf8")).entries;
+    assert.equal(entry.resolution.submittedRevision, revision);
+    assert.equal(entry.resolution.attemptedState, "Resolved");
+    assert.equal(entry.resolution.status, "pending");
+    fixture.item.state = "Resolved";
+    fixture.item.revision += 1;
+    unavailable = true;
+    throw new Error("PATCH acknowledgement lost.");
+  };
+  try {
+    await assert.rejects(fixture.run({
+      execute: async () => ({ outcome: "draft-pr", summary: "Focused checks passed; draft needs review.", pullRequestId: 17 })
+    }), /Read-back unavailable/);
+    fixture.item.state = "Active";
+    fixture.item.revision += 1;
+    await fixture.run({ execute() { assert.fail("Do not rerun an uncertain investigation."); } });
+    assert.equal(patches, 1);
+    assert.equal(fixture.item.state, "Active");
+    const path = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const [entry] = JSON.parse(readFileSync(path, "utf8")).entries;
+    assert.equal(entry.status, "complete");
+    assert.equal(entry.resolution.status, "blocked");
+    assert.equal(entry.resolution.submittedRevision, submittedRevision);
+    assert.match(fixture.posted[1].text, /No PATCH was repeated/);
   } finally { fixture.cleanup(); }
 });
 
@@ -292,7 +422,7 @@ test("resolution handles unsupported workflows and lost acknowledgements without
     let patches = 0;
     fixture.client.resolve = async () => {
       patches += 1;
-      if (changed) { fixture.item.state = "Resolved"; }
+      if (changed) { fixture.item.state = "Resolved"; fixture.item.revision += 1; }
       throw new Error(changed ? "Connection ended after submission." : "This workflow does not support Resolved.");
     };
     try {
@@ -389,6 +519,8 @@ test("an interrupted investigation cannot rerun merely because its ticket change
 });
 
 test("ticket executor requires a successful exit and one bounded structured outcome", async () => {
+  const fixture = ticketFixture();
+  try {
   for (const [output, code, expected] of [
     ['FIXLAB_TICKET_RESULT|{"outcome":"analysis","summary":"Already fixed; focused checks passed."}\n', 0, "analysis"],
     ["No structured result.\n", 0, "blocked"],
@@ -396,7 +528,7 @@ test("ticket executor requires a successful exit and one bounded structured outc
     ['FIXLAB_TICKET_RESULT|{"outcome":"analysis","summary":"Bearer secret-token"}\n', 0, "blocked"]
   ]) {
     const result = await executeTicketAgent({
-      repository: process.cwd(), prompt: "An authorized bounded ticket.",
+      repository: fixture.repository, prompt: "An authorized bounded ticket.",
       onOutput() {},
       executor(options) {
         options.onOutput("stdout", output.slice(0, 20));
@@ -411,10 +543,115 @@ test("ticket executor requires a successful exit and one bounded structured outc
     idleTimeoutMs: Number.NaN, executor() { assert.fail("invalid timer"); }
   }), /idleTimeoutMs/);
   await assert.rejects(executeTicketAgent({
+    repository: fixture.repository,
     executor() {
       return { completion: Promise.resolve({ code: 0 }), hasStopped: () => false, terminate() {} };
     }
   }), error => error.ownedExecutorRunning === true);
+  } finally { fixture.cleanup(); }
+});
+
+test("ticket output is redacted before forwarding, including split credentials and final stderr fragments", async () => {
+  const fixture = ticketFixture();
+  try {
+    for (const invalidResult of [false, true]) {
+      const displayed = [];
+      const result = await executeTicketAgent({
+        repository: fixture.repository, prompt: "Fixture",
+        onOutput(stream, text) {
+          displayed.push({ stream, text });
+          assert.doesNotMatch(JSON.stringify(displayed), /stdout-private|stdout-basic-private|stderr-private|private-key-body|result-private/);
+        },
+        executor(options) {
+          options.onOutput("stdout", "Safe progress.\nAuthor");
+          options.onOutput("stderr", "pass");
+          options.onOutput("stdout", "ization: Bearer stdout-private\n");
+          options.onOutput("stdout", "Ba");
+          options.onOutput("stdout", "sic stdout-basic-private\n");
+          options.onOutput("stderr", "word=stderr-private");
+          options.onOutput("stdout", "-----BEGIN PRIVATE KEY-----\nprivate-key-body\n-----END PRIVATE KEY-----\n");
+          options.onOutput("stdout", `FIXLAB_TICKET_RESULT|${JSON.stringify({
+            outcome: "analysis", summary: invalidResult ? "Basic result-private" : "Focused checks passed."
+          })}\n`);
+          return { completion: Promise.resolve({ code: 0 }), hasStopped: () => true, terminate() {} };
+        }
+      });
+      assert.equal(result.outcome, invalidResult ? "blocked" : "analysis");
+      assert.match(displayed.map(value => value.text).join(""), /Safe progress|Sensitive detail omitted/);
+      assert.ok(displayed.some(value => value.stream === "stderr" && value.text.includes("omitted")));
+    }
+  } finally { fixture.cleanup(); }
+});
+
+test("ticket executors share dashboard leases across worktrees and release only after verified termination", async () => {
+  const fixture = ticketFixture();
+  try {
+    const worktree = join(fixture.repository, "linked-checkout");
+    for (const args of [
+      ["-c", "user.name=FixLab test", "-c", "user.email=fixlab@example.invalid", "commit", "--allow-empty", "--quiet", "-m", "Fixture"],
+      ["worktree", "add", "--quiet", "-b", "fixture-linked", worktree]
+    ]) {
+      const result = spawnSync("git", args, { cwd: fixture.repository, encoding: "utf8", windowsHide: true });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    const dashboard = createExecutorLease(fixture.repository, "dashboard-test");
+    const held = dashboard.acquire("dashboard-job");
+    await assert.rejects(executeTicketAgent({
+      repository: worktree, executor() { assert.fail("Dashboard owns the repository."); }
+    }), /lease is reserved/);
+    held.release();
+    const metadata = join(dashboard.scope.directory, "owner.json");
+    await executeTicketAgent({
+      repository: worktree, onOutput() {},
+      executor(options) {
+        const owner = JSON.parse(readFileSync(metadata, "utf8"));
+        assert.equal(owner.jobId, options.sessionId);
+        assert.equal(owner.ownerPid, process.pid);
+        assert.throws(() => dashboard.acquire("concurrent-job"), /lease is reserved/);
+        options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"analysis","summary":"No change needed."}\n');
+        return {
+          pid: 12345, hasStopped: () => true, terminate() {},
+          completion: Promise.resolve().then(() => {
+            assert.equal(JSON.parse(readFileSync(metadata, "utf8")).executorPid, 12345);
+            assert.equal(JSON.parse(readFileSync(metadata, "utf8")).state, "running");
+            return { code: 0 };
+          })
+        };
+      }
+    });
+    const next = dashboard.acquire("after-termination");
+    next.release();
+    await assert.rejects(fixture.run({
+      execute: () => executeTicketAgent({
+        repository: worktree, onOutput() {},
+        executor() {
+          return { pid: 12345, completion: Promise.resolve({ code: 0 }), hasStopped: () => false, terminate() {} };
+        }
+      })
+    }), error => error.ownedExecutorRunning === true);
+    assert.equal(JSON.parse(readFileSync(metadata, "utf8")).state, "termination-unverified");
+    assert.throws(() => dashboard.acquire("unsafe-restart"), /lease is reserved/);
+    assert.ok(existsSync(join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "watcher.lock")));
+  } finally { fixture.cleanup(); }
+});
+
+test("executor launch failures release a lease only when launch is explicitly known not to have started", async () => {
+  for (const notStarted of [false, true]) {
+    const fixture = ticketFixture();
+    try {
+      await assert.rejects(executeTicketAgent({
+        repository: fixture.repository,
+        executor() { throw Object.assign(new Error("Launch failed."), { executorNotStarted: notStarted }); }
+      }), error => error.message === "Launch failed." && Boolean(error.ownedExecutorRunning) === !notStarted);
+      const owner = createExecutorLease(fixture.repository, "next-owner");
+      if (notStarted) {
+        const next = owner.acquire("safe-retry");
+        next.release();
+      } else {
+        assert.throws(() => owner.acquire("unknown-launch"), /lease is reserved/);
+      }
+    } finally { fixture.cleanup(); }
+  }
 });
 
 test("ADO automation client confines reads and feedback to the configured project and verifies draft state", async () => {

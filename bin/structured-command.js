@@ -39,6 +39,8 @@ function sanitize(value) {
     .replace(CREDENTIAL_URL_PATTERN, "$1[REDACTED]@");
 }
 
+export { sanitize as sanitizeCommandOutput };
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }

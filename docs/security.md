@@ -34,12 +34,17 @@ operations. Treat every runner as privileged engineering infrastructure.
   prevent a privileged runtime from issuing other commands. Organization
   controls and normal human MFA remain authoritative.
 - The watcher serializes investigations, stores a bounded Git-private
-  revision journal and exclusive lock, and verifies draft status, repository,
+  revision journal, acquiring its exclusive lock before reading any state,
+  and verifies draft status, repository,
   target branch and work-item linkage before publishing a canonical PR URL.
   Feedback is escaped and posted only to the bound work item's Discussion.
   Pending feedback is deduplicated after uncertain network acknowledgements.
   Interrupted jobs require owner inspection; an unverified owned-executor stop
-  retains the lock instead of admitting another investigation.
+  retains the lock instead of admitting another investigation. Ticket executors
+  also acquire the dashboard's canonical repository lease across linked worktrees;
+  that lease is released only after verified termination. Executor output is
+  bounded and line-buffered for credential suppression before display, independently
+  of raw structured-result parsing.
 - Dashboard watcher monitoring is read-only and bound to the checkout's
   reviewed journal scope. It retains bounded sanitized structured progress,
   not raw output, credentials or browser state. Check messages remain
@@ -48,7 +53,9 @@ operations. Treat every runner as privileged engineering infrastructure.
   permits only the documented `Resolved` investigation handoff, after verified
   draft linkage or a confirmed cause with evidence/next steps. The watcher
   checks workflow support and fresh revision, verifies the returned project/state,
-  and reads back uncertain acknowledgements without a blind retry. Blocked,
+  and persists the submission revision and intended state before sending a PATCH.
+  Recovery only reconciles uncertain submissions; it never submits another PATCH
+  against a human's newer revision. Blocked,
   inconclusive, out-of-scope and legacy completed attempts cannot trigger it.
 - Profile/helper changes require a new scope review. Watcher approval never
   grants ready/merge/deploy operations, production or business writes, and
