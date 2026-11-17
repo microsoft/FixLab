@@ -1269,6 +1269,7 @@ test("run launches the Agency-resolved FixLab agent with real DEV reads from new
     );
     const profile = JSON.parse(readFileSync(profilePath, "utf8"));
     profile.workflow.publication = "ready";
+    profile.pullRequests.reviewTeams = ["@example-org/review-team"];
     writeFileSync(profilePath, JSON.stringify(profile));
     mkdirSync(executableDirectory);
     const executable = join(
@@ -1322,6 +1323,8 @@ test("run launches the Agency-resolved FixLab agent with real DEV reads from new
     assert.match(result.stdout, /Verify the PR is no longer draft before reporting the PR stage passed/);
     assert.match(result.stdout, /\*\.auth\.spec\.ts/);
     assert.match(result.stdout, /Request: repair the defect/);
+    assert.match(result.stdout, /PR team approval:/);
+    assert.match(result.stdout, /Reviewed team identities: \["@example-org\/review-team"\]/);
     profile.workflow.publication = "draft";
     writeFileSync(profilePath, JSON.stringify(profile));
     const draft = run(["run", repository, "--environment", "development", "--", "fix then request live testing"],
@@ -1514,6 +1517,10 @@ test("run launches the FixLab plugin directly through Copilot", () => {
 
   try {
     assert.equal(run(["init", repository], repository).status, 0);
+    const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+    const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+    profile.pullRequests.reviewTeams = ["@example-org/review-team"];
+    writeFileSync(profilePath, JSON.stringify(profile));
     mkdirSync(executableDirectory);
     const executable = join(
       executableDirectory,
@@ -1552,6 +1559,8 @@ test("run launches the FixLab plugin directly through Copilot", () => {
       /--plugin-dir [^\r\n]+ --agent fixlab:fixlab/
     );
     assert.match(result.stdout, /--autopilot/);
+    assert.match(result.stdout, /PR team approval:/);
+    assert.match(result.stdout, /Reviewed team identities: \["@example-org\/review-team"\]/);
     assert.match(result.stdout, /transient validation artifacts/);
     assert.match(result.stdout, /authorized DRAFT pull request now/);
     assert.match(result.stdout, /read back provider isDraft=true before reporting publication passed/);
@@ -1567,6 +1576,7 @@ test("run launches the FixLab plugin directly through Copilot", () => {
     );
     assert.equal(validation.status, 0);
     assert.match(validation.stdout, /Do not publish a pull request or change its draft status in read-only mode/);
+    assert.doesNotMatch(validation.stdout, /PR team approval:|Reviewed team identities:/);
     assert.doesNotMatch(validation.stdout, /gh pr ready|az repos pr update/);
   } finally {
     rmSync(repository, { recursive: true, force: true });

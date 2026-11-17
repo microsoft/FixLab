@@ -295,6 +295,20 @@ that same PR with actual results. Explicit strict/ready, validation-only,
 manual/all-UI, unit-test-only and per-job validation choices remain authoritative;
 required gates and merge policy are never waived.
 
+PR team approval: after authorized PR creation or update, read
+pullRequests.reviewTeams from the reviewed repository profile. For GitHub use
+configured @org/team handles; for Azure DevOps resolve configured team identity
+GUIDs to native mentions. Verify each team in the exact PR provider/repository;
+never guess recipients. Read existing PR comments and post one approval-request
+comment with verified mentions, PR link and actual validation status, marked
+<!-- fixlab:team-review -->. Reuse only the authenticated author's matching
+comment; do not duplicate notifications on retries or updates. Verify comment
+readback before claiming success. No configured teams means no comment.
+Missing permission, unresolved identity or uncertain acknowledgement: report
+unconfirmed and reconcile, never blindly retry or block an existing PR.
+Preserve draft status and all readiness/merge gates; never approve or merge.
+Validation-only jobs must not post.
+
 User-friendly updates: explain the issue and its impact in everyday language,
 what changed, and what was actually checked. State plainly when checks failed,
 could not run or were skipped, and say what the user needs to do next. Avoid

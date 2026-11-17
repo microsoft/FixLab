@@ -6,6 +6,57 @@ import test from "node:test";
 import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, POST_PR_LIVE_REVIEW_GUIDANCE, WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE, USER_FRIENDLY_UPDATE_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
 import { ValidationSession, selectedValidationGates, validationGates } from "../dashboard/validation-gates.js";
 import { buildJobPrompt, FIXLAB_STAGES } from "../dashboard/server.js";
+import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
+
+test("review teams are optional, bounded verified-identity inputs and invalid configuration blocks launch", () => {
+  const profile = (reviewTeams) => ({ pullRequests: { reviewTeams } });
+  assert.deepEqual(configuredReviewTeams({}), []);
+  assert.deepEqual(configuredReviewTeams(profile([])), []);
+  const teamId = "12345678-1234-1234-1234-123456789abc";
+  assert.deepEqual(configuredReviewTeams(profile(["@example-org/review-team", "@EXAMPLE-ORG/REVIEW-TEAM", teamId])),
+    ["@example-org/review-team", teamId]);
+  const workflow = configuredWorkflow(profile(["@example-org/review-team", "@EXAMPLE-ORG/REVIEW-TEAM"]));
+  assert.deepEqual(workflow.reviewTeams, ["@example-org/review-team"]);
+  assert.deepEqual(configuredWorkflow({ workflow }), workflow, "Saved jobs retain their reviewed team identities.");
+  assert.equal(configuredWorkflow({ workflow, pullRequests: { reviewTeams: [] } }).reviewTeams, undefined);
+  for (const invalid of [null, "@org/team", {}, [null], ["team display name"],
+    ["@org/team\n@everyone"], ["@org/team; execute"], ["@org/team/other"],
+    ["not-a-guid"], Array(9).fill("@org/team")]) {
+    assert.throws(() => configuredWorkflow(profile(invalid)), /pullRequests\.reviewTeams/);
+  }
+});
+
+test("approval-request comments belong to authorized code publication in every delivery mode", () => {
+  for (const mode of ["efficient", "strict"]) {
+    for (const deferValidation of [false, true]) {
+      const prompt = buildJobPrompt({
+        request: "Prepare the authorized PR.", mode: "fix-and-validate", deferValidation,
+        workflow: configuredWorkflow({ workflow: { mode, publication: "draft" },
+          pullRequests: { reviewTeams: ["@example-org/review-team"] } })
+      });
+      assert.ok(prompt.includes(PR_TEAM_REVIEW_GUIDANCE), `${mode}/${deferValidation}`);
+      assert.ok(prompt.includes('Reviewed team identities: ["@example-org/review-team"]'));
+    }
+  }
+  for (const mode of ["validate-only", "playwright-only"]) {
+    assert.ok(!buildJobPrompt({ request: "Validate without publication.", mode,
+      workflow: configuredWorkflow({ pullRequests: { reviewTeams: ["@example-org/review-team"] } }) })
+      .includes(PR_TEAM_REVIEW_GUIDANCE), mode);
+  }
+  assert.ok(!buildJobPrompt({ request: "Fix without configured review teams.", mode: "fix-and-validate" })
+    .includes(PR_TEAM_REVIEW_GUIDANCE));
+  for (const path of [
+    "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
+    ".github/agents/fixlab.agent.md", "prompts/fixlab.pr.prompt.md"
+  ]) {
+    const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8")
+      .replace(/\s+/gu, " ");
+    assert.ok(source.includes(PR_TEAM_REVIEW_GUIDANCE), path);
+  }
+  const cli = readFileSync(new URL("../bin/fixlab.js", import.meta.url), "utf8");
+  assert.match(cli, /!readOnly && request && workflow\.reviewTeams\?\.length\s+\? \[PR_TEAM_REVIEW_GUIDANCE/);
+});
 
 test("verified read-only POST searches use the default browser policy independently of write consent", () => {
   for (const mode of ["fix-and-validate", "validate-only", "playwright-only"]) {

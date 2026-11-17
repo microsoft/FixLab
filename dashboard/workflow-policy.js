@@ -7,12 +7,29 @@ export function configuredWorkflow(profile = {}) {
         value[key] !== undefined && typeof value[key] !== "boolean")) {
     throw new Error("workflow must declare efficient or strict mode, draft or ready publication, and boolean unitTestsAfterPr/optionalBuilds preferences.");
   }
+  const reviewTeams = configuredReviewTeams({ pullRequests: {
+    reviewTeams: profile.pullRequests?.reviewTeams === undefined
+      ? value.reviewTeams : profile.pullRequests.reviewTeams
+  } });
   return {
     mode: value.mode ?? "efficient",
     unitTestsAfterPr: value.unitTestsAfterPr ?? false,
     publication: value.publication ?? (value.mode === "strict" ? "ready" : "draft"),
-    optionalBuilds: value.optionalBuilds ?? false
+    optionalBuilds: value.optionalBuilds ?? false,
+    ...(reviewTeams.length ? { reviewTeams } : {})
   };
+}
+
+export function configuredReviewTeams(profile = {}) {
+  const teams = profile.pullRequests?.reviewTeams;
+  if (teams === undefined) { return []; }
+  if (!Array.isArray(teams) || teams.length > 8 || teams.some((team) =>
+    typeof team !== "string" ||
+    !/^(?:@[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9][a-z0-9-]{0,99}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})$/iu.test(team))) {
+    throw new Error("pullRequests.reviewTeams must contain at most 8 GitHub @org/team handles or Azure DevOps team identity GUIDs.");
+  }
+  return teams.filter((team, index) =>
+    teams.findIndex((other) => other.toLowerCase() === team.toLowerCase()) === index);
 }
 
 export const COPILOT_EXECUTION_GUIDANCE =
@@ -41,6 +58,9 @@ export const CONCISE_PR_GUIDANCE =
 
 export const PR_LEARNING_GUIDANCE =
   "Reusable PR learning: within the existing pr stage, only when source edits and PR publication are authorized, inspect task-relevant existing repository skills for verified, non-obvious, reusable knowledge from this change. Prefer to update a matching skill; otherwise create .github/skills/<topic>/SKILL.md with YAML name and description; the name must match the lowercase-hyphenated topic directory. Capture when to use it, the verified solution, repository file/test references, exact working directories and validation commands, and pitfalls. Skills are for future developers and relevant agent tasks, not a diary of the current run. Include the skill in the same reviewed PR before committing/pushing; self-review its instructions and run applicable documentation/skill checks. In the concise PR body, link the added/updated skill or state no new reusable learning when none qualifies; do not create empty, speculative or duplicate skills. Use no separate roadmap stage. Read-only jobs must not write skills, commit or publish. Respect repository instruction governance and existing approval boundaries. Do not add allowed-tools or broaden permissions. Never include credentials, personal/customer data, private endpoints or raw transcripts.";
+
+export const PR_TEAM_REVIEW_GUIDANCE =
+  "PR team approval: after authorized PR creation or update, read pullRequests.reviewTeams from the reviewed repository profile. For GitHub use configured @org/team handles; for Azure DevOps resolve configured team identity GUIDs to native mentions. Verify each team in the exact PR provider/repository; never guess recipients. Read existing PR comments and post one approval-request comment with verified mentions, PR link and actual validation status, marked <!-- fixlab:team-review -->. Reuse only the authenticated author's matching comment; do not duplicate notifications on retries or updates. Verify comment readback before claiming success. No configured teams means no comment. Missing permission, unresolved identity or uncertain acknowledgement: report unconfirmed and reconcile, never blindly retry or block an existing PR. Preserve draft status and all readiness/merge gates; never approve or merge. Validation-only jobs must not post.";
 
 export const EXISTING_APPLICATION_GUIDANCE =
   "Existing-application fast path: explicit deployed/browser-only checks use playwright-only mode and the approved existing application for the selected environment. Resolve targets from profile/browser configuration, not report URLs. Reuse profile-supported healthy apps/authorized browser connections; never copy browser state, take over unrelated browsers, bypass profile locks or treat state files as sign-in proof. Do not clone, restore, start another stack or run broad gates just to repeat a deployed UI scenario. Mark unnecessary local-stack work skipped, not passed. Start only journey prerequisites; unavailable deployments block, never silently change environment or target. Record target/version and exact assertions. A baseline/deployed result does not validate unpublished local changes or a PR; use the matching commit/app. Manual-localhost requirements remain.";

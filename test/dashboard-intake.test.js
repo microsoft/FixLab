@@ -28,6 +28,7 @@ import {
 } from "../dashboard/intake.js";
 import { executeTicketAgent, readTicketAutomationHistory, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
+import { PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
@@ -99,6 +100,9 @@ test("ticket automation binds the Git origin, tag, branch, environment and expli
     assert.throws(() => ticketAutomationPlan(repository, { ...profile, azureDevOps: { project: "Another" } }, { environment: "dev" }), /does not match/);
     assert.throws(() => ticketAutomationPlan(repository, profile, { environment: "production" }), /non-production/);
     assert.throws(() => ticketAutomationPlan(repository, { ...profile, ticketAutomation: { tag: "FixLab\nOther" } }, { environment: "dev" }), /bounded tag/);
+    assert.throws(() => ticketAutomationPlan(repository, { ...profile,
+      pullRequests: { ...profile.pullRequests, reviewTeams: ["unverified display name"] }
+    }, { environment: "dev" }), /pullRequests\.reviewTeams/);
     await assert.rejects(fixture.run({ confirmed: false, execute() { assert.fail("not authorized"); } }), /explicitly pass/);
     await assert.rejects(fixture.run({ allowAllTools: false, execute() { assert.fail("not authorized"); } }), /explicitly pass/);
     assert.equal(fixture.posted.length, 0);
@@ -109,23 +113,27 @@ test("ticket automation binds the Git origin, tag, branch, environment and expli
 
 test("ticket watcher persists deduplication, ignores its own feedback and responds to new human discussion", async () => {
   const fixture = ticketFixture();
+  fixture.profile.pullRequests.reviewTeams = ["12345678-1234-1234-1234-123456789abc"];
+  writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+  const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
   let executions = 0;
   const execute = async ({ request }) => {
     executions += 1;
     assert.match(request, /untrusted problem data/);
     assert.match(request, /Never.*create an empty PR/);
-    assert.match(request, /Do not post ADO comments yourself/);
+    assert.match(request, /Do not post ADO work-item Discussion comments yourself/);
+    assert.ok(request.includes(PR_TEAM_REVIEW_GUIDANCE));
     assert.doesNotMatch(request, /base64/);
     return { outcome: "analysis", summary: "The behavior is already correct. Focused validation passed; persistence was not tested." };
   };
   try {
-    await fixture.run({ execute });
-    await fixture.run({ execute });
+    await fixture.run({ plan, execute });
+    await fixture.run({ plan, execute });
     assert.equal(executions, 1);
     assert.equal(fixture.posted.length, 1);
     fixture.item.comments.unshift({ id: 1000, text: "Also investigate the rename flow." });
-    await fixture.run({ execute });
-    await fixture.run({ execute });
+    await fixture.run({ plan, execute });
+    await fixture.run({ plan, execute });
     assert.equal(executions, 2);
     assert.equal(fixture.posted.length, 2);
     assert.equal(fixture.posted[0].id, fixture.item.id);
@@ -133,6 +141,39 @@ test("ticket watcher persists deduplication, ignores its own feedback and respon
   } finally {
     fixture.cleanup();
   }
+});
+
+test("credential-bearing ticket fields and comments never reach executor input or retained diagnostics", async () => {
+  const fixture = ticketFixture();
+  const original = structuredClone(fixture.item);
+  const synthetic = "synthetic-ticket-credential";
+  const events = [];
+  try {
+    for (const [field, value] of [
+      ["title", `token=${synthetic}`],
+      ["description", `Authorization: Basic ${synthetic}`],
+      ["reproduction", `https://user:${synthetic}@example.invalid/`],
+      ["acceptanceCriteria", `-----BEGIN PRIVATE KEY-----\n${synthetic}\n-----END PRIVATE KEY-----`],
+      ["webUrl", `https://example.invalid/?access_token=${synthetic}`],
+      ["webUrl", `https://${synthetic}@example.invalid/`],
+      ["comments", [{ id: 2, text: `Bearer ${synthetic}` }]],
+      ["comments", [1, 2, 3].map(id => ({ id, text: "Safe discussion." }))
+        .concat({ id: 4, text: `password=${synthetic}` })]
+    ]) {
+      for (const key of Object.keys(fixture.item)) { delete fixture.item[key]; }
+      Object.assign(fixture.item, structuredClone(original), { [field]: value });
+      await assert.rejects(fixture.run({
+        onEvent: message => events.push(message),
+        execute() { assert.fail("Unsafe ticket content must not reach execute."); }
+      }), error => /credential-like/.test(error.message) && !error.message.includes(synthetic));
+    }
+    const journal = readFileSync(join(fixture.repository, ".git", "fixlab", "dashboard-artifacts",
+      "ticket-automation", "state.json"), "utf8");
+    assert.ok(!journal.includes(synthetic));
+    assert.ok(!events.join("\n").includes(synthetic));
+    assert.equal(JSON.parse(journal).entries.length, 0);
+    assert.equal(fixture.posted.length, 0);
+  } finally { fixture.cleanup(); }
 });
 
 test("watcher reads the latest journal under its lock and releases ownership on initialization failure", async () => {
@@ -215,6 +256,34 @@ test("watcher binds legacy and normalized POST helpers and rejects helper change
       writeFileSync(profilePath, JSON.stringify(fixture.profile));
       plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "DEV" });
       await assert.rejects(fixture.run({ plan, execute() { assert.fail("Linked helper."); } }), /without linked escapes/);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("watcher binds API authentication and distinct selected safety helpers before executor launch", async () => {
+  for (const selected of ["api", "api-with-post", "devWrite"]) {
+    const fixture = ticketFixture();
+    try {
+      const directory = join(fixture.repository, ".github", "fixlab");
+      writeFileSync(join(directory, "api.mjs"), "export const version = 1;\n");
+      writeFileSync(join(directory, "safety.mjs"), "export const version = 1;\n");
+      fixture.profile.browserAutomation = {
+        apiAuthentication: { sessionHelper: ".github/fixlab/api.mjs" },
+        dataSafety: selected === "api-with-post"
+          ? { post: { dev: { sessionHelper: ".github/fixlab/safety.mjs" } } }
+          : selected === "devWrite" ? { devWrite: { sessionHelper: ".github/fixlab/safety.mjs" } } : {}
+      };
+      writeFileSync(join(directory, "repository-profile.json"), JSON.stringify(fixture.profile));
+      const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+      fixture.client.load = async () => {
+        writeFileSync(join(directory, selected === "devWrite" ? "safety.mjs" : "api.mjs"),
+          "export const version = 2;\n");
+        return structuredClone(fixture.item);
+      };
+      await assert.rejects(fixture.run({
+        plan, execute() { assert.fail(`Changed ${selected} helper must block launch.`); }
+      }), /configuration or Git origin changed/);
+      assert.equal(fixture.posted.length, 0);
     } finally { fixture.cleanup(); }
   }
 });
@@ -503,7 +572,7 @@ test("ticket watcher skips ineligible items and stops when the reviewed configur
   }
 });
 
-test("an interrupted investigation cannot rerun merely because its ticket changed", async () => {
+test("an interrupted investigation blocks every launch even after edits, reordering or loss of its tag", async () => {
   const fixture = ticketFixture();
   let executions = 0;
   const execute = async () => { executions += 1; throw new Error("Runtime disconnected."); };
@@ -511,6 +580,13 @@ test("an interrupted investigation cannot rerun merely because its ticket change
     await assert.rejects(fixture.run({ execute }), /Runtime disconnected/);
     fixture.item.description = "A human edited the ticket after the interruption.";
     await assert.rejects(fixture.run({ execute }), /interrupted execution/);
+    fixture.item.tags = "Other";
+    fixture.client.load = async id => ({ ...structuredClone(fixture.item), id,
+      tags: id === 43 ? "FixLab" : fixture.item.tags });
+    for (const ids of [[43, 42], [43], []]) {
+      fixture.client.findTagged = async () => ids;
+      await assert.rejects(fixture.run({ execute }), /interrupted execution/);
+    }
     assert.equal(executions, 1);
     assert.equal(fixture.posted.length, 0);
   } finally {

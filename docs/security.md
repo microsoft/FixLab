@@ -39,12 +39,20 @@ operations. Treat every runner as privileged engineering infrastructure.
   target branch and work-item linkage before publishing a canonical PR URL.
   Feedback is escaped and posted only to the bound work item's Discussion.
   Pending feedback is deduplicated after uncertain network acknowledgements.
-  Interrupted jobs require owner inspection; an unverified owned-executor stop
+  Any interrupted job blocks new investigations across the entire journal,
+  even when its work item is untagged, missing or reordered. Owner inspection
+  is required; an unverified owned-executor stop
   retains the lock instead of admitting another investigation. Ticket executors
   also acquire the dashboard's canonical repository lease across linked worktrees;
   that lease is released only after verified termination. Executor output is
   bounded and line-buffered for credential suppression before display, independently
   of raw structured-result parsing.
+- Ticket content is credential-screened before prompt construction or executor
+  handoff, including descriptions, all comments and credential-bearing URLs.
+  Rejected content is not copied into diagnostics or journal entries.
+  The selected POST and broad-write safety helpers and the API authentication
+  helper are bound by contained real path and content revision, then revalidated
+  before launch and feedback; changing a helper requires a fresh scope review.
 - Dashboard watcher monitoring is read-only and bound to the checkout's
   reviewed journal scope. It retains bounded sanitized structured progress,
   not raw output, credentials or browser state. Check messages remain
@@ -60,6 +68,9 @@ operations. Treat every runner as privileged engineering infrastructure.
 - Profile/helper changes require a new scope review. Watcher approval never
   grants ready/merge/deploy operations, production or business writes, and
   does not persist an allow-all grant into ordinary dashboard jobs.
+  Optional configured team-approval comments belong to the authorized PR
+  workflow, separate from watcher-owned work-item Discussion feedback. They
+  do not approve, merge, or change a PR's draft status.
 - The reusable dashboard binds only to `127.0.0.1`; it is not a team service or
   public network endpoint.
 - Installation never starts a listener. `fixlab dashboard` is an explicit,

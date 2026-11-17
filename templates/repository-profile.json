@@ -119,6 +119,7 @@
   "pullRequests": {
     "defaultTargetBranch": "develop",
     "requireConfirmation": true,
+    "reviewTeams": [],
     "branchNaming": {
       "userId": "your-user-id",
       "prefixTemplate": "users/{userId}"

@@ -53,7 +53,7 @@ import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
 import { ticketAutomationPlan, watchTickets, executeTicketAgent } from "../dashboard/ticket-automation.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -1094,6 +1094,8 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     ...(!readOnly ? [CONCISE_PR_GUIDANCE] : []),
     ...(!readOnly && request ? [USER_FRIENDLY_UPDATE_GUIDANCE] : []),
     ...(!readOnly && request ? [PR_LEARNING_GUIDANCE] : []),
+    ...(!readOnly && request && workflow.reviewTeams?.length
+      ? [PR_TEAM_REVIEW_GUIDANCE, `Reviewed team identities: ${JSON.stringify(workflow.reviewTeams)}. Profile changes require a fresh review.`] : []),
     ...(!readOnly && request && !choices.deferValidation ? [AUTONOMOUS_RECOVERY_GUIDANCE] : []),
     ...(profile.browserAutomation?.mode === "api" ? [API_ONLY_PLAYWRIGHT_GUIDANCE] : []),
     ...(request && !choices.deferValidation && allowsDraftIntegrationDeferral({ mode: readOnly ? "validate-only" : "fix-and-validate", workflow })

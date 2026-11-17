@@ -41,7 +41,7 @@ import { canonicalExecutionRepository, createExecutorLease } from "./executor-le
 import { spawnWindowsExecutor } from "./windows-executor.js";
 import { createRuntimeRequestBridge, MAX_RUNTIME_FRAME_BYTES, recordedSourceEditReview, safeRuntimeText, sourceEditAuthorization, validateRuntimeUsage, validateToolApprovalMode } from "./runtime-requests.js";
 import { validateJobFileAccess } from "./runtime-permission-policy.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, allowsUnverifiedDraft, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE } from "./workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, allowsUnverifiedDraft, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-policy.js";
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval, inspectPpeWriteConfiguration, isOriginWriteApproval } from "./dev-post.js";
@@ -1385,6 +1385,7 @@ ${readOnly ? "" : "- Prefix PR titles with FLAB: and a concise change summary. U
 ${readOnly ? "" : CONCISE_PR_GUIDANCE}
 ${readOnly ? "" : USER_FRIENDLY_UPDATE_GUIDANCE}
 ${readOnly ? "" : PR_LEARNING_GUIDANCE}
+${!readOnly && workflow?.reviewTeams?.length ? `${PR_TEAM_REVIEW_GUIDANCE}\nReviewed team identities: ${JSON.stringify(workflow.reviewTeams)}. Profile changes require a fresh review.` : ""}
 ${workItemValidationEvidenceGuidance({ mode, testEvidence, skipLiveTests, deferValidation })}
 - ${postPrLiveReview ? "Only after the user accepts live testing, start the required profile-defined applications and validate the matching PR checkout. Do not invent environments or treat a deployed baseline as proof of the unpublished change." : "Start only the applications defined by the repository profile, then execute the repository-defined live test against the allowed required system or environment from that profile. Do not invent or hardcode environment choices."}
 - For every Playwright browser live test, save at least one non-sensitive screenshot under the test's repository-owned test-results directory so the dashboard can display the browser evidence. API-only journeys preserve sanitized API assertion evidence instead.

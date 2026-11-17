@@ -88,6 +88,10 @@ Optional broad tests/builds are controlled by saved preferences; required
 repository checks and CI/merge policies still apply. Failed, deferred, stale,
 or skipped checks are never reported as passed.
 
+Configure [`pullRequests.reviewTeams`](docs/repository-onboarding.md#automatic-pr-approval-request-comments)
+to automatically mention verified review teams in a PR approval-request comment.
+Retries reuse the same owned comment; publication and merge permissions stay unchanged.
+
 See [architecture and benefits](docs/architecture-overview.md) for components,
 benefits, deployment, recovery, and trust boundaries, or the
 [architecture reference](docs/architecture.md) for runtime and MCP contracts.

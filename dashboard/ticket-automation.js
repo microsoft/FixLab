@@ -10,6 +10,8 @@ import { configuredPostSafety } from "./dev-post.js";
 import { createExecutorLease } from "./executor-lease.js";
 import { configuredValidationEnvironments, validateTargetEnvironment } from "./validation-environments.js";
 import { sanitizeCommandOutput } from "../bin/structured-command.js";
+import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-policy.js";
+import { apiSessionHelper } from "./api-authentication.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
@@ -51,6 +53,7 @@ export function ticketAutomationPlan(repository, profile, {
     throw new Error("Select an explicitly configured non-production --environment for ticket automation.");
   }
   const targetBranch = profile.pullRequests?.defaultTargetBranch;
+  configuredReviewTeams(profile);
   if (typeof targetBranch !== "string" ||
       !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/u.test(targetBranch) ||
       /\.\.|\/\/|\/$|\.lock$/u.test(targetBranch)) {
@@ -98,7 +101,8 @@ function automationScope(plan) {
 }
 
 function safeTicketText(value, limit) {
-  return safeRuntimeText(value, limit) && sanitizeCommandOutput(value) === value;
+  return safeRuntimeText(value, limit) && sanitizeCommandOutput(value) === value &&
+    !/https?:\/\/[^/\s"'<>]+@/iu.test(value);
 }
 
 function recordedText(value, limit = 600) {
@@ -337,6 +341,10 @@ export async function executeTicketAgent({
 }
 
 function ticketRequest(item, plan) {
+  if (!safeTicketText(JSON.stringify(item), 80 * 1024)) {
+    throw new Error("The work item contains credential-like, unsupported or oversized content. Redact it and review the ticket before launching an investigation.");
+  }
+  const reviewTeams = configuredReviewTeams(plan.profile);
   const context = {
     id: item.id, title: item.title, description: item.description, reproduction: item.reproduction,
     acceptanceCriteria: item.acceptanceCriteria,
@@ -350,7 +358,9 @@ function ticketRequest(item, plan) {
     "If a justified nonempty fix passes the required focused publication checks, create or update only its authorized DRAFT PR in this repository and target branch, link the work item, and verify provider isDraft=true. Never mark ready, merge, deploy, force-push or change ticket state. Live integration can remain explicitly unverified under the existing draft policy.",
     "When no PR is appropriate (already fixed, configuration/access issue, insufficient information, or analysis-only outcome), provide diagnosis, evidence, validation actually performed and concrete next steps. Never claim blocked or skipped checks passed.",
     "Keep all application business-data access read-only under the existing API guards. Do not edit profiles, guards, credentials or browser state. Never approve your own tools or folder permissions. Human SSO/MFA and organization policy remain authoritative.",
-    "Do not post ADO comments yourself: the watcher writes feedback only to this bound ticket. Do not start or control dashboard jobs. Retain normal runtime approval boundaries.",
+    "Do not post ADO work-item Discussion comments yourself: the watcher writes feedback only to this bound ticket. Authorized PR review comments are separate. Do not start or control dashboard jobs. Retain normal runtime approval boundaries.",
+    ...(reviewTeams.length ? [PR_TEAM_REVIEW_GUIDANCE,
+      `Reviewed team identities: ${JSON.stringify(reviewTeams)}. Profile changes require a fresh review.`] : []),
     "Record concise safe progress as FIXLAB_ACTIVITY|stage|message and stage outcomes as FIXLAB_STAGE|stage|status|message. Record each actual focused command/check as FIXLAB_CHECK|repository command or gate ID|status|message, emitting running before execution and the actual outcome afterward. Choose one status: running, passed, failed, blocked or skipped. Use one marker per line. Record selected browser/API scenarios as FIXLAB_TEST|source|mutation-mode|scenario. These are agent-reported records, not independent runner proof. Never include raw output, secrets, identities, business records, private endpoints or authentication/browser state.",
     "Only for an analysis with a confirmed root cause, add confirmedCause:{cause,evidence,nextSteps} to the result JSON. All three are required, concise and source-grounded. Do not claim a confirmed cause for an assumption, missing information, a failed prerequisite or an access blocker. The watcher alone owns any explicitly enabled work-item state transition; never change state yourself. Resolved is an investigation handoff, not proof of merge, deployment or full live validation.",
     'Finish by emitting exactly one single-line FIXLAB_TICKET_RESULT|{"outcome":"draft-pr|analysis|blocked|failed","summary":"Concise diagnosis, evidence, checks, limitations and next steps; no secrets, identities, customer records or private endpoints","pullRequestId":123}. Include pullRequestId only for draft-pr. Summarize technical findings, not raw logs. Attachments are not loaded by this text-only watcher; report missing visual evidence rather than inventing it.',
@@ -461,19 +471,24 @@ export async function watchTickets({
   const scope = automationScope(plan);
   const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
   const approvedProfile = hash(readFileSync(profilePath));
-  const helper = configuredPostSafety(plan.profile, plan.environment)?.sessionHelper;
-  let helperPath;
-  if (helper !== undefined) {
+  const browser = plan.profile.browserAutomation;
+  const helperNames = [
+    browser?.apiAuthentication?.sessionHelper,
+    configuredPostSafety(plan.profile, plan.environment)?.sessionHelper,
+    browser?.dataSafety?.[`${plan.environment.toLowerCase()}Write`]?.sessionHelper
+  ].filter(helper => helper !== undefined);
+  const approvedHelpers = [...new Set(helperNames)].map(helper => {
     if (typeof helper !== "string" || !/\.(?:mjs|cjs|js)$/u.test(helper)) {
       throw new Error("The reviewed session helper must be a repository-owned JavaScript file.");
     }
-    helperPath = realpathSync(resolve(repository, helper));
+    const helperPath = realpathSync(resolve(repository, helper));
     const path = relative(realpathSync(repository), helperPath);
     if (!path || path.startsWith("..") || resolve(repository, helper) !== helperPath) {
       throw new Error("The reviewed session helper must remain inside this repository without linked escapes.");
     }
-  }
-  const approvedHelper = helperPath ? hash(readFileSync(helperPath)) : null;
+    apiSessionHelper(repository, helper);
+    return { helper, helperPath, revision: hash(readFileSync(helperPath)) };
+  });
   const root = join(resolveArtifactRoot(repository), "ticket-automation");
   mkdirSync(root, { recursive: true, mode: 0o700 });
   if (relative(resolve(root), realpathSync(root))) {
@@ -484,8 +499,10 @@ export async function watchTickets({
   const owner = randomUUID();
   const verifyScope = () => {
     if (hash(readFileSync(profilePath)) !== approvedProfile ||
-        (helperPath && (realpathSync(resolve(repository, helper)) !== helperPath ||
-          hash(readFileSync(helperPath)) !== approvedHelper)) ||
+        approvedHelpers.some(({ helper, helperPath, revision }) =>
+          realpathSync(resolve(repository, helper)) !== helperPath ||
+          apiSessionHelper(repository, helper) !== helperPath ||
+          hash(readFileSync(helperPath)) !== revision) ||
         JSON.stringify(ticketAutomationPlan(repository, loadRepositoryProfile(repository), plan)) !== JSON.stringify(plan)) {
       throw new Error("The reviewed repository configuration or Git origin changed. Stop and review a new watcher plan.");
     }
@@ -641,6 +658,10 @@ export async function watchTickets({
       if (pending) {
         await feedback(pending);
       } else {
+        const interrupted = state.entries.find(entry => entry.status === "running");
+        if (interrupted) {
+          throw new Error(`Work item ${interrupted.id} has an interrupted execution. Review its branch and PR before retrying; no new investigation will be launched.`);
+        }
         const ids = await client.findTagged(plan.tag, plan.areaPaths);
         for (const id of ids) {
           signal?.throwIfAborted();
@@ -653,9 +674,6 @@ export async function watchTickets({
             Number.isSafeInteger(item.revision) && Number.isSafeInteger(previous.resolution.revision) &&
             item.revision > previous.resolution.revision;
           const revision = ticketRevision(item, reopened ? { ...previous, reopenedRevision: item.revision } : previous);
-          if (state.entries.some(entry => entry.id === id && entry.status === "running")) {
-            throw new Error(`Work item ${id} has an interrupted execution. Review its branch and PR before retrying; it will not be launched twice.`);
-          }
           if (state.entries.some(entry => entry.id === id && entry.fingerprint === revision.fingerprint)) {
             continue;
           }
