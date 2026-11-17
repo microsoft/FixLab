@@ -718,6 +718,51 @@ section:
 }
 ```
 
+### Tagged-ticket watcher
+
+```powershell
+fixlab watch "C:\source\application" --runtime agency --environment dev
+```
+
+This prints a plan only: checkout-derived ADO organization/project/repository,
+reviewed area paths, tag, target branch, environment and installed helper
+directory. Set the profile's `pullRequests.defaultTargetBranch` and
+`ticketAutomation.areaPaths` first. The default trigger is the exact `FixLab`
+tag, the interval is 300 seconds, and the outcome is `draft-pr-or-discussion`.
+New profiles include those defaults but no authorized areas or auto-start.
+
+After reviewing that scope, explicitly start the session:
+
+```powershell
+fixlab watch "C:\source\application" --runtime agency --environment dev --yes --allow-all-tools
+```
+
+Adding `FixLab` to an active Bug, User Story, Feature or Product Backlog Item
+in a configured area or descendant makes it eligible at the next poll.
+The first poll includes existing eligible tagged items. Only one investigation
+runs per poll. A justified fix produces a work-item-linked **draft PR** plus
+Discussion feedback; otherwise the existing ticket receives diagnosis,
+evidence, limitations and next steps, not an empty PR or a new story.
+Meaningful ticket edits or new human Discussion comments can trigger another
+investigation. FixLab's own feedback does not retrigger it.
+
+This version requires Agency and a locally authenticated Azure CLI identity
+with the relevant ADO permissions. IcM enters through a tagged linked ADO
+record, not a direct IcM connector. Watcher intake is text-only. It is not a
+dashboard job, hosted service, webhook or boot-time task: the local command
+must remain running. Ctrl+C stops it; `--once` permits at most one investigation.
+More than 20 eligible candidates explicitly stops the scan; narrow the tag or
+areas instead of silently omitting tickets.
+
+Session approval covers tool commands/helper access and draft/comment outcomes
+only for the displayed scope. It does not grant application business writes,
+production access, ready/merge/deployment permission or normal dashboard jobs'
+future approvals. Configuration/helper changes stop for a new review. Private
+Git state deduplicates completed revisions and uncertain comment acknowledgements.
+An interrupted investigation or unverified owned-process stop requires review
+of its branch/PR and retained journal/lock before retrying; do not blindly remove
+that state. See [the security model](security.md).
+
 Azure DevOps loading uses the local developer's authenticated Azure CLI
 identity and never exposes or stores the bearer token. It loads safe work-item
 text and metadata without downloading private attachments. Both intake paths

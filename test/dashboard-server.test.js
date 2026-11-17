@@ -3236,6 +3236,117 @@ test("permission denial stops the executor and requires a confirmed job-bound fo
   }
 });
 
+test("permission retries require fresh tool consent and retain only reviewed folders", async () => {
+  const repository = createRepository();
+  const external = mkdtempSync(join(tmpdir(), "fixlab-tool-retry-scope-"));
+  const secondExternal = mkdtempSync(join(tmpdir(), "fixlab-tool-retry-extra-"));
+  const calls = [];
+  const { dashboard, url } = await startDashboard(repository, (input) => {
+    calls.push(input);
+    return { completion: new Promise(() => {}), terminate() {} };
+  }, undefined, { runtime: "agency" });
+  const post = (body, origin = url) => jsonRequest(url, "/api/job/permissions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
+    body: JSON.stringify(body)
+  });
+  const waitForPermission = async () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const state = (await jsonRequest(url, "/api/status")).body;
+      if (state.job.canReviewPermissions) {return state;}
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail("The denied executor did not stop for permission review.");
+  };
+  try {
+    const started = await jsonRequest(url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: "Validate after explicit runtime consent.", mode: "validate-only",
+        routineFileAccess: true, permissionPreflight: true
+      })
+    });
+    const first = await approvePreflightDirectory(url, started.body.job, external);
+    assert.equal(first.response.status, 202, first.body.error);
+    assert.equal(calls[0].toolApprovalMode, "ask");
+    calls[0].onOutput("stdout", "FIXLAB_STAGE|intake|passed|Read the request.\n");
+    calls[0].onOutput("stdout", "Denied, no one to approve MCP tool (fixlab/status)\n");
+    let state = await waitForPermission();
+    const approval = {
+      action: "approve-tools", instanceId: state.instanceId, jobId: state.job.id,
+      requestId: state.job.permissionRequest.id, confirmed: true,
+      toolApprovalMode: "allow-all", allowAllConfirmed: true
+    };
+    for (const [changes, status] of [
+      [{ instanceId: "stale-instance" }, 409], [{ jobId: "stale-job" }, 409],
+      [{ requestId: "stale-request" }, 409], [{ confirmed: false }, 400],
+      [{ toolApprovalMode: "ask" }, 400], [{ toolApprovalMode: "invalid" }, 400],
+      [{ allowAllConfirmed: false }, 400], [{ allowAllConfirmed: undefined }, 400]
+    ]) {
+      const rejected = await post({ ...approval, ...changes });
+      assert.equal(rejected.response.status, status, rejected.body.error);
+    }
+    for (const origin of ["", "https://example.invalid"]) {
+      assert.equal((await post(approval, origin)).response.status, 403);
+    }
+    assert.equal(calls.length, 1, "Rejected approvals must not start another executor.");
+    const retried = await post(approval);
+    assert.equal(retried.response.status, 202, retried.body.error);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].toolApprovalMode, "allow-all");
+    assert.equal(calls[1].resume, true);
+    assert.equal(calls[1].sessionId, calls[0].sessionId);
+    assert.deepEqual(calls[1].runtimeDirectories, [realpathSync(external)]);
+    assert.equal(retried.body.job.fileAccess.mode, "source-read");
+    assert.equal(retried.body.job.stages.intake.status, "passed");
+    assert.equal((await post(approval)).response.status, 409);
+
+    calls[1].onOutput("stdout", "Denied, no one to approve shell path (another-helper)\n");
+    state = await waitForPermission();
+    assert.equal(state.job.toolApprovalMode, "ask");
+    assert.deepEqual(state.job.runtimeDirectoryGrants, [realpathSync(external)]);
+    const reviewed = await post({
+      ...approval, action: "review-directory",
+      requestId: state.job.permissionRequest.id, directory: secondExternal
+    });
+    assert.equal(reviewed.response.status, 200, reviewed.body.error);
+    assert.equal(reviewed.body.job.toolApprovalMode, "ask", "Review alone cannot authorize tools.");
+    const combined = {
+      ...approval, action: "approve-directory",
+      requestId: reviewed.body.job.permissionRequest.id,
+      directory: reviewed.body.job.permissionRequest.scope.directory
+    };
+    assert.equal((await post({ ...combined, allowAllConfirmed: false })).response.status, 400);
+    assert.equal((await post(combined, "")).response.status, 403);
+    await assert.rejects(dashboardControl({
+      repository, port: Number(new URL(url).port), instanceId: state.instanceId,
+      jobId: state.job.id, confirmed: true, operation: "permission-approve", parameters: combined
+    }), /origin/);
+    const resumed = await post(combined);
+    assert.equal(resumed.response.status, 202, resumed.body.error);
+    assert.equal(calls[2].toolApprovalMode, "allow-all");
+    assert.deepEqual(calls[2].runtimeDirectories, [realpathSync(external), realpathSync(secondExternal)]);
+    calls[2].onOutput("stdout", "Denied, no one to approve MCP tool (fixlab/status)\n");
+    state = await waitForPermission();
+    assert.equal(state.job.toolApprovalMode, "ask");
+    assert.equal((await post(combined)).response.status, 409);
+    rmSync(secondExternal, { recursive: true, force: true });
+    const failedLaunch = await post({
+      ...approval, requestId: state.job.permissionRequest.id
+    });
+    assert.equal(failedLaunch.response.status, 409);
+    assert.match(failedLaunch.body.error, /approved folder changed/);
+    assert.equal(failedLaunch.body.job.toolApprovalMode, "ask");
+    assert.deepEqual(failedLaunch.body.job.runtimeDirectoryGrants, []);
+    assert.equal(calls.length, 3, "An invalid prior folder must prevent another executor.");
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
+    rmSync(secondExternal, { recursive: true, force: true });
+  }
+});
+
 test("permission review waits for owned termination and grants do not survive dashboard recovery", async () => {
   const repository = createGitRepository();
   const external = mkdtempSync(join(tmpdir(), "fixlab-expiring-scope-"));

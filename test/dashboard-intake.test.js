@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import {
   existsSync,
   mkdtempSync,
+  mkdirSync,
+  writeFileSync,
   rmSync
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
   createAzureDevOpsLoader,
+  createAzureDevOpsTicketClient,
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOT_TOTAL_BYTES,
   MAX_SCREENSHOTS,
@@ -17,10 +21,252 @@ import {
   sanitizeAzureDevOpsHtml,
   storeScreenshots
 } from "../dashboard/intake.js";
+import { executeTicketAgent, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
 ]);
+
+function ticketFixture() {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-ticket-"));
+  for (const args of [
+    ["init", repository],
+    ["-C", repository, "remote", "add", "origin", "https://example-org.visualstudio.com/Example%20Project/_git/example-repo"]
+  ]) {
+    const result = spawnSync("git", args, { encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const profile = {
+    environments: ["dev"],
+    ticketAutomation: { areaPaths: ["Example Project\\Application"] },
+    pullRequests: { defaultTargetBranch: "develop", requireConfirmation: true }
+  };
+  mkdirSync(join(repository, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  const plan = ticketAutomationPlan(repository, profile, { environment: "dev" });
+  const item = {
+    id: 42, project: plan.project, areaPath: plan.areaPaths[0], tags: "Other; FixLab", workItemType: "Bug", state: "Active",
+    title: "Name validation", description: "Accept plus and reject exclamation.",
+    comments: [{ id: 1, text: "Check the create-name flow." }]
+  };
+  const posted = [];
+  const client = {
+    findTagged: async () => [item.id],
+    load: async () => structuredClone(item),
+    hasComment: async (_id, marker) => item.comments.some(comment => comment.text.startsWith(marker)),
+    async comment(id, text) {
+      posted.push({ id, text });
+      item.comments.unshift({ id: 100 + posted.length, text });
+    },
+    verifyDraft: async (repository, id, branch) => {
+      assert.equal(repository, "example-repo");
+      assert.equal(branch, "develop");
+      return `https://dev.azure.com/example-org/Example%20Project/_git/example-repo/pullrequest/${id}`;
+    }
+  };
+  return {
+    repository, profile, plan, item, client, posted,
+    run: options => watchTickets({
+      repository, plan, client, once: true, confirmed: true, allowAllTools: true,
+      onEvent() {}, ...options
+    }),
+    cleanup: () => rmSync(repository, { recursive: true, force: true })
+  };
+}
+
+test("ticket automation binds the Git origin, tag, branch, environment and explicit session approval", async () => {
+  const fixture = ticketFixture();
+  try {
+    const { repository, profile, plan } = fixture;
+    assert.equal(plan.tag, "FixLab");
+    assert.equal(plan.project, "Example Project");
+    assert.equal(plan.outcome, "draft-pr-or-discussion");
+    assert.throws(() => ticketAutomationPlan(repository, { ...profile, azureDevOps: { project: "Another" } }, { environment: "dev" }), /does not match/);
+    assert.throws(() => ticketAutomationPlan(repository, profile, { environment: "production" }), /non-production/);
+    assert.throws(() => ticketAutomationPlan(repository, { ...profile, ticketAutomation: { tag: "FixLab\nOther" } }, { environment: "dev" }), /bounded tag/);
+    await assert.rejects(fixture.run({ confirmed: false, execute() { assert.fail("not authorized"); } }), /explicitly pass/);
+    await assert.rejects(fixture.run({ allowAllTools: false, execute() { assert.fail("not authorized"); } }), /explicitly pass/);
+    assert.equal(fixture.posted.length, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("ticket watcher persists deduplication, ignores its own feedback and responds to new human discussion", async () => {
+  const fixture = ticketFixture();
+  let executions = 0;
+  const execute = async ({ request }) => {
+    executions += 1;
+    assert.match(request, /untrusted problem data/);
+    assert.match(request, /Never.*create an empty PR/);
+    assert.match(request, /Do not post ADO comments yourself/);
+    assert.doesNotMatch(request, /base64/);
+    return { outcome: "analysis", summary: "The behavior is already correct. Focused validation passed; persistence was not tested." };
+  };
+  try {
+    await fixture.run({ execute });
+    await fixture.run({ execute });
+    assert.equal(executions, 1);
+    assert.equal(fixture.posted.length, 1);
+    fixture.item.comments.unshift({ id: 1000, text: "Also investigate the rename flow." });
+    await fixture.run({ execute });
+    await fixture.run({ execute });
+    assert.equal(executions, 2);
+    assert.equal(fixture.posted.length, 2);
+    assert.equal(fixture.posted[0].id, fixture.item.id);
+    assert.match(fixture.posted[0].text, /Outcome: analysis/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("ticket watcher posts verified draft links but reports an unverified PR as blocked", async () => {
+  const fixture = ticketFixture();
+  try {
+    await fixture.run({ execute: async () => ({ outcome: "draft-pr", summary: "Scoped fix and focused tests passed. Browser evidence is unavailable.", pullRequestId: 17 }) });
+    assert.match(fixture.posted[0].text, /Draft PR: https:\/\/dev\.azure\.com\/.*\/pullrequest\/17/);
+    fixture.item.description = "Check a second scenario.";
+    fixture.client.verifyDraft = async () => { throw new Error("PR is not draft."); };
+    await fixture.run({ execute: async () => ({ outcome: "draft-pr", summary: "A result needs verification.", pullRequestId: 18 }) });
+    assert.match(fixture.posted[1].text, /Outcome: blocked/);
+    assert.match(fixture.posted[1].text, /Publication is unconfirmed/);
+    assert.doesNotMatch(fixture.posted[1].text, /Draft PR:/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("ticket feedback survives a lost acknowledgement without rerunning the job or double posting", async () => {
+  const fixture = ticketFixture();
+  let executions = 0;
+  const execute = async () => { executions += 1; return { outcome: "analysis", summary: "No code change is needed; update the configuration through its owner." }; };
+  const comment = fixture.client.comment;
+  try {
+    fixture.client.comment = async (...args) => {
+      await comment(...args);
+      throw new Error("Connection ended after submission.");
+    };
+    await assert.rejects(fixture.run({ execute }), /after submission/);
+    fixture.client.comment = comment;
+    await fixture.run({ execute });
+    await fixture.run({ execute });
+    assert.equal(executions, 1);
+    assert.equal(fixture.posted.length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("ticket watcher skips ineligible items and stops when the reviewed configuration changes", async () => {
+  const fixture = ticketFixture();
+  try {
+    fixture.item.tags = "FixLabExtra";
+    await fixture.run({ execute() { assert.fail("not explicitly tagged"); } });
+    fixture.item.tags = "FixLab";
+    fixture.item.areaPath = "Example Project\\Another application";
+    await fixture.run({ execute() { assert.fail("not in a reviewed application area"); } });
+    fixture.item.areaPath = fixture.plan.areaPaths[0];
+    await assert.rejects(fixture.run({
+      execute: async () => {
+        writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+          ...fixture.profile, pullRequests: { defaultTargetBranch: "main" }
+        }));
+        return { outcome: "analysis", summary: "The scope changed." };
+      }
+    }), /configuration or Git origin changed/);
+    assert.equal(fixture.posted.length, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("an interrupted investigation cannot rerun merely because its ticket changed", async () => {
+  const fixture = ticketFixture();
+  let executions = 0;
+  const execute = async () => { executions += 1; throw new Error("Runtime disconnected."); };
+  try {
+    await assert.rejects(fixture.run({ execute }), /Runtime disconnected/);
+    fixture.item.description = "A human edited the ticket after the interruption.";
+    await assert.rejects(fixture.run({ execute }), /interrupted execution/);
+    assert.equal(executions, 1);
+    assert.equal(fixture.posted.length, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("ticket executor requires a successful exit and one bounded structured outcome", async () => {
+  for (const [output, code, expected] of [
+    ['FIXLAB_TICKET_RESULT|{"outcome":"analysis","summary":"Already fixed; focused checks passed."}\n', 0, "analysis"],
+    ["No structured result.\n", 0, "blocked"],
+    ['FIXLAB_TICKET_RESULT|{"outcome":"analysis","summary":"Unverified claim."}\n', 1, "blocked"],
+    ['FIXLAB_TICKET_RESULT|{"outcome":"analysis","summary":"Bearer secret-token"}\n', 0, "blocked"]
+  ]) {
+    const result = await executeTicketAgent({
+      repository: process.cwd(), prompt: "An authorized bounded ticket.",
+      onOutput() {},
+      executor(options) {
+        options.onOutput("stdout", output.slice(0, 20));
+        options.onOutput("stdout", output.slice(20));
+        return { completion: Promise.resolve({ code }), hasStopped: () => true, terminate() {} };
+      }
+    });
+    assert.equal(result.outcome, expected);
+  }
+  assert.throws(() => ticketOutcome({ outcome: "draft-pr", summary: "Missing ID." }), /valid bounded/);
+  await assert.rejects(executeTicketAgent({
+    idleTimeoutMs: Number.NaN, executor() { assert.fail("invalid timer"); }
+  }), /idleTimeoutMs/);
+  await assert.rejects(executeTicketAgent({
+    executor() {
+      return { completion: Promise.resolve({ code: 0 }), hasStopped: () => false, terminate() {} };
+    }
+  }), error => error.ownedExecutorRunning === true);
+});
+
+test("ADO automation client confines reads and feedback to the configured project and verifies draft state", async () => {
+  const calls = [];
+  let draft = true;
+  let linkedTicketId = "42";
+  const client = createAzureDevOpsTicketClient({
+    profile: { azureDevOps: { organization: "example-org", project: "Example Project" } },
+    tokenProvider: () => "private-test-token",
+    async requestJson(url, token, options = {}) {
+      assert.equal(token, "private-test-token");
+      assert.match(url, /^https:\/\/dev\.azure\.com\/example-org\/Example%20Project\/_apis\//);
+      calls.push({ url, options });
+      if (url.includes("/wiql?")) {
+        assert.match(options.body.query, /Tags.*CONTAINS 'FixLab'/);
+        return { workItems: [{ id: 42 }] };
+      }
+      if (url.includes("/workitems?")) {
+        return { value: [{ id: linkedTicketId }] };
+      }
+      if (url.includes("/pullrequests/")) {
+        return { isDraft: draft, status: "active", targetRefName: "refs/heads/develop", repository: { name: "example-repo" } };
+      }
+      if (url.includes("/comments?")) {
+        return { comments: [] };
+      }
+      return { id: 42, fields: {
+        "System.TeamProject": "Example Project", "System.Tags": "FixLab", "System.WorkItemType": "Feature"
+      } };
+    }
+  });
+  assert.deepEqual(await client.findTagged("FixLab", ["Example Project\\Application"]), [42]);
+  assert.equal((await client.load(42)).workItemType, "Feature");
+  assert.equal(await client.hasComment(42, "[FixLab automation 42:abc]"), false);
+  await client.comment(42, "Analysis <script>must be text</script>");
+  const posted = calls.find(call => call.options.method === "POST" && call.url.includes("/comments?"));
+  assert.equal(posted.options.body.text, "Analysis &lt;script&gt;must be text&lt;/script&gt;");
+  assert.match(await client.verifyDraft("example-repo", 17, "develop", 42), /pullrequest\/17$/);
+  draft = false;
+  await assert.rejects(client.verifyDraft("example-repo", 17, "develop", 42), /did not verify/);
+  draft = true;
+  linkedTicketId = "43";
+  await assert.rejects(client.verifyDraft("example-repo", 17, "develop", 42), /not linked/);
+  await assert.rejects(client.comment(-1, "Not authorized."), /positive safe integer/);
+});
 
 function screenshot(overrides = {}) {
   return {

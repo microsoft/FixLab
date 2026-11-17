@@ -245,6 +245,8 @@ const permissionPanel = document.querySelector("#permission-panel");
 const permissionDirectory = document.querySelector("#permission-directory");
 const permissionReview = document.querySelector("#permission-review");
 const permissionApprove = document.querySelector("#permission-approve");
+const permissionAllowAllTools = document.querySelector("#permission-allow-all-tools");
+const permissionRetryTools = document.querySelector("#permission-retry-tools");
 const permissionScope = document.querySelector("#permission-scope");
 const permissionMessage = document.querySelector("#permission-message");
 const permissionHelper = document.querySelector("#permission-helper");
@@ -889,15 +891,17 @@ function renderPermission(job, isActive) {
   permissionPanel.hidden = !pending;
   if (!pending) {
     permissionSelection = null;
+    permissionAllowAllTools.checked = false;
     return;
   }
-  const key = `${job.id}:${pending.id}`;
+  const key = `${dashboardInstanceId}:${job.id}:${pending.id}`;
   if (permissionSelection?.key !== key) {
     permissionDirectory.value = pending.scope?.requested ?? "";
+    permissionAllowAllTools.checked = false;
     permissionMessage.textContent = "";
     permissionEdited = false;
   }
-  permissionSelection = { key, jobId: job.id, requestId: pending.id, scope: pending.scope };
+  permissionSelection = { key, instanceId: dashboardInstanceId, jobId: job.id, requestId: pending.id, scope: pending.scope };
   permissionHelper.textContent = runtimeHelperDirectory
     ? `${pending.preflight ? "Pre-launch review: approve only a folder this job actually needs." : "The runtime supplied no structured denial scope; do not infer folder access is the cause."} FixLab helper: ${runtimeHelperDirectory}. Already granted for this job: ${(job.runtimeDirectoryGrants ?? []).join(", ") || "none"}. Repeating a grant cannot approve tools, URLs, or organization policy.`
     : "";
@@ -907,11 +911,17 @@ function renderPermission(job, isActive) {
     : "";
   permissionApprove.hidden = !pending.scope || permissionEdited;
   permissionApprove.textContent = pending.preflight ? "Grant this folder and start" : "Grant this folder and resume";
+  permissionRetryTools.textContent = pending.preflight
+    ? "Allow tools and start without adding folders" : "Allow tools and retry without adding folders";
   const stopped = job.canReviewPermissions && job.status === "blocked";
   permissionDirectory.disabled = permissionBusy || !stopped;
   permissionReview.disabled = permissionBusy || !stopped;
   permissionApprove.disabled = permissionBusy || !stopped;
+  permissionAllowAllTools.disabled = permissionBusy || !stopped;
+  permissionRetryTools.disabled = permissionBusy || !stopped || !permissionAllowAllTools.checked;
 }
+
+permissionAllowAllTools.addEventListener("change", () => renderPermission(activeJob, true));
 
 permissionDirectory.addEventListener("input", () => {
   permissionEdited = true;
@@ -927,8 +937,17 @@ async function submitPermission(action) {
   const directory = action === "review-directory"
     ? permissionDirectory.value
     : selection.scope?.directory;
-  if (action === "approve-directory" && !window.confirm(
-    `Grant this job read/write access to ${directory} and its descendants, and resume its background executor? This does not approve tools, URLs, or production changes.`
+  const allowAllTools = action !== "review-directory" && permissionAllowAllTools.checked;
+  if (action === "approve-tools" && !allowAllTools) {
+    return;
+  }
+  const toolConfirmation = allowAllTools
+    ? " Also allow all tool commands for the next executor only? Commands can change files and contact services without individual tool prompts. Organization policy, sign-in, publication consent and required checks remain separate. This does not add folder or URL access or approve production changes."
+    : " This does not approve tools, URLs, or production changes.";
+  if (action !== "review-directory" && !window.confirm(
+    (action === "approve-directory"
+      ? `Grant this job read/write access to ${directory} and its descendants, and resume its background executor?`
+      : "Retry this job with only its already-reviewed folder grants and no additional folders?") + toolConfirmation
   )) {
     return;
   }
@@ -936,16 +955,21 @@ async function submitPermission(action) {
   permissionDirectory.disabled = true;
   permissionReview.disabled = true;
   permissionApprove.disabled = true;
+  permissionAllowAllTools.disabled = true;
+  permissionRetryTools.disabled = true;
   try {
     const body = await fetchJson("/api/job/permissions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         action,
+        instanceId: selection.instanceId,
         jobId: selection.jobId,
         requestId: selection.requestId,
         directory,
-        confirmed: action === "approve-directory"
+        confirmed: action !== "review-directory",
+        toolApprovalMode: allowAllTools ? "allow-all" : "ask",
+        allowAllConfirmed: allowAllTools
       })
     });
     activeJob = body.job;
@@ -964,6 +988,7 @@ async function submitPermission(action) {
 
 permissionReview.addEventListener("click", () => void submitPermission("review-directory"));
 permissionApprove.addEventListener("click", () => void submitPermission("approve-directory"));
+permissionRetryTools.addEventListener("click", () => void submitPermission("approve-tools"));
 const retryLiveTestButton = document.createElement("button");
 retryLiveTestButton.id = "retry-live-test";
 retryLiveTestButton.type = "button";

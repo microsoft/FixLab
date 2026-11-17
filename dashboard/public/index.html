@@ -492,7 +492,13 @@
         <input id="permission-directory" type="text" maxlength="2048" autocomplete="off" spellcheck="false">
         <button id="permission-review" type="button">Review folder access</button>
         <pre id="permission-scope" hidden></pre>
+        <label class="checkbox-row">
+          <input id="permission-allow-all-tools" type="checkbox">
+          Allow all tool commands for this retry
+        </label>
+        <p class="guidance">Fresh, privileged opt-in for the next executor only: commands can change files and contact services without individual tool prompts. This does not add folders or URL access, override organization policy, or approve sign-in, production changes, publication or required checks. It expires when the executor stops. Leave unchecked to approve only the reviewed folder.</p>
         <button id="permission-approve" type="button" hidden>Grant this folder and resume</button>
+        <button id="permission-retry-tools" type="button" disabled>Allow tools and retry without adding folders</button>
         <p class="guidance">Leave the job paused if the scope is unclear. A folder grant cannot resolve a tool-policy or organization-policy denial; FixLab will not bypass those policies.</p>
         <p id="permission-message" class="guidance" role="status" aria-live="polite"></p>
       </section>

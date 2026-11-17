@@ -4,6 +4,12 @@ All notable changes to FixLab are documented in this file.
 
 ## 0.7.4 - Unreleased
 
+- Add an optional plan-first Agency watcher for explicitly tagged ADO tickets
+  under reviewed area paths, with draft-PR-or-Discussion outcomes, verified
+  PR linkage and restart deduplication. Onboarding never starts the watcher.
+- Recover stopped permission requests with fresh, single-executor tool
+  consent, either alongside reviewed folder access or without new folders.
+  Bind approval to the exact instance/job/request and expire it on stop.
 - Keep persistent browser-profile directories in ownership checks without
   rejecting authenticated readiness proof. Require a regular status file and
   a successful signed-in browser check; directory existence is never login proof.

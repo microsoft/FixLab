@@ -47,6 +47,12 @@ establish application readiness or grant permissions.
 | Fix a bug or small enhancement | Scoped changes, validation evidence, and an authorized pull request |
 | Validate an existing change or PR | Findings and evidence without source or PR changes |
 | Run focused Playwright validation | Browser or configured API assertions without an implementation job |
+| Watch explicitly tagged ADO tickets (Agency) | Reviewed local polling produces a draft PR or feedback on the existing ticket's Discussion |
+
+The optional [tagged-ticket watcher](docs/commands.md#tagged-ticket-watcher)
+starts only after a separate scope review and explicit session approval.
+Onboarding supplies defaults, not automatic activation. IcM requires a linked
+ADO item; no direct IcM listener is installed.
 
 ## Architecture and benefits
 

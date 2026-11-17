@@ -3,6 +3,33 @@
 FixLab must not assume that every React and .NET repository has the same layout.
 The target repository owns a versioned profile.
 
+## Optional tagged-ticket automation
+
+New profiles include `ticketAutomation` defaults for the `FixLab` tag,
+five-minute polling and `draft-pr-or-discussion` outcomes. Before enabling the
+watcher, configure one to eight `areaPaths` below the checkout's ADO project,
+the existing PR target branch and a non-production environment:
+
+```json
+{
+  "ticketAutomation": {
+    "tag": "FixLab",
+    "areaPaths": ["Example Project\\Application"],
+    "pollSeconds": 300,
+    "outcome": "draft-pr-or-discussion"
+  }
+}
+```
+
+The empty default area list intentionally does not authorize an entire shared
+ADO project. Installing or onboarding never starts the watcher or grants its
+session access. `fixlab watch` prints the plan; starting it separately requires
+`--yes --allow-all-tools`. While running, the exact tag triggers eligible ADO
+bugs/stories/features in those areas, including IcM represented by a linked ADO
+item. A justified fix produces a draft PR and Discussion feedback; analysis,
+already-fixed and blocked outcomes update the existing Discussion only.
+See [watcher commands and limitations](commands.md#tagged-ticket-watcher).
+
 ## Dashboard chat setup
 
 Choose **Add local repository** in the repository sidebar and enter the absolute
