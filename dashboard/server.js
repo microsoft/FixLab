@@ -5757,37 +5757,75 @@ export function createDashboardServer({
           sendJson(response, 200, { job: publicJob(job) });
           return;
         }
-        if (body.action !== "approve-directory" || body.confirmed !== true ||
-            !pending.scope || body.directory !== pending.scope.directory) {
+        const toolsOnly = body.action === "approve-tools";
+        if ((!toolsOnly && body.action !== "approve-directory") || body.confirmed !== true) {
+          throw new Error("Explicitly confirm the reviewed permission before approval.");
+        }
+        const toolApprovalMode = validateToolApprovalMode(body.toolApprovalMode);
+        if (toolsOnly && toolApprovalMode !== "allow-all") {
+          throw new Error("A tool-only retry requires a fresh Allow all tool commands opt-in.");
+        }
+        if (toolApprovalMode === "allow-all") {
+          if (request.headers.origin !== expectedOrigin) {
+            sendJson(response, 403, { error: "Allow all requires the dashboard's exact loopback host and origin." });
+            return;
+          }
+          if (body.instanceId !== sessions.id) {
+            sendJson(response, 409, { error: "The dashboard instance changed. Refresh before approving tools." });
+            return;
+          }
+          if (body.allowAllConfirmed !== true) {
+            throw new Error("Allow all requires explicit confirmation.");
+          }
+        }
+        if (!toolsOnly && (!pending.scope || body.directory !== pending.scope.directory)) {
           sendJson(response, 400, { error: "Review an exact folder scope and explicitly confirm it before approval." });
           return;
         }
-        verifyPermissionDirectory(pending.scope, {
-          repository: resolvedRepository,
-          packageRoot
-        });
         const previousGrants = job.runtimeDirectoryGrants ?? [];
-        if (previousGrants.length >= 8) {
-          throw new Error("This job already has eight folder grants; review its runtime policy instead of broadening access further.");
+        if (!toolsOnly) {
+          verifyPermissionDirectory(pending.scope, {
+            repository: resolvedRepository,
+            packageRoot
+          });
+          if (previousGrants.length >= 8) {
+            throw new Error("This job already has eight folder grants; review its runtime policy instead of broadening access further.");
+          }
+          job.runtimeDirectoryGrants = [...previousGrants, pending.scope];
+          pushLog(job, {
+            index: job.nextLogIndex,
+            timestamp: new Date().toISOString(),
+            stream: "dashboard",
+            message: `The user approved folder access for this job only: ${pending.scope.directory}. The grant is not retained after a dashboard restart and does not approve tools or URLs.`
+          });
         }
-        job.runtimeDirectoryGrants = [...previousGrants, pending.scope];
-        pushLog(job, {
-          index: job.nextLogIndex,
-          timestamp: new Date().toISOString(),
-          stream: "dashboard",
-          message: `The user approved folder access for this job only: ${pending.scope.directory}. The grant is not retained after a dashboard restart and does not approve tools or URLs.`
-        });
         job.permissionRequest = null;
         job.permissionStopRequested = false;
         job.permissionPreflightReviewed = true;
+        const folderDetails = toolsOnly
+          ? "Retain only the existing reviewed folder grants; no additional folder has been approved."
+          : `The user explicitly approved access to this folder for this job only: ${pending.scope.directory}. The new executor receives that exact --add-dir grant.`;
+        const toolDetails = toolApprovalMode === "allow-all"
+          ? "The user explicitly selected Allow all tool commands for this executor only. This does not authorize additional folders, URLs, production data changes or bypassing organization policy."
+          : "This does not authorize a denied tool, URL, production data change, or any other folder.";
         const prompt = pending.preflight ? job.initialPrompt : buildResumePrompt(job, {
           action: "retry",
-          details: `The user explicitly approved access to this folder for this job only: ${pending.scope.directory}. The new executor receives that exact --add-dir grant. This does not authorize a denied tool, URL, production data change, or any other folder. Retry only the blocked prerequisite once. If still denied, stop and report the unresolved permission; do not loop or request blanket access.`
+          details: `${folderDetails} ${toolDetails} Retry only the blocked prerequisite once. If still denied, stop and report the unresolved permission; do not loop or request blanket access.`
         });
         resetJobForResume(job);
+        job.toolApprovalMode = toolApprovalMode;
+        if (toolApprovalMode === "allow-all") {
+          pushLog(job, {
+            index: job.nextLogIndex,
+            timestamp: new Date().toISOString(),
+            stream: "dashboard",
+            message: "The user explicitly selected Allow all tool commands for this retry executor. This choice expires when the executor ends; organization policy and required workflow approvals remain in effect."
+          });
+        }
         try {
           startJob(job, prompt, !pending.preflight);
         } catch (error) {
+          job.toolApprovalMode = "ask";
           if (pending.preflight && error.workspaceReview) {
             finishJob(job, { code: null, error });
           } else {

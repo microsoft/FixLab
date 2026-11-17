@@ -7,6 +7,18 @@ installation and usage guides.
 
 FixLab separates orchestration from repository-specific behavior.
 
+The optional `fixlab watch` entry point polls explicitly tagged ADO work items
+under reviewed application area paths. It derives repository authority from the
+checkout's Git origin, requires a selected non-production environment, and uses
+the owned Agency executor for one sequential investigation per polling pass.
+The agent proposes either a draft PR or analysis; the watcher independently
+verifies draft/repository/branch/work-item linkage and owns escaped Discussion
+feedback. Its Git-private journal records execution before launch and feedback
+before posting, so restarts deduplicate completed revisions and uncertain
+acknowledgements without silently rerunning interrupted work. This explicitly
+approved local session is separate from dashboard jobs and normal per-executor
+tool consent. Setup only supplies defaults; it never starts a watcher.
+
 Native runtime request classification supplies redacted, reason-specific
 diagnostics. Eligible blocked operations expose **Deny and request safe recovery**:
 the runtime receives a rejection with fixed recovery feedback, not a permission
@@ -320,6 +332,12 @@ It does not waive authentication, repository/data-safety rules or validation.
 The choice is privileged execution and expires with the executor; snapshots and
 retries return to `ask`. Agency adds its broad CLI tool flag only after opt-in;
 its non-interactive default can block on permissions that require a human.
+Stopped permission recovery offers a fresh, default-off **Allow all tool commands
+for this retry** choice. It can accompany a reviewed folder approval or retry
+with only existing folder grants. Exact instance/job/request identity, browser
+origin and explicit tool confirmation are required. The choice applies after
+resume state is reset and expires with that executor; a failed launch also
+returns to `ask`. Folder review alone never grants tool access.
 
 When the selected current job has a freeform runtime question, the message
 composer submits an identity-bound answer through the existing runtime-response
@@ -590,8 +608,11 @@ same origin, and never survives a restart or transfers to a new job. A late,
 stale, or unconfirmed approval cannot start an executor. Ordinary comments,
 retries and automatic continuation cannot bypass the pending permission review.
 Tool, URL, sandbox and organization-policy restrictions remain authoritative;
-a folder grant does not authorize them. Another denial pauses again instead of
-automatically retrying or granting blanket access. This is a folder-access
+a folder grant does not authorize them. The user can separately opt into tool
+approval for one retry without adding folders, or explicitly combine it with
+the reviewed folder approval. This neither infers the denied action from text
+nor overrides managed policy. Another denial pauses again instead of
+automatically retrying or granting blanket access. This is a permission
 handoff, separate from direct Copilot's native request bridge. A historical text
 denial cannot be converted into a live native approval after its executor exits.
 Managed long-running frontends keep their input pipe open until owned shutdown;

@@ -1211,6 +1211,8 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     await expect(page.locator("#job-input-submit")).toBeHidden();
     await expect(page.locator("#permission-review")).toBeEnabled();
     await expect(page.locator("#permission-approve")).toBeHidden();
+    await expect(page.locator("#permission-allow-all-tools")).not.toBeChecked();
+    await expect(page.locator("#permission-retry-tools")).toBeDisabled();
     await page.getByLabel("Exact folder to review").fill(external);
     await page.getByRole("button", { name: "Review folder access" }).click();
     await expect(page.locator("#permission-scope")).toContainText(realpathSync(external));
@@ -1223,6 +1225,7 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     await page.getByLabel("Exact folder to review").fill(external);
     await page.getByRole("button", { name: "Review folder access" }).click();
     await expect(page.locator("#permission-approve")).toBeVisible();
+    await page.getByLabel("Allow all tool commands for this retry").check();
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Grant this folder and resume" }).click();
     await expect(page.locator("#permission-panel")).toBeHidden();
@@ -1230,6 +1233,7 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     expect(calls[1].runtimeDirectories).toEqual([realpathSync(external)]);
     expect(calls[1].sessionId).toBe(calls[0].sessionId);
     expect(calls[1].resume).toBe(true);
+    expect(calls[1].toolApprovalMode).toBe("allow-all");
     await expect.poll(async () =>
       (await (await page.request.get(`${address.url}/api/job`)).json()).job.status
     ).toBe("passed");
@@ -1240,6 +1244,25 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     await expect(page.getByRole("heading", { name: "Copilot permission required" })).toBeVisible();
     await expect(page.locator("#job-input-submit")).toBeHidden();
     await expect(page.locator("#job-input-details")).toBeHidden();
+    await expect(page.locator("#permission-allow-all-tools")).not.toBeChecked();
+    await page.getByLabel("Allow all tool commands for this retry").check();
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await page.locator("#permission-retry-tools").click();
+    expect(calls).toHaveLength(3);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.locator("#permission-retry-tools").click();
+    await expect.poll(() => calls.length).toBe(4);
+    expect(calls[3].toolApprovalMode).toBe("allow-all");
+    expect(calls[3].runtimeDirectories).toEqual([]);
+    await expect.poll(async () =>
+      (await (await page.request.get(`${address.url}/api/job`)).json()).job.status
+    ).toBe("passed");
+    await page.request.post(`${address.url}/api/jobs`, {
+      data: { request: "Keep a separate unresolved blocker paused.", mode: "validate-only" }
+    });
+    await page.reload();
+    await expect(page.locator("#permission-allow-all-tools")).not.toBeChecked();
+    await expect(page.locator("#permission-retry-tools")).toBeDisabled();
     await page.request.post(`${address.url}/api/jobs`, {
       data: { request: "Continue the queue after safe dismissal.", mode: "validate-only" }
     });
@@ -1248,8 +1271,8 @@ test("runtime folder approval is reviewed and confirmed in the browser without a
     await expect(dismiss).toBeEnabled();
     page.once("dialog", (dialog) => dialog.accept());
     await dismiss.click();
-    await expect.poll(() => calls.length).toBe(4);
-    expect(calls[3].runtimeDirectories).toEqual([]);
+    await expect.poll(() => calls.length).toBe(6);
+    expect(calls[5].runtimeDirectories).toEqual([]);
   } finally {
     await permissionDashboard.close();
     rmSync(permissionRepository, { recursive: true, force: true });

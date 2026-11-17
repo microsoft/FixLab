@@ -25,6 +25,24 @@ operations. Treat every runner as privileged engineering infrastructure.
 
 ## Process isolation
 
+- Optional ticket watching is an explicitly started local Agency session, not
+  an onboarding side effect. Its fresh `--yes --allow-all-tools` consent binds
+  the checkout's ADO origin, configured area subtrees, exact tag, target branch,
+  non-production environment and installed helper directory. This is a
+  privileged tool session, not an OS sandbox. Agent instructions restrict
+  business access to existing read-only guards; tool grants do not technically
+  prevent a privileged runtime from issuing other commands. Organization
+  controls and normal human MFA remain authoritative.
+- The watcher serializes investigations, stores a bounded Git-private
+  revision journal and exclusive lock, and verifies draft status, repository,
+  target branch and work-item linkage before publishing a canonical PR URL.
+  Feedback is escaped and posted only to the bound work item's Discussion.
+  Pending feedback is deduplicated after uncertain network acknowledgements.
+  Interrupted jobs require owner inspection; an unverified owned-executor stop
+  retains the lock instead of admitting another investigation.
+- Profile/helper changes require a new scope review. Watcher approval never
+  grants ready/merge/deploy operations, production or business writes, and
+  does not persist an allow-all grant into ordinary dashboard jobs.
 - The reusable dashboard binds only to `127.0.0.1`; it is not a team service or
   public network endpoint.
 - Installation never starts a listener. `fixlab dashboard` is an explicit,
@@ -120,6 +138,15 @@ dashboard origin. It expires on executor termination, stop, hold, failure or
 completion; snapshots, retries, recovered queues and restarted jobs default back
 to individual approval. Fresh queued jobs retain only their explicitly selected
 choice while the current dashboard stays alive.
+
+A stopped permission-blocked job also offers fresh tool opt-in for one retry,
+either alongside exact-folder approval or without adding any folders. This
+requires the current dashboard instance, job and request nonce, exact browser
+origin and explicit confirmation. Review alone never authorizes tools.
+Previously granted folders are revalidated at launch; new folder or URL access
+is not implied. A failed launch clears tool opt-in, and another denial pauses
+with a new nonce instead of automatically inheriting approval. The MCP control
+operations do not expose tool self-approval.
 
 Agency's background CLI receives `--allow-all-tools` only after this explicit
 opt-in; its CLI, not the SDK bridge, mediates requests. Without opt-in, unsupported

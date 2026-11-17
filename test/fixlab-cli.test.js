@@ -71,6 +71,7 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /fixlab dashboard/);
   assert.match(result.stdout, /fixlab chat/);
   assert.match(result.stdout, /fixlab keep-awake/);
+  assert.match(result.stdout, /fixlab watch/);
   assert.match(result.stdout, /--keep-awake-minutes <minutes>/);
   assert.match(result.stdout, /chat \[repository\]/);
   assert.match(result.stdout, /fixlab <repository>/);
@@ -79,6 +80,39 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /FIXLAB_RUNTIME/);
   assert.match(result.stdout, /127\.0\.0\.1:4317/);
   assert.match(result.stdout, /docs\/troubleshooting\.md/);
+});
+
+test("watch is plan-only until the repository-scoped tool and publication session is explicitly approved", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-watch-"));
+  try {
+    for (const args of [
+      ["init", repository],
+      ["-C", repository, "remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/example-repo"]
+    ]) {
+      assert.equal(spawnSync("git", args, { encoding: "utf8", windowsHide: true }).status, 0);
+    }
+    mkdirSync(join(repository, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      environments: ["dev"],
+      pullRequests: { defaultTargetBranch: "develop", requireConfirmation: true },
+      ticketAutomation: { tag: "FixLab", areaPaths: ["Example\\Application"] }
+    }));
+    const args = ["watch", repository, "--runtime", "agency", "--environment", "dev"];
+    const plan = run(args, repository);
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stdout, /"requiresConfirmation": true/);
+    assert.match(plan.stdout, /"targetBranch": "develop"/);
+    assert.equal(existsSync(join(repository, ".git", "fixlab", "ticket-automation")), false);
+    const unapproved = run([...args, "--yes", "--once"], repository);
+    assert.equal(unapproved.status, 1);
+    assert.match(unapproved.stderr, /--allow-all-tools/);
+    const unknown = run([...args, "--unknown-watch-option"], repository);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stderr, /Usage: fixlab watch/);
+    assert.equal(existsSync(join(repository, ".git", "fixlab", "ticket-automation")), false);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
 });
 
 test("direct shared-mode bug fixing requires dashboard-owned branch acquisition", () => {
