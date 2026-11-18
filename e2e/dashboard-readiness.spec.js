@@ -326,7 +326,7 @@ test("editing from an isolated checkout follows the same job into its automatica
   }
 });
 
-test("watcher jobs retain detailed evidence and prepare reviewed local handoffs without automatic execution", async ({ page }) => {
+test("watcher grid shows work-item titles and text statuses while preserving reviewed handoffs", async ({ page }) => {
   const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-ui-"));
   const profile = {
     ...JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8")),
@@ -345,7 +345,7 @@ test("watcher jobs retain detailed evidence and prepare reviewed local handoffs 
   }
   const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
   const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
-    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture", comments: [] };
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture <img src=x onerror=alert(1)>", comments: [] };
   let release;
   let launches = 0;
   const client = {
@@ -385,24 +385,37 @@ test("watcher jobs retain detailed evidence and prepare reviewed local handoffs 
     await page.goto(address.url);
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
     await expect(page.locator("#watcher-status")).toContainText("investigating");
-    const attempt = page.locator("#watcher-attempts > li > details").first();
-    await attempt.locator("summary").click();
+    const grid = page.getByRole("table", { name: "Watcher jobs" });
+    await expect(grid.getByRole("columnheader")).toHaveText(["Work item", "Title", "Status"]);
+    const row = grid.locator("tbody > tr").first();
+    await expect(row.getByRole("cell").nth(0).getByRole("link", { name: "42", exact: true })).toHaveAttribute(
+      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
+    );
+    await expect(row.locator(".watcher-title")).toHaveText(item.title);
+    await expect(row.getByRole("img")).toHaveCount(0);
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Investigation running (last recorded)");
+    const attempt = row.locator("details").first();
+    await expect(attempt).not.toHaveAttribute("open");
+    await attempt.locator(":scope > summary").click();
     await expect(attempt).toContainText("focused regression: failed");
     await expect(attempt).toContainText("Investigating the reported mapping");
-    await expect(attempt.getByRole("link", { name: "ADO 42 - Synthetic UI fixture (work item and Discussion)", exact: true })).toHaveAttribute(
+    await expect(attempt.getByRole("link", { name: `ADO 42 - ${item.title} (work item and Discussion)`, exact: true })).toHaveAttribute(
       "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
     );
     expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
     release();
     await watching;
     await expect(page.locator("#watcher-status")).toContainText("stopped");
-    await expect(attempt).toContainText("Feedback recorded - blocked");
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - blocked");
+    await expect(attempt).toHaveAttribute("open", "");
     await page.reload();
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
-    await page.locator("#watcher-attempts > li > details > summary").first().click();
+    await expect(row.locator(".watcher-title")).toHaveText(item.title);
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - blocked");
+    await page.locator("#watcher-attempts > tr > td > details > summary").first().click();
     await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
     await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
-    const retained = page.locator("#watcher-attempts > li > details").first();
+    const retained = page.locator("#watcher-attempts > tr > td > details").first();
     await retained.getByText("Detailed investigation report", { exact: true }).click();
     await expect(retained).toContainText("Implement the reviewed scope after the prerequisite is supplied.");
     await retained.getByRole("button", { name: "Continue in FixLab", exact: true }).click();
@@ -462,7 +475,7 @@ test("interrupted watcher recovery requires review and confirmation and preserve
     const address = await instance.listen({ port: await availablePort() });
     await page.goto(address.url);
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
-    const attempt = page.locator("#watcher-attempts > li > details").first();
+    const attempt = page.locator("#watcher-attempts > tr > td > details").first();
     await attempt.locator("summary").click();
     await attempt.getByRole("button", { name: "Review interrupted attempt" }).click();
     const retry = attempt.getByRole("button", { name: "Authorize safe retry" });
@@ -472,7 +485,7 @@ test("interrupted watcher recovery requires review and confirmation and preserve
     await attempt.getByRole("checkbox", { name: "I reviewed the ticket, existing work and limitations." }).check();
     await expect(retry).toBeEnabled();
     await retry.click();
-    await expect(attempt).toContainText("Reviewed recovery - retry");
+    await expect(page.locator("#watcher-attempts > tr > td").nth(2)).toHaveText("Reviewed recovery - retry");
     await expect(attempt).toContainText("Recovery decision: retry");
     expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
     await page.reload();
@@ -2691,7 +2704,7 @@ test("dashboard exposes explicit pull-request approval when validation is comple
   expect(submittedInput.details).toContain("explicitly approve");
 });
 
-async function mockChatWorkspace(page, { job = null, queue = [], held = [], history = [], environments,
+async function mockChatWorkspace(page, { job = null, queue = [], history = [], environments,
   profileReady = true, draftOnlyReady = false, ppeWriteConfigured = false } = {}) {
   await page.route("**/api/status", (route) => route.fulfill({
     contentType: "application/json",
@@ -2700,7 +2713,7 @@ async function mockChatWorkspace(page, { job = null, queue = [], held = [], hist
       readiness: { repositoryReady: true, profileReady, draftOnlyReady, ppeWriteConfigured,
         repository: "C:\\code\\alpha", profileName: "Alpha workspace", environments },
       runtime: { name: "copilot", supportsModelSelection: true, defaultModel: "" },
-      job, queue, held, history
+      job, queue, held: [], history
     })
   }));
   await page.route("**/api/repositories", (route) => route.fulfill({
@@ -2724,8 +2737,6 @@ test("chat workspace defaults to a compact composer and local repository navigat
   await page.goto(baseUrl);
   await expect(page.locator("#workspace-title")).toHaveText("Alpha workspace");
   await expect(page.locator("#chat-welcome")).toBeVisible();
-  await expect(page.locator("#queue-empty")).toHaveText("No jobs yet. Start a request to add a job.");
-  await expect(page.locator("#queue-grid")).toBeHidden();
   await expect(page.locator("#run-options")).not.toHaveAttribute("open");
   await expect(page.locator("#details-group")).not.toHaveAttribute("open");
   await expect(page.locator("#connections-group")).not.toHaveAttribute("open");
@@ -2813,21 +2824,15 @@ test("chat keeps manual permissions inline and mobile layout within the viewport
   await page.screenshot({ path: test.info().outputPath("chat-workspace-mobile.png"), fullPage: true });
 });
 
-test("queue grid shows separate text statuses and selecting a row never starts a job", async ({ page }) => {
+test("queue navigation opens the inspector at the first card without changing jobs", async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") { posts++; } });
   const job = { id: "queue-current", request: "Synthetic blocked browser check",
     requestType: "bug-fix", mode: "playwright-only", status: "blocked",
     stages: {}, bugs: [], logs: [], activity: [], canResume: false };
-  const queue = [{
+  await mockChatWorkspace(page, { job, queue: [{
     id: "queue-next", request: "Synthetic next bug", requestType: "bug-fix",
     mode: "playwright-only", status: "queued", position: 1, bugCount: 1
-  }];
-  const heldJob = { ...job, id: "queue-held", request: "Synthetic held bug", status: "held" };
-  const held = [heldJob];
-  await mockChatWorkspace(page, { job, queue, held, history: [{
-    ...job, id: "queue-passed", request: "<img src=x onerror=alert(1)> Synthetic completed bug",
-    status: "passed"
   }] });
   await page.goto(baseUrl);
   await expect(page.locator("#queue-nav-count")).toHaveText("1");
@@ -2836,35 +2841,48 @@ test("queue grid shows separate text statuses and selecting a row never starts a
   await expect(page.locator("#details-group")).toHaveAttribute("open", "");
   await expect(page.locator("#queue-panel")).toBeInViewport();
   await expect(page.locator("#details-view > :first-child")).toHaveAttribute("id", "queue-panel");
-  const grid = page.getByRole("table", { name: "Job queue and recent jobs" });
-  await expect(grid.getByRole("columnheader")).toHaveText([
-    "Position", "Status", "Type", "Bugs", "Request"
-  ]);
-  const current = grid.getByRole("row").filter({ hasText: "Synthetic blocked browser check" });
-  await expect(current.getByRole("cell").nth(0)).toHaveText("Current");
-  await expect(current.getByRole("cell").nth(1)).toHaveText("blocked");
-  const waiting = grid.getByRole("row").filter({ hasText: "Synthetic next bug" });
-  await expect(waiting.getByRole("cell").nth(0)).toHaveText("Waiting #1");
-  await expect(waiting.getByRole("cell").nth(1)).toHaveText("queued");
-  await expect(waiting.getByRole("cell").nth(3)).toHaveText("1");
-  const completed = grid.getByRole("row").filter({ hasText: "Synthetic completed bug" });
-  await expect(completed.getByRole("cell").nth(1)).toHaveText("passed");
-  await expect(completed.getByRole("img")).toHaveCount(0);
-  const heldRow = grid.getByRole("row").filter({ hasText: "Synthetic held bug" });
-  await expect(heldRow.getByRole("cell").nth(1)).toHaveText("held");
-  queue.push({ ...heldJob, status: "queued", position: 2, bugCount: 0 });
-  held.length = 0;
-  await expect(heldRow.getByRole("cell").nth(0)).toHaveText("Waiting #2");
-  await expect(heldRow.getByRole("cell").nth(1)).toHaveText("queued");
-  await waiting.getByRole("button").click();
-  await expect(waiting.getByRole("button")).toHaveAttribute("aria-current", "true");
-  await expect(page.locator("#job-status")).toContainText("queued");
-  await expect(page.locator("#job-input-submit")).toBeHidden();
-  await expect(page.getByRole("button", { name: "Remove from queue" })).toBeVisible();
+  await expect(page.locator("#queue-list")).toHaveJSProperty("tagName", "OL");
+  await expect(page.locator("#queue-list > li")).toHaveCount(2);
+  await expect(page.locator("#queue-list")).toContainText("Waiting #1");
+  await expect(page.locator("#queue-list")).toContainText("Synthetic next bug");
+  expect(posts).toBe(0);
+});
+
+test("watcher grid handles empty history, unavailable titles and stale responses without executing work", async ({ page }) => {
+  let posts = 0;
+  let unavailable = false;
+  const body = { status: "idle", pollSeconds: 300, attempts: [], titleWarning: "" };
+  await mockChatWorkspace(page);
+  await page.route("**/api/ticket-automation", route => route.fulfill({
+    status: unavailable ? 503 : 200,
+    contentType: "application/json",
+    body: JSON.stringify(unavailable ? { error: "Synthetic watcher history unavailable" } : body)
+  }));
+  page.on("request", request => { if (request.method() === "POST") { posts++; } });
+  await page.goto(baseUrl);
+  await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+  await expect(page.locator("#watcher-empty")).toBeVisible();
+  const grid = page.getByRole("table", { name: "Watcher jobs" });
+  await expect(grid).toBeHidden();
+  body.titleWarning = "Synthetic titles could not be loaded.";
+  body.attempts.push({
+    id: "legacy-attempt", workItemId: 7, title: "", status: "complete", outcome: "analysis",
+    workItemUrl: "https://dev.azure.com/example-org/Example/_workitems/edit/7",
+    historyAvailable: false, checks: [], activity: []
+  });
+  await expect(grid).toBeVisible({ timeout: 10000 });
+  const row = grid.locator("tbody > tr");
+  await expect(row.locator(".watcher-title")).toHaveText("Title unavailable");
+  await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - analysis");
+  await expect(page.locator("#watcher-status")).toContainText(body.titleWarning);
+  await expect(page.locator("#watcher-empty")).toBeHidden();
   await page.setViewportSize({ width: 390, height: 844 });
+  await row.getByRole("cell").nth(2).scrollIntoViewIfNeeded();
+  await expect(row.getByRole("cell").nth(2)).toBeInViewport();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await waiting.getByRole("cell").nth(1).scrollIntoViewIfNeeded();
-  await expect(waiting.getByRole("cell").nth(1)).toBeInViewport();
+  unavailable = true;
+  await expect(page.locator("#watcher-status")).toContainText("Previously displayed history may be stale.", { timeout: 10000 });
+  await expect(row.locator(".watcher-title")).toHaveText("Title unavailable");
   expect(posts).toBe(0);
 });
 

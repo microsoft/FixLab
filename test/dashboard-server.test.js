@@ -4103,9 +4103,11 @@ test("dashboard reports readiness and serves only known static assets", async ()
     assert.match(pageText, /id="close-workspace-tools"[^>]*>Back to chat<\/button>/);
     assert.match(pageText, /Secrets, external access and publication still need review/);
     assert.match(pageText, /proceeds autonomously/);
-    assert.match(pageText, /<table aria-label="Job queue and recent jobs">/);
+    assert.match(pageText, /<table aria-label="Watcher jobs">/);
     assert.match(pageText, /<th scope="col">Status<\/th>/);
-    assert.match(pageText, /<tbody id="queue-list"><\/tbody>/);
+    assert.match(pageText, /<th scope="col">Title<\/th>/);
+    assert.match(pageText, /<tbody id="watcher-attempts"><\/tbody>/);
+    assert.match(pageText, /<ol id="queue-list"><\/ol>/);
 
     const traversal = await fetch(`${url}/..%2fpackage.json`);
     assert.equal(traversal.status, 404);

@@ -2305,10 +2305,7 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
     rememberJob(job);
   }
   for (const job of queue) {
-    const observed = observedJobs.get(job.id);
-    if (observed) {
-      observedJobs.set(job.id, { ...observed, ...job, status: job.status ?? "queued" });
-    } else {
+    if (!observedJobs.has(job.id)) {
       observedJobs.set(job.id, queuedJobView(job));
     }
   }
@@ -2339,11 +2336,9 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
     `${queue.length} waiting · ${held.length} held · ${recentJobs.length} recent`;
   jobLifecycleStatus.textContent =
     `${queue.length} waiting · ${held.length} held · ${recentJobs.length} recent`;
-  document.querySelector("#queue-grid").hidden = entries.length === 0;
-  document.querySelector("#queue-empty").hidden = entries.length > 0;
   queueList.replaceChildren();
   for (const { job, label } of entries) {
-    const item = document.createElement("tr");
+    const item = document.createElement("li");
     item.className = "job-row";
     if (expandedJobIds.has(job.id)) {
       item.classList.add("expanded");
@@ -2351,33 +2346,22 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "job-selector";
-    const selected = (selectedJobId ?? currentJob?.id) === job.id;
-    if (selected) {
+    if ((selectedJobId ?? currentJob?.id) === job.id) {
       button.classList.add("selected");
-      button.setAttribute("aria-current", "true");
     }
-    const bugCount = job.bugCount ?? job.bugs?.length ?? 0;
-    button.setAttribute(
-      "aria-label",
-      `${label} · ${job.status} · ${job.requestType} · ${bugCount} bug(s) · ${job.request}`
-    );
-    for (const value of [label, job.status, job.requestType, bugCount]) {
-      const cell = document.createElement("td");
-      cell.textContent = String(value);
-      item.append(cell);
-    }
-    const requestCell = document.createElement("td");
-    requestCell.className = "job-request-cell";
+    const summary = document.createElement("strong");
+    summary.textContent = `${label} · ${job.status} · ${job.requestType}`;
     const details = document.createElement("span");
     details.className = "job-request";
-    details.textContent = job.request;
-    button.append(details);
+    details.textContent =
+      ` · ${job.bugCount ?? job.bugs?.length ?? 0} bug(s) · ${job.request}`;
+    button.append(summary, details);
     button.addEventListener("click", () => {
       selectJob(job.id);
       renderQueue(currentJob, queue, held, history);
     });
 
-    requestCell.append(button);
+    item.append(button);
     if (job.request.length > 160) {
       const expandButton = document.createElement("button");
       const expanded = expandedJobIds.has(job.id);
@@ -2404,9 +2388,8 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
           `${nextExpanded ? "Collapse" : "Expand"} bug text for ${label}`
         );
       });
-      requestCell.append(expandButton);
+      item.append(expandButton);
     }
-    item.append(requestCell);
     queueList.append(item);
   }
   renderRepositoryMemory();
@@ -2760,6 +2743,8 @@ async function refreshWatcherHistory() {
     watcherStatus.textContent = labels[body.status] ??
       `Last reported: ${body.status} at ${reported}. Scan interval: ${body.pollSeconds} seconds. New discovery: assigned to signed-in Azure DevOps user (@Me). ${body.message || ""}`;
     if (body.titleWarning) { watcherStatus.textContent += ` ${body.titleWarning}`; }
+    document.querySelector("#watcher-grid").hidden = body.attempts.length === 0;
+    document.querySelector("#watcher-empty").hidden = body.attempts.length > 0;
     watcherAttempts.replaceChildren();
     const link = (text, url) => {
       if (!/^https:\/\/dev\.azure\.com\//u.test(url)) { throw new Error("Recorded watcher link is invalid."); }
@@ -2771,7 +2756,14 @@ async function refreshWatcherHistory() {
       return element;
     };
     for (const attempt of body.attempts) {
-      const row = document.createElement("li");
+      const row = document.createElement("tr");
+      const workItem = document.createElement("td");
+      workItem.append(link(String(attempt.workItemId), attempt.workItemUrl));
+      const titleCell = document.createElement("td");
+      const title = document.createElement("span");
+      title.className = "watcher-title";
+      title.textContent = attempt.title || "Title unavailable";
+      titleCell.append(title);
       const detail = document.createElement("details");
       detail.open = expandedWatcherAttempts.has(attempt.id);
       detail.addEventListener("toggle", () => {
@@ -2788,7 +2780,10 @@ async function refreshWatcherHistory() {
       } else if (body.status === "blocked" || body.status === "stopped") {
         status = `Review required - last recorded ${attempt.status}`;
       }
-      heading.textContent = `Work item ${attempt.workItemId} - ${status}`;
+      const statusCell = document.createElement("td");
+      statusCell.textContent = status;
+      heading.textContent = "Details";
+      heading.setAttribute("aria-label", `Details for work item ${attempt.workItemId}`);
       const links = document.createElement("p");
       links.append(link(`ADO ${attempt.workItemId}${attempt.title ? ` - ${attempt.title}` : ""} (work item and Discussion)`, attempt.workItemUrl));
       if (attempt.pullRequestUrl) {
@@ -3022,7 +3017,8 @@ async function refreshWatcherHistory() {
         omitted.textContent = `${attempt.omittedActivity} earlier activity update(s) omitted by the history limit.`;
         detail.append(omitted);
       }
-      row.append(detail);
+      titleCell.append(detail);
+      row.append(workItem, titleCell, statusCell);
       watcherAttempts.append(row);
     }
   } catch (error) {

@@ -88,7 +88,19 @@
           <section aria-label="Tagged-ticket watcher history">
             <p id="watcher-status" class="guidance" role="status">Loading watcher history.</p>
             <p class="guidance">Read-only monitoring. Opening this view does not start or retry work, approve access, or run tests. Last reported status is not a process health check.</p>
-            <ol id="watcher-attempts"></ol>
+            <p id="watcher-empty" class="guidance" hidden>No watcher jobs recorded yet.</p>
+            <div id="watcher-grid" class="table-scroll" role="region" aria-label="Watcher job history" tabindex="0" hidden>
+              <table aria-label="Watcher jobs">
+                <thead>
+                  <tr>
+                    <th scope="col">Work item</th>
+                    <th scope="col">Title</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="watcher-attempts"></tbody>
+              </table>
+            </div>
             <p class="guidance">Finished means feedback was recorded, not that tests passed. Check and scenario messages are agent-reported, not independent runner proof. Detailed history is bounded to recent attempts; older attempts may have basic status only. See each work item's Discussion for published feedback.</p>
           </section>
         </details>
@@ -406,21 +418,7 @@
             <h3>Running queue</h3>
             <span id="queue-count"></span>
           </div>
-          <p id="queue-empty" class="guidance" hidden>No jobs yet. Start a request to add a job.</p>
-          <div id="queue-grid" class="table-scroll" role="region" aria-label="Job queue" tabindex="0" hidden>
-            <table aria-label="Job queue and recent jobs">
-              <thead>
-                <tr>
-                  <th scope="col">Position</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Type</th>
-                  <th scope="col">Bugs</th>
-                  <th scope="col">Request</th>
-                </tr>
-              </thead>
-              <tbody id="queue-list"></tbody>
-            </table>
-          </div>
+          <ol id="queue-list"></ol>
         </div>
         <div class="job-controls">
           <div class="section-heading">
