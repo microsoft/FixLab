@@ -26,6 +26,9 @@ export function configuredAnalysisEvidence(repository, profile, environment) {
     }
     ids.add(source.id);
     const selected = validateTargetEnvironment(source.environment, environments);
+    if (/^live$/iu.test(selected)) {
+      throw new Error("Incident evidence helpers require an explicitly configured non-production environment.");
+    }
     const helper = apiSessionHelper(repository, source.helper);
     return {
       id: source.id, kind: source.kind, environment: selected, helper: source.helper,

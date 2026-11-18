@@ -119,6 +119,10 @@ test("incident evidence discovers environment-bound source helpers without execu
     assert.throws(() => configuredAnalysisEvidence(fixture.repository, {
       ...profile, analysis: { evidenceSources: [source, source] }
     }, "dev"), /unique/);
+    assert.throws(() => configuredAnalysisEvidence(fixture.repository, {
+      ...profile, environments: ["dev", "live"],
+      analysis: { evidenceSources: [{ ...source, environment: " live " }] }
+    }, "live"), /non-production/);
     for (const path of [
       "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
       "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
