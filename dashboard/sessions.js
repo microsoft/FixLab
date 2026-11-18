@@ -51,14 +51,26 @@ export function createSessionRegistry(repositoryIdentity) {
   }
 
   async function inspectOwner(record, scopeId = key, timeoutMs = 1500) {
-    const response = await fetch(`${record.url}/api/session`, {
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: "error"
-    });
-    if (!response.ok) {
-      throw new Error(`owner returned HTTP ${response.status}`);
+    const signal = AbortSignal.timeout(timeoutMs);
+    const readSession = async () => {
+      const response = await fetch(`${record.url}/api/session`, {
+        signal,
+        redirect: "error"
+      });
+      if (!response.ok) {
+        throw new Error(`owner returned HTTP ${response.status}`);
+      }
+      return response.json();
+    };
+    let session;
+    try {
+      session = await readSession();
+    } catch (error) {
+      if (signal.aborted || !["ECONNRESET", "UND_ERR_SOCKET"].includes(error.cause?.code)) {
+        throw error;
+      }
+      session = await readSession();
     }
-    const session = await response.json();
     if (session.id !== record.id || session.scopeId !== scopeId) {
       throw new Error("the port no longer belongs to this repository's FixLab session");
     }

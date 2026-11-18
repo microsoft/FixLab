@@ -75,6 +75,58 @@ test("scoped checkout discovery waits for a slow live owner but still rejects a 
   }
 });
 
+test("owner discovery retries one disconnected read but never trusts a replacement or retries a control", async () => {
+  const repository = join(tmpdir(), `fixlab-disconnected-owner-${randomUUID()}`);
+  const registry = createSessionRegistry(repository);
+  let reads = 0;
+  let controls = 0;
+  let mode = "recover";
+  const server = createServer((request, response) => {
+    if (request.method === "POST") {
+      controls += 1;
+      request.socket.destroy();
+      return;
+    }
+    reads += 1;
+    if (mode === "disconnected" || (mode !== "control" && mode !== "unavailable" && reads === 1)) {
+      request.socket.destroy();
+      return;
+    }
+    response.setHeader("Content-Type", "application/json");
+    response.statusCode = mode === "unavailable" ? 503 : 200;
+    response.end(JSON.stringify({
+      id: mode === "replacement" ? randomUUID() : registry.id,
+      scopeId: registry.scopeId, repository
+    }));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  registry.register(`http://127.0.0.1:${server.address().port}`);
+  try {
+    const options = { scopeIds: [registry.scopeId] };
+    const recovered = await registry.repositories(options);
+    assert.equal(recovered.unavailableCount, 0);
+    assert.equal(recovered.repositories[0].id, registry.id);
+    assert.equal(reads, 2);
+    for (const next of ["replacement", "disconnected", "unavailable"]) {
+      mode = next;
+      reads = 0;
+      const rejected = await registry.repositories(options);
+      assert.deepEqual(rejected.repositories, []);
+      assert.equal(rejected.unavailableCount, 1);
+      assert.equal(reads, next === "unavailable" ? 1 : 2);
+    }
+    mode = "control";
+    await assert.rejects(registry.control(registry.id, {
+      resource: "all", action: "shutdown", confirmed: true
+    }));
+    assert.equal(controls, 1);
+  } finally {
+    registry.unregister();
+    server.closeIdleConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test("repository catalog discovers verified local owners without starting or controlling jobs", async () => {
   const repositories = [join(tmpdir(), `fixlab-catalog-${randomUUID()}`),
     join(tmpdir(), `fixlab-catalog-${randomUUID()}`)];
