@@ -53,7 +53,7 @@ function ticketFixture() {
   writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
   const plan = ticketAutomationPlan(repository, profile, { environment: "dev" });
   const item = {
-    id: 42, revision: 1, project: plan.project, areaPath: plan.areaPaths[0], tags: "Other; FixLab", workItemType: "Bug", state: "Active",
+    id: 42, revision: 1, assignedToCurrentUser: true, project: plan.project, areaPath: plan.areaPaths[0], tags: "Other; FixLab", workItemType: "Bug", state: "Active",
     title: "Name validation", description: "Accept plus and reject exclamation.",
     comments: [{ id: 1, text: "Check the create-name flow." }]
   };
@@ -134,6 +134,32 @@ test("incident evidence discovers environment-bound source helpers without execu
   } finally { fixture.cleanup(); }
 });
 
+test("watcher ignores unassigned or other-user items even if discovery returns their IDs", async () => {
+  for (const assigned of [false, undefined]) {
+    const fixture = ticketFixture();
+    try {
+      fixture.item.assignedToCurrentUser = assigned;
+      await fixture.run({ execute() { assert.fail("Only current-user assignments may execute."); } });
+      assert.equal(fixture.posted.length, 0);
+      assert.equal(readTicketAutomationHistory(fixture.repository).attempts.length, 0);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("watcher reassignment during execution retains findings without posting feedback", async () => {
+  const fixture = ticketFixture();
+  try {
+    await assert.rejects(fixture.run({ execute: async () => {
+      fixture.item.assignedToCurrentUser = false;
+      return { outcome: "analysis", summary: "Retain the investigation for its owner to review." };
+    } }), /changed during execution/);
+    assert.equal(fixture.posted.length, 0);
+    const attempt = readTicketAutomationHistory(fixture.repository).attempts[0];
+    assert.equal(attempt.status, "running");
+    assert.match(attempt.summary, /Retain the investigation/);
+  } finally { fixture.cleanup(); }
+});
+
 test("completed watcher handoff refreshes scoped evidence without mutating or executing the watcher", async () => {
   const fixture = ticketFixture();
   try {
@@ -155,6 +181,9 @@ test("completed watcher handoff refreshes scoped evidence without mutating or ex
     assert.notEqual((await review()).reviewToken, initial.reviewToken);
     fixture.item.workItemType = "User Story";
     assert.equal((await review()).jobInput.requestType, "feature");
+    fixture.item.assignedToCurrentUser = false;
+    await assert.rejects(review(), /current-user assignment/);
+    fixture.item.assignedToCurrentUser = true;
     fixture.item.areaPath = "Example Project\\Another Team";
     await assert.rejects(review(), /outside the recorded/);
     fixture.item.areaPath = fixture.plan.areaPaths[0];
@@ -187,6 +216,7 @@ test("ticket automation binds the Git origin, tag, branch, environment and expli
   try {
     const { repository, profile, plan } = fixture;
     assert.equal(plan.tag, "FixLab");
+    assert.equal(plan.assignee, "@Me");
     assert.equal(plan.project, "Example Project");
     assert.equal(plan.outcome, "draft-pr-or-discussion");
     const copilot = ticketAutomationPlan(repository, profile, { environment: "dev", runtime: "copilot" });
@@ -1137,6 +1167,7 @@ test("ADO automation client confines reads and feedback to the configured projec
   let draft = true;
   let linkedTicketId = "42";
   let linkedRepository = "repo-id";
+  let assignedItems = [{ id: 42 }];
   const client = createAzureDevOpsTicketClient({
     profile: { azureDevOps: { organization: "example-org", project: "Example Project" } },
     tokenProvider: () => "private-test-token",
@@ -1155,6 +1186,10 @@ test("ADO automation client confines reads and feedback to the configured projec
         }] };
       }
       if (url.includes("/wiql?")) {
+        assert.match(options.body.query, /\[System\.AssignedTo\] = @Me/);
+        if (options.body.query.includes("[System.Id] = 42")) {
+          return { workItems: assignedItems };
+        }
         assert.match(options.body.query, /Tags.*CONTAINS 'FixLab'/);
         return { workItems: [{ id: 42 }] };
       }
@@ -1175,6 +1210,12 @@ test("ADO automation client confines reads and feedback to the configured projec
   });
   assert.deepEqual(await client.findTagged("FixLab", ["Example Project\\Application"]), [42]);
   assert.equal((await client.load(42)).workItemType, "Feature");
+  assert.equal((await client.load(42)).assignedToCurrentUser, true);
+  assignedItems = [];
+  assert.equal((await client.load(42)).assignedToCurrentUser, false);
+  assignedItems = [{ id: 43 }];
+  await assert.rejects(client.load(42), /exact work item's current-user assignment/);
+  assignedItems = [{ id: 42 }];
   assert.deepEqual(await client.loadTitles([42]), { 42: "Synthetic title" });
   await assert.rejects(client.loadTitles([43]), /exact recorded/);
   assert.equal(await client.hasComment(42, "[FixLab automation 42:abc]"), false);

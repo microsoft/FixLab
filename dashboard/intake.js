@@ -770,7 +770,7 @@ export function createAzureDevOpsTicketClient({
       const quote = value => value.replaceAll("'", "''");
       const result = await request("wit/wiql?$top=21&api-version=7.1", {
         method: "POST",
-        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(target.project)}' AND (${areaPaths.map(path => `[System.AreaPath] UNDER '${quote(path)}'`).join(" OR ")}) AND [System.Tags] CONTAINS '${quote(tag)}' AND [System.WorkItemType] IN ('Bug', 'User Story', 'Feature', 'Product Backlog Item') AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Resolved') ORDER BY [System.ChangedDate] DESC` }
+        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(target.project)}' AND [System.AssignedTo] = @Me AND (${areaPaths.map(path => `[System.AreaPath] UNDER '${quote(path)}'`).join(" OR ")}) AND [System.Tags] CONTAINS '${quote(tag)}' AND [System.WorkItemType] IN ('Bug', 'User Story', 'Feature', 'Product Backlog Item') AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Resolved') ORDER BY [System.ChangedDate] DESC` }
       });
       if (!Array.isArray(result?.workItems) || result.workItems.length > 20) {
         throw new Error("Ticket automation requires at most 20 eligible items; narrow the configured tag before continuing.");
@@ -785,6 +785,15 @@ export function createAzureDevOpsTicketClient({
       if (item.commentsWarning) {
         throw new Error(item.commentsWarning);
       }
+      const assignment = await request("wit/wiql?$top=2&api-version=7.1", {
+        method: "POST",
+        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${target.project.replaceAll("'", "''")}' AND [System.Id] = ${id} AND [System.AssignedTo] = @Me` }
+      });
+      if (!Array.isArray(assignment?.workItems) || assignment.workItems.length > 1 ||
+          assignment.workItems.some(value => value.id !== id)) {
+        throw new Error("Azure DevOps did not verify the exact work item's current-user assignment.");
+      }
+      item.assignedToCurrentUser = assignment.workItems.length === 1;
       delete item.screenshots;
       return item;
     },

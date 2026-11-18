@@ -69,7 +69,7 @@ test("watcher monitoring exposes only this repository's recorded history and nev
   });
   writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
   const plan = ticketAutomationPlan(repository, profile, { environment: "dev" });
-  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+  const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
     tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic fixture", comments: [] };
   await watchTickets({
     repository, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
@@ -163,7 +163,7 @@ test("reviewed watcher handoff preserves the active job, canonical intake, permi
   writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
   git(repository, ["add", "."]);
   git(repository, ["commit", "--quiet", "-m", "Reviewed fixture profile"]);
-  const item = { id: 42, revision: 1, project: "Example", areaPath: "Example\\Application",
+  const item = { id: 42, revision: 1, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
     tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic handoff", comments: [] };
   const ticketClient = {
     findTagged: async () => [42], load: async () => structuredClone(item),

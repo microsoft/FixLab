@@ -1901,7 +1901,7 @@ async function main(args) {
     });
     console.log(JSON.stringify({
       organization: plan.organization, project: plan.project, repository: plan.repository,
-      tag: plan.tag, areaPaths: plan.areaPaths, targetBranch: plan.targetBranch, environment: plan.environment,
+      tag: plan.tag, assignee: plan.assignee, areaPaths: plan.areaPaths, targetBranch: plan.targetBranch, environment: plan.environment,
       runtime: parsed.runtime, model: parsed.model || null,
       migrations: plan.migrations,
       pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,

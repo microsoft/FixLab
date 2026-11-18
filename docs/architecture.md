@@ -8,9 +8,14 @@ installation and usage guides.
 FixLab separates orchestration from repository-specific behavior.
 
 The optional `fixlab watch` entry point polls explicitly tagged ADO work items
+assigned to the authenticated Azure DevOps user (`@Me`)
 under reviewed application area paths. It derives repository authority from the
 checkout's Git origin, requires a selected non-production environment, and uses
 the owned Agency or Copilot CLI executor for one sequential investigation per polling pass.
+Discovery filters assignment server-side; each subsequent ticket load rechecks
+`@Me` before eligibility, including execution, feedback, recovery and handoff.
+Unassigned/other-user tickets do not execute; reassignment retains existing
+findings and ownership barriers instead of silently publishing or clearing them.
 The agent proposes either a draft PR or analysis; the watcher independently
 verifies draft/repository/branch/work-item linkage and owns escaped Discussion
 feedback. Its Git-private journal records execution before launch and feedback

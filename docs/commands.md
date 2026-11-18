@@ -756,7 +756,14 @@ fixlab watch "C:\source\application" --runtime agency --environment dev --yes --
 ```
 
 Adding `FixLab` to an active Bug, User Story, Feature or Product Backlog Item
-in a configured area or descendant makes it eligible at the next poll.
+assigned to the signed-in Azure DevOps user, in a configured area or descendant,
+makes it eligible at the next poll. The query uses `[System.AssignedTo] = @Me`:
+it follows the ADO identity authenticating the watcher, not Windows or GitHub
+login, and does not hard-code an alias. Unassigned and other users' items are
+excluded. Assignment is freshly verified on ticket loads, including before
+execution/feedback and during recovery or handoff. Reassignment stops further
+watcher work on that ticket; it does not erase its journal or an interrupted
+ownership reservation. Existing history is preserved for audit.
 The first poll includes existing eligible tagged items. Only one investigation
 runs per poll. A justified fix produces a work-item-linked **draft PR** plus
 Discussion feedback; otherwise the existing ticket receives diagnosis,

@@ -510,6 +510,10 @@ investigation, review `pullRequests.defaultTargetBranch`, exact
 `ticketAutomation.areaPaths`, the trigger tag and a configured non-production
 environment. Install and sign in to the selected runtime separately and verify
 the local Azure CLI identity has the required ADO access.
+The watcher selects only work items assigned to that authenticated ADO user
+(`@Me`), with the reviewed tag and area. It does not use a hard-coded alias,
+the Windows login or the runtime's GitHub account. Unassigned and other users'
+items are excluded; assignment is rechecked before work continues.
 
 ```powershell
 fixlab watch $Repo --runtime copilot --environment dev

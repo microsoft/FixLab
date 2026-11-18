@@ -2724,7 +2724,7 @@ async function refreshWatcherHistory() {
     };
     const reported = body.updatedAt ? new Date(body.updatedAt).toLocaleString() : "time not recorded";
     watcherStatus.textContent = labels[body.status] ??
-      `Last reported: ${body.status} at ${reported}. Scan interval: ${body.pollSeconds} seconds. ${body.message || ""}`;
+      `Last reported: ${body.status} at ${reported}. Scan interval: ${body.pollSeconds} seconds. New discovery: assigned to signed-in Azure DevOps user (@Me). ${body.message || ""}`;
     if (body.titleWarning) { watcherStatus.textContent += ` ${body.titleWarning}`; }
     watcherAttempts.replaceChildren();
     const link = (text, url) => {

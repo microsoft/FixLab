@@ -174,7 +174,7 @@ test("watcher jobs retain detailed evidence and prepare reviewed local handoffs 
     expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
   }
   const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
-  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+  const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
     tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture", comments: [] };
   let release;
   let launches = 0;
@@ -276,7 +276,7 @@ test("interrupted watcher recovery requires review and confirmation and preserve
     expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
   }
   const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
-  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+  const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
     tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic interrupted fixture", comments: [] };
   await expect(watchTickets({
     repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},

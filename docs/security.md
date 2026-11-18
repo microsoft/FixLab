@@ -28,11 +28,17 @@ operations. Treat every runner as privileged engineering infrastructure.
 - Optional ticket watching is an explicitly started local Agency or Copilot CLI session, not
   an onboarding side effect. Its fresh `--yes --allow-all-tools` consent binds
   the checkout's ADO origin, configured area subtrees, exact tag, target branch,
-  non-production environment and installed helper directory. This is a
+  authenticated-user assignment (`@Me`), non-production environment and installed helper directory. This is a
   privileged tool session, not an OS sandbox. Agent instructions restrict
   business access to existing read-only guards; tool grants do not technically
   prevent a privileged runtime from issuing other commands. Organization
   controls and normal human MFA remain authoritative.
+- Watcher assignment filtering uses the Azure DevOps authenticated identity,
+  never a configured display name, Windows user or GitHub identity. Discovery
+  requires `[System.AssignedTo] = @Me`; fresh ticket loads independently recheck
+  it before execution, feedback, recovery and handoff. Unknown or reassigned
+  ownership grants nothing. Prior journal history and interruption barriers
+  remain intact; this filter is not a new ADO authorization mechanism.
 - The watcher serializes investigations, stores a bounded Git-private
   revision journal, acquiring its exclusive lock before reading any state,
   and verifies draft status, repository,

@@ -47,12 +47,15 @@ establish application readiness or grant permissions.
 | Fix a bug or small enhancement | Scoped changes, validation evidence, and an authorized pull request |
 | Validate an existing change or PR | Findings and evidence without source or PR changes |
 | Run focused Playwright validation | Browser or configured API assertions without an implementation job |
-| Watch explicitly tagged ADO tickets (Agency or Copilot) | Reviewed local polling produces a draft PR or feedback on the existing ticket's Discussion |
+| Watch explicitly tagged ADO tickets assigned to you (Agency or Copilot) | Reviewed local polling produces a draft PR or feedback on the existing ticket's Discussion |
 
 The optional [tagged-ticket watcher](docs/commands.md#tagged-ticket-watcher)
 starts only after a separate scope review and explicit session approval.
 Onboarding supplies defaults, not automatic activation. IcM requires a linked
 ADO item; no direct IcM listener is installed.
+Assignment follows the signed-in Azure DevOps identity (`@Me`), not a hard-coded
+username, Windows account or GitHub login. Unassigned and other users' items
+are excluded; the tag and reviewed area filters still apply.
 Use **Watcher jobs** in the existing dashboard for attempt status,
 recorded activity, check outcomes and work-item/PR links. **Review interrupted
 attempt** offers separately confirmed recovery without editing private files.
