@@ -240,6 +240,7 @@
             <input name="allowAllTools" type="checkbox">
             Allow all tool commands for this run
           </label>
+          <p id="dev-api-policy" class="guidance" hidden>DEV API access is configured for this repository. Real reads and writes are enabled without per-job permission prompts; normal application sign-in is still required.</p>
           <p class="guidance">Privileged opt-in: reviewable tool requests can execute commands and change files without individual prompts. Organization policy, sensitive or escalated requests, sign-in, publication consent and required checks remain separate. This choice expires when the executor stops and is not inherited by retries or new jobs.</p>
           <fieldset>
             <legend>Intake</legend>

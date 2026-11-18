@@ -46,7 +46,7 @@ import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDe
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "./analysis-evidence.js";
-import { createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval, inspectPpeWriteConfiguration, isOriginWriteApproval } from "./dev-post.js";
+import { createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval, inspectDevApiConfiguration, inspectPpeWriteConfiguration, isOriginWriteApproval, persistentDevApiConfiguration } from "./dev-post.js";
 import { browserConfigurationErrors } from "./repository-setup.js";
 import { applyRepositorySettings, inspectRepositorySettings, localRepository, planRepositorySettings } from "./repository-settings.js";
 import { configuredLinkedApplications, resolveLinkedApplications } from "./linked-applications.js";
@@ -483,8 +483,18 @@ export function configuredTestSynthesis(profile, selectedMutationMode = "", allo
   const defaultReads = configuration?.enabled !== false && profile?.browserAutomation?.mode !== "api" &&
     !profile?.browserAutomation?.apiAuthentication?.productionDatabaseReadOnly &&
     configuration?.defaultDataSource === "synthetic-intercepted" && configuration?.mutationMode === "intercepted";
-  const devReadOnly = defaultReads && configuration?.devReadOnly === true && /^(dev|development)$/i.test(targetEnvironment);
+  const persistentDevWrites = /^dev$/i.test(targetEnvironment) &&
+    profile?.browserAutomation?.dataSafety?.devWrite?.allowAll === true &&
+    profile?.browserAutomation?.mode !== "api" &&
+    !profile?.browserAutomation?.apiAuthentication?.productionDatabaseReadOnly;
+  const devReadOnly = !persistentDevWrites && defaultReads && configuration?.devReadOnly === true && /^(dev|development)$/i.test(targetEnvironment);
   const ppeReadOnly = defaultReads && configuration?.ppeReadOnly === true && /^ppe$/i.test(targetEnvironment);
+  let source = testDataSources.has(configuration?.defaultDataSource)
+    ? configuration.defaultDataSource : "profile-defined";
+  if (devReadOnly || ppeReadOnly) { source = "non-production-read-only"; }
+  if (persistentDevWrites) { source = "non-production-approved"; }
+  const configuredMutationMode = mutationModes.has(configuration?.mutationMode)
+    ? configuration.mutationMode : "profile-defined";
   const result = {
     ...(devReadOnly ? { devReadOnly: true } : {}),
     ...(ppeReadOnly ? { ppeReadOnly: true } : {}),
@@ -493,12 +503,8 @@ export function configuredTestSynthesis(profile, selectedMutationMode = "", allo
       profile.browserAutomation.apiAuthentication?.productionDatabaseReadOnly === true
       ? { productionDatabaseReadOnly: true } : {}),
     enabled: configuration?.enabled !== false,
-    source: devReadOnly || ppeReadOnly ? "non-production-read-only" : testDataSources.has(configuration?.defaultDataSource)
-      ? configuration.defaultDataSource
-      : "profile-defined",
-    mutationMode: mutationModes.has(configuration?.mutationMode)
-      ? configuration.mutationMode
-      : "profile-defined",
+    source,
+    mutationMode: persistentDevWrites ? "approved-write" : configuredMutationMode,
     requireScenarioEvidence:
       configuration?.requireScenarioEvidence !== false,
     reported: false,
@@ -1101,6 +1107,7 @@ export function inspectRepository(repository) {
       };
     }
     const ppeWrites = inspectPpeWriteConfiguration(resolvedRepository);
+    const devApi = inspectDevApiConfiguration(resolvedRepository);
     return {
       repository: resolvedRepository,
       repositoryReady: true,
@@ -1108,6 +1115,8 @@ export function inspectRepository(repository) {
       unitTestsOnly: profile.validation?.liveTestsRequired === false,
       ppeWriteConfigured: ppeWrites.configured,
       ppeWriteSetupError: ppeWrites.error,
+      devApiConfigured: devApi.configured,
+      devApiSetupError: devApi.error,
       playwrightMode: profile.browserAutomation?.mode ?? "browser",
       profilePath,
       environments: configuredValidationEnvironments(profile),
@@ -2113,12 +2122,14 @@ function createExecutor({ command, packageRoot, buildInvocation, defaultModel = 
         }) + "\n"
       };
     }
+    const executorEnvironment = { BROWSER: "none", FIXLAB_HELPER_ROOT: packageRoot,
+      FIXLAB_REPOSITORY: repository, FIXLAB_DEV_API_ENVIRONMENT: targetEnvironment ?? "" };
     const containment = process.platform === "win32"
-      ? spawnWindowsExecutor({ executable, args: invocation.args, repository })
+      ? spawnWindowsExecutor({ executable, args: invocation.args, repository, environment: executorEnvironment })
       : null;
     const child = containment?.child ?? spawn(executable, invocation.args, {
       cwd: repository,
-      env: { ...process.env, BROWSER: "none" },
+      env: { ...process.env, ...executorEnvironment },
       shell: false,
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"]
@@ -4212,7 +4223,13 @@ export function createDashboardServer({
       job.browserPreflightBlocked = false;
       job.browserSessionNotStarted = false;
     }
-    if (isOriginWriteApproval(job.postWriteApproval)) {
+    const persistentDevApi = /^dev$/iu.test(job.targetEnvironment ?? "") &&
+      !job.testEvidence.selectedMutationMode && persistentDevApiConfiguration(resolvedRepository);
+    if (persistentDevApi) {
+      job.postWriteApproval = createDevWriteApproval(resolvedRepository, "dev", job.id);
+      job.testEvidence.allowPostRequests = true;
+      prompt += `\nRepository-configured DEV API access permits real GET/HEAD/OPTIONS/POST/PUT/PATCH/DELETE on dataSafety.devWrite.origins without job permission prompts. Do not select read-only/intercepted mode or mock DEV requests. Use createDevBrowserContext from "${join(packageRoot, "dashboard", "dev-browser.js")}" for real React UI flows, with existing normal authentication. FIXLAB_HELPER_ROOT, FIXLAB_REPOSITORY and FIXLAB_DEV_API_ENVIRONMENT are available to tests. The guard blocks service workers, other API origins, redirects and automatic transport retries. Assert actual UI state and real API results, then call assertHealthy and close the context. API success alone is not scenario success. Native fixlab_dev_write is also available for API assertions. Profile/helper changes require restarting validation, not another job permission prompt. Never bypass these guards or expose credentials.`;
+    } else if (isOriginWriteApproval(job.postWriteApproval)) {
       configuredTestSynthesis(currentProfile, job.testEvidence.selectedMutationMode ?? "", true, job.targetEnvironment);
       const environment = job.postWriteApproval.environment;
       prompt += `\nThe user explicitly authorized all ${environment.toUpperCase()} API writes for this job on the reviewed dataSafety.${environment}Write HTTPS origins. Use fixlab_${environment}_write for POST, PUT, PATCH and DELETE without repeat confirmation or endpoint/test-record enumeration. This can change any record accessible to the signed-in account on those origins. The grant binds this job, ${environment.toUpperCase()} and the profile/helper revision, expires with execution, and stops after unsuccessful or ambiguous attempts. No other environments, redirects, retries, shell/browser-write substitutes or browser-guard bypass. Existing authentication is required. Report approved-write evidence; HTTP success alone is not scenario success.`;
@@ -5269,7 +5286,8 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
           body.gateId,
           body.repository,
           loadRepositoryProfile(resolvedRepository),
-          { jobId: job.id }
+          { jobId: job.id, environment: { FIXLAB_HELPER_ROOT: packageRoot,
+            FIXLAB_REPOSITORY: resolvedRepository, FIXLAB_DEV_API_ENVIRONMENT: job.targetEnvironment ?? "" } }
         );
         job.validationCompletion = completion.catch(() => {});
         job.refreshIdleWatchdog();

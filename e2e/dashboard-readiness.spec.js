@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer as createPortProbe } from "node:net";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 
 const packageRoot = process.env.FIXLAB_TEST_PACKAGE_ROOT ??
   fileURLToPath(new URL("..", import.meta.url));
@@ -18,6 +19,9 @@ const { createRuntimeRequestBridge, runtimePermissionPrompt, runtimeQuestionProm
 );
 const { ticketAutomationPlan, watchTickets, executeTicketAgent } = await import(
   pathToFileURL(join(packageRoot, "dashboard", "ticket-automation.js")).href
+);
+const { createDevBrowserContext } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "dev-browser.js")).href
 );
 let repository;
 let dashboard;
@@ -154,6 +158,122 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await dashboard.close();
   rmSync(repository, { recursive: true, force: true });
+});
+
+test("persistent DEV setup hides job permissions and forwards authenticated real browser CRUD traffic", async ({ page, browser }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-dev-http-ui-"));
+  const calls = [];
+  let record = { name: "Initial", status: "draft" };
+  const application = createServer((request, response) => {
+    if (request.url === "/") {
+      response.setHeader("Content-Type", "text/html");
+      response.end(`<!doctype html><html><body>
+        <button id="read">Read</button><button id="search">Search</button>
+        <button id="create">Create</button><button id="update">Update</button>
+        <button id="submit">Submit</button><button id="delete">Delete</button>
+        <output aria-label="Record"></output><script>
+        const actions = {read:['GET','/api/items'],search:['POST','/api/search'],
+          create:['POST','/api/items'],update:['PATCH','/api/items/1'],
+          submit:['PUT','/api/items/1/submit'],delete:['DELETE','/api/items/1']};
+        for(const [id,[method,url]] of Object.entries(actions)) {
+          document.getElementById(id).onclick = async () => {
+            const response = await fetch(url,{method,headers:{'Content-Type':'application/json'},
+              ...(method==='GET'?{}:{body:JSON.stringify({name:id==='update'?'Updated':'Created'})})});
+            document.querySelector('output').textContent = JSON.stringify(await response.json());
+          };
+        }
+        </script></body></html>`);
+      return;
+    }
+    if (!request.url.startsWith("/api/")) { response.writeHead(404); response.end(); return; }
+    response.setHeader("Content-Type", "application/json");
+    if (request.headers.cookie !== "fixture-auth=approved") {
+      response.writeHead(401);
+      response.end('{"error":"Normal application authentication required"}');
+      return;
+    }
+    calls.push({ method: request.method, path: request.url });
+    let body = "";
+    request.on("data", chunk => { body += chunk; });
+    request.on("end", () => {
+      if (request.url === "/api/items" && request.method === "POST") { record = { ...JSON.parse(body), status: "draft" }; }
+      if (request.method === "PATCH") { record = { ...record, ...JSON.parse(body) }; }
+      if (request.method === "PUT") { record.status = "submitted"; }
+      if (request.method === "DELETE") { record = null; }
+      response.end(JSON.stringify(record));
+    });
+  });
+  await new Promise(resolve => application.listen(0, "127.0.0.1", resolve));
+  const applicationUrl = `http://127.0.0.1:${application.address().port}`;
+  const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+  profile.environments = ["dev"];
+  profile.applications.frontend.port = application.address().port;
+  profile.applications.frontend.healthUrl = applicationUrl;
+  profile.browserAutomation.dataSafety.devWrite = {
+    allowAll: true, origins: ["https://api.dev.example.test"],
+    scope: "api://example-service/access", sessionHelper: "dev-session.mjs", browserProxyPaths: ["/api"]
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  writeFileSync(join(directory, "dev-session.mjs"), "export const syntheticFixture = true;");
+  const launches = [];
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {},
+    executor(input) {
+      launches.push(input);
+      let finish;
+      let stopped = false;
+      return {
+        completion: new Promise(resolve => { finish = resolve; }),
+        terminate() { stopped = true; finish({ code: null, signal: "SIGTERM" }); },
+        hasStopped: () => stopped
+      };
+    }
+  });
+  let session;
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await openWorkflowControls(page, address.url);
+    await expect(page.locator("#dev-api-policy")).toBeVisible();
+    await expect(page.locator("#allow-dev-writes")).toBeHidden();
+    await expect(page.locator("#allow-post-requests")).toBeHidden();
+    await page.locator('[name="mode"][value="validate-only"]').check();
+    await page.getByLabel("Bug or required enhancement").fill("Exercise authenticated DEV HTTP workflows.");
+    await page.getByRole("button", { name: "Start job", exact: true }).click();
+    await expect.poll(() => launches.length).toBe(1);
+    expect(launches[0].allowPostRequests).toBe(true);
+    expect(launches[0].postWriteApproval.mode).toBe("dev-origin");
+
+    session = await createDevBrowserContext(browser, {
+      repository: directory, targetEnvironment: "dev",
+      contextOptions: { storageState: { cookies: [{
+        name: "fixture-auth", value: "approved", domain: "127.0.0.1", path: "/",
+        expires: -1, httpOnly: true, secure: false, sameSite: "Lax"
+      }], origins: [] } }
+    });
+    const applicationPage = await session.context.newPage();
+    await applicationPage.goto(applicationUrl);
+    for (const [action, expected] of [["Read", "Initial"], ["Search", "Initial"],
+      ["Create", "Created"], ["Update", "Updated"], ["Submit", "submitted"], ["Delete", "null"]]) {
+      const count = calls.length;
+      await applicationPage.getByRole("button", { name: action, exact: true }).click();
+      await expect.poll(() => calls.length).toBe(count + 1);
+      await expect(applicationPage.getByLabel("Record")).toContainText(expected);
+    }
+    expect(record).toBe(null);
+    expect(calls.map(call => call.method)).toEqual(["GET", "POST", "POST", "PATCH", "PUT", "DELETE"]);
+    const evidence = await session.assertHealthy();
+    expect(evidence.requests.map(request => request.status)).toEqual([200, 200, 200, 200, 200, 200]);
+    expect(evidence.validationPassed).toBe(false);
+    expect(JSON.stringify(evidence)).not.toContain("fixture-auth");
+    await session.close();
+    session = null;
+  } finally {
+    await session?.context.close();
+    await instance.close();
+    await new Promise((resolve, reject) => application.close(error => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("editing from an isolated checkout follows the same job into its automatically prepared workspace", async ({ page }) => {

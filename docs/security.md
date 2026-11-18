@@ -245,7 +245,49 @@ it never approves, hides or replays the rejected operation. Managed escalation
 and sensitive-path requests do not offer recovery. Existing evidence and failed
 checks remain authoritative; a missing safe prerequisite still blocks the stage.
 
+### Persistent DEV browser and API access
+
+Repository settings can enable **real DEV API reads and all writes** once per
+repository. The reviewed profile sets `browserAutomation.dataSafety.devWrite.allowAll`
+to `true`, with the existing exact DEV HTTPS origins, API scope and `.mjs` session
+helper described below. No per-job write permission or confirmation checkbox is
+required. Disabling the setting revokes this persistent access. Profiles without
+the flag retain their existing policy; PPE, SIT/UAT and production do not inherit it.
+
+Configured DEV defaults become `non-production-approved`/`approved-write`, not
+read-only or intercepted. Native jobs receive a fresh revision-bound internal
+`fixlab_dev_write` capability; the user does not approve each job. Explicit
+stricter mode selections and API-only, unit-only and production restrictions remain
+authoritative. Normal sign-in/MFA is still required for each developer.
+
+Real React browser flows use the packaged `dashboard/dev-browser.js`
+`createDevBrowserContext` helper. It preserves the application's existing
+authenticated browser state and forwards actual HTTP responses, including search
+POST, create, update and submit operations. It does not create authentication,
+mock responses or turn successful HTTP calls into passed scenario evidence.
+Complete authentication before the guarded journey; foreign identity-provider
+navigation and token-refresh requests are not silently allowed. Renew legitimate
+authentication separately when needed. Do not record credentials, response bodies
+or credential-bearing traces.
+
+Service workers, unrelated API origins, API redirects and automatic transport
+retries are blocked; failed/ambiguous traffic stops subsequent writes. Profile or
+helper changes revoke an active context. Call `assertHealthy` and close the
+context, and assert actual UI/API outcomes separately. Guards require Playwright
+1.48+. They cover browser HTTP traffic, not direct `APIRequestContext`, arbitrary
+shell networking or a same-user OS sandbox. Do not override them with page routes.
+
+For applications using an owned loopback frontend proxy, optionally configure
+`devWrite.browserProxyPaths`, for example `["/api", "/odata"]`. Review the actual
+React development-server proxy first: these prefixes must target only the listed
+DEV origins, never another environment. This is an operator assertion, not
+upstream deployment attestation. Prefixes do not authorize other local services
+or arbitrary frontend paths. Loopback frontend hot-reload WebSockets and standard
+CRA/Vite health probes remain supported; external API WebSockets are not covered.
+
 ### Broad DEV and PPE API writes
+
+The following per-job controls apply when persistent DEV access is not enabled.
 
 Native Copilot dashboard jobs provide a separate, off-by-default **Allow all DEV
 API writes for this job** checkbox. Select DEV, leave explicit read-only or
@@ -269,7 +311,7 @@ precedence. The server revalidates configuration at grant creation and use;
 readiness is not a grant. Invalid optional PPE setup is reported, not enabled.
 Direct HTTP callers still need the exact browser origin and explicit write
 confirmation fields. These defaults never modify existing jobs or recover
-expired grants. DEV remains off by default.
+expired grants. DEV without persistent setup remains off by default.
 
 In `.github/fixlab/repository-profile.json`, declare DEV in `environments`, keep
 `productionAllowed: false`, and add this inside `browserAutomation.dataSafety`:

@@ -1185,6 +1185,8 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   }
   const result = spawnSync(runtime, invocation.args, {
     cwd: repository,
+    env: { ...process.env, FIXLAB_HELPER_ROOT: packageRoot,
+      FIXLAB_REPOSITORY: repository, FIXLAB_DEV_API_ENVIRONMENT: selectedEnvironment ?? "" },
     stdio: forwardsPrompt ? ["pipe", "inherit", "inherit"] : "inherit",
     input: forwardsPrompt ? invocation.input : undefined,
     shell: process.platform === "win32"

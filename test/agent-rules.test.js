@@ -13,6 +13,27 @@ import {
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 
+test("persistent DEV browser/API access stays aligned across runtimes without job permission prompts", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
+    const text = readFileSync(join(root, entryPoint), "utf8");
+    for (const contract of [/RUNTIME_RECOVERY_GUIDANCE/u, /FIXLAB_HELPER_ROOT/u,
+      /FIXLAB_REPOSITORY/u, /FIXLAB_DEV_API_ENVIRONMENT/u]) {
+      assert.match(text, contract, entryPoint);
+    }
+  }
+  for (const entryPoint of ["dashboard/workflow-policy.js", "agents/fixlab.md",
+    "com.github.copilot/agents/fixlab.agent.md", "templates/fixlab-autofix.agent.md",
+    ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/[`"]/gu, "").replace(/\s+/gu, " ");
+    for (const contract of [/dataSafety\.devWrite\.allowAll=true/u, /without per-job permission prompts/u,
+      /createDevBrowserContext/u, /browserProxyPaths/u, /assertHealthy/u,
+      /not scenario success/u, /Other environments retain their existing policy/u]) {
+      assert.match(text, contract, entryPoint);
+    }
+  }
+});
+
 test("automatic checkout assignment and shared-testing waits stay aligned across execution surfaces", () => {
   const root = join(testDirectory, "..");
   for (const entryPoint of [

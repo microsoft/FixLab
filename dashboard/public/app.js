@@ -190,6 +190,15 @@ function updatePostRequestsOption() {
   const available = postRuntimeAvailable && !postUiBlocked && ["dev", "sit", "uat", "ppe"].includes(environment) &&
     !document.querySelector('[name="testMutationMode"]').value;
   const key = available ? environment : "";
+  const persistentDevApi = environment === "dev" && repositoryReadiness?.devApiConfigured === true &&
+    !document.querySelector('[name="testMutationMode"]').value;
+  const devSetupError = environment === "dev" ? repositoryReadiness?.devApiSetupError : null;
+  const devPolicy = document.querySelector("#dev-api-policy");
+  devPolicy.hidden = !persistentDevApi && !devSetupError;
+  devPolicy.textContent = devSetupError ? `DEV API setup needs correction in repository settings: ${devSetupError}`
+    : "DEV API access is configured for this repository. Real reads and writes are enabled without per-job permission prompts; normal application sign-in is still required.";
+  allowDevWritesInput.closest("label").hidden = persistentDevApi;
+  allowPostRequestsInput.closest("label").hidden = persistentDevApi;
   if (postCheckboxEnvironment !== key) {
     allowPostRequestsInput.checked = false;
     allowDevWritesInput.checked = key === "ppe" && repositoryReadiness?.ppeWriteConfigured === true;

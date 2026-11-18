@@ -90,6 +90,22 @@ function capture() {
   };
 }
 
+test("owned structured commands inherit the selected DEV browser configuration context", async () => {
+  const repository = createRepository();
+  const output = capture();
+  try {
+    const status = await executeStructuredCommand({
+      repository, cwd: repository, stage: "validation", reuse: false,
+      timeoutSeconds: 30, command: process.execPath,
+      commandArgs: ["-e", "if(process.env.FIXLAB_DEV_API_ENVIRONMENT!=='dev'||process.env.FIXLAB_REPOSITORY!==process.cwd()||process.env.FIXLAB_HELPER_ROOT!=='fixture-helper-root')process.exit(3);"]
+    }, { stdout: output.stream, stderr: output.stream, environment: {
+      FIXLAB_REPOSITORY: repository, FIXLAB_HELPER_ROOT: "fixture-helper-root",
+      FIXLAB_DEV_API_ENVIRONMENT: "dev"
+    } });
+    assert.equal(status, 0, output.text());
+  } finally { rmSync(repository, { recursive: true, force: true }); }
+});
+
 test("structured execution keeps compact diagnostics and redacted evidence", async () => {
   const repository = createRepository();
   const output = capture();
@@ -312,6 +328,13 @@ test("external worktree validation reuses only identical state and valid owned m
     );
     assert.match(changedAgainOutput.text(), /^PASS fixlab exec/mu);
     assert.equal(executions, 5);
+    for (const [environment, count] of [["dev", 6], ["sit", 7], ["dev", 7]]) {
+      assert.equal(await executeStructuredCommand(options, {
+        stdout: capture().stream, stderr: capture().stream, spawn,
+        environment: { FIXLAB_DEV_API_ENVIRONMENT: environment }
+      }), 0);
+      assert.equal(executions, count, "Cached validation must not cross selected API environments.");
+    }
   } finally {
     rmSync(external, { recursive: true, force: true });
     rmSync(primary, { recursive: true, force: true });

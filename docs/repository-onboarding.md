@@ -202,7 +202,78 @@ test through its instructions, or the user can request one explicitly;
 otherwise newly created authenticated `*.auth.spec.ts` files are validation
 artifacts rather than product changes.
 
-New installations default `browserAutomation.testSynthesis.devReadOnly` and
+### Real DEV reads and writes for React applications
+
+In repository settings, enable **real DEV API reads and all writes** and provide
+the real DEV API origins, full API scope and existing repository-relative `.mjs`
+authentication helper. Review and apply the preview once. This config is shared
+through the repository profile; each developer still authenticates independently.
+Setup validates configuration without executing the helper, signing in or sending
+a request. No job permission prompt is needed afterward.
+
+For example, inside `browserAutomation.dataSafety`:
+
+```json
+{
+  "productionAllowed": false,
+  "devWrite": {
+    "allowAll": true,
+    "origins": ["https://api.dev.example.test"],
+    "scope": "api://example-service/access",
+    "sessionHelper": "tools/dev-session.mjs",
+    "browserProxyPaths": ["/api"]
+  }
+}
+```
+
+Declare `dev` in `environments`, configure the frontend health URL and use an
+existing helper exporting `withApiToken({ scope, interactive }, callback)` for
+native API authentication. Use only reviewed DEV HTTPS origins. If the React app
+calls the API directly, omit `browserProxyPaths`; if it uses an owned loopback
+frontend proxy, first verify those prefixes really target the listed DEV origins.
+Setup does not rewrite the application's API URL, CORS or proxy implementation.
+Keep its existing normal browser authentication and environment configuration.
+
+Configured DEV uses real GET/HEAD/OPTIONS, search POST and
+POST/PUT/PATCH/DELETE create/update/submit flows, not a read-only or intercepted
+default. The dashboard hides the per-job write permission controls. Other
+environments and explicit stricter selections remain unchanged.
+
+Dashboard gates and CLI-launched workers receive `FIXLAB_HELPER_ROOT`,
+`FIXLAB_REPOSITORY` and `FIXLAB_DEV_API_ENVIRONMENT`. Repository-owned Playwright
+journeys can import the packaged guard without installing FixLab in the app:
+
+```js
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const { createDevBrowserContext } = await import(pathToFileURL(
+  join(process.env.FIXLAB_HELPER_ROOT, "dashboard", "dev-browser.js")
+).href);
+const session = await createDevBrowserContext(browser, {
+  contextOptions: { storageState: ".auth/dev.json" }
+});
+try {
+  const page = await session.context.newPage();
+  await page.goto(frontendUrl);
+  // Exercise the real workflow and assert its UI/API outcomes here.
+  await session.assertHealthy();
+} finally {
+  await session.close();
+}
+```
+
+Reuse a genuine authenticated state through the existing application sign-in
+flow; the guard does not invent cookies or tokens. Complete sign-in before the
+guarded context and refresh it separately if the application needs an external
+identity provider. Do not add mocks, page-route overrides or direct
+`APIRequestContext` traffic to this browser path. HTTP success alone does not
+prove the business scenario passed. Missing authentication/API access remains
+blocked, not a synthetic pass. See [the DEV access contract](security.md#persistent-dev-browser-and-api-access).
+
+### Existing restricted defaults
+
+Without persistent DEV setup, new installations default `browserAutomation.testSynthesis.devReadOnly` and
 `ppeReadOnly` to `true` for new portal profiles. Selecting `dev`, `development`
 or `ppe` uses real
 read-only backend data while mutations remain intercepted. Unselected/local,
@@ -221,8 +292,8 @@ Use `defaultDataSource: "synthetic-intercepted"` with
 `mutationMode: "intercepted"` when Playwright should fulfill reads locally and
 capture mutation intent without changing an external record. Repositories may
 instead declare `local-fixture`, `non-production-read-only`, or
-`non-production-approved`; any approved write still requires the normal human
-unsafe-data approval.
+`non-production-approved`; outside persistent DEV configuration, approved writes
+still require the normal human unsafe-data approval.
 
 With `non-production-read-only`, an explicitly selected DEV or SIT environment
 is tried first. If that backend is unavailable or cannot provide a safe record

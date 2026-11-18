@@ -93,6 +93,51 @@ test("repository settings preserve undisplayed configuration and never expose en
   }
 });
 
+test("DEV API setup enables persistent real UI access without job permissions or read-only defaults", () => {
+  const repository = fixture();
+  try {
+    applyRepositorySettings(plan(repository), "synthetic-settings-owner");
+    writeFileSync(join(repository, "dev-session.mjs"), "throw new Error('Setup must not execute authentication');");
+    const preview = plan(repository, {
+      devApiEnabled: true, devApiOrigins: "https://api.dev.example.test",
+      devApiScope: "api://example-service/access", devApiSessionHelper: "dev-session.mjs"
+    }, false);
+    const safety = preview.profile.browserAutomation.dataSafety;
+    assert.deepEqual(safety.devWrite, {
+      allowAll: true, origins: ["https://api.dev.example.test"],
+      scope: "api://example-service/access", sessionHelper: "dev-session.mjs"
+    });
+    const evidence = configuredTestSynthesis(preview.profile, "", undefined, "dev");
+    assert.equal(evidence.source, "non-production-approved");
+    assert.equal(evidence.mutationMode, "approved-write");
+    assert.notEqual(evidence.devReadOnly, true);
+    assert.equal(preview.profile.browserAutomation.testSynthesis.devReadOnly, false);
+    assert.equal(configuredTestSynthesis(preview.profile, "none", undefined, "dev").mutationMode, "none");
+    assert.equal(configuredTestSynthesis(preview.profile, "intercepted", undefined, "dev").mutationMode, "intercepted");
+    assert.equal(configuredTestSynthesis(preview.profile, "", undefined, "sit").source, "synthetic-intercepted");
+    assert.ok(preview.profile.worktreeSetup.files.includes("dev-session.mjs"));
+    applyRepositorySettings(preview, "synthetic-settings-owner");
+    assert.equal(inspectRepositorySettings(repository).values.devApiEnabled, true);
+    for (const invalid of [
+      { devApiOrigins: "https://api.ppe.example.test" },
+      { devApiOrigins: "https://api.dev.example.test/path" },
+      { devApiScope: "not-an-api-scope" }, { devApiSessionHelper: "missing.mjs" },
+      { devApiProxyPaths: "/api/../production" }, { devApiProxyPaths: "//other-host" }
+    ]) {
+      assert.throws(() => plan(repository, invalid, false));
+    }
+    const proxied = plan(repository, { devApiProxyPaths: "/api, /odata" }, false);
+    assert.deepEqual(proxied.profile.browserAutomation.dataSafety.devWrite.browserProxyPaths, ["/api", "/odata"]);
+    applyRepositorySettings(proxied, "synthetic-settings-owner");
+    assert.equal(plan(repository, { devApiProxyPaths: "" }, false)
+      .profile.browserAutomation.dataSafety.devWrite.browserProxyPaths, undefined);
+    const disabled = plan(repository, { devApiEnabled: false }, false);
+    assert.equal(disabled.profile.browserAutomation.dataSafety.devWrite.allowAll, false);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test("repository settings reject stale plans and never replace an active executor lease", () => {
   const repository = fixture();
   try {
@@ -133,6 +178,7 @@ test("API-only repository settings never add a frontend or browser and retain ba
     profile.browserAutomation.testSynthesis.mutationMode = "none";
     writeFileSync(path, JSON.stringify(profile));
     assert.equal(inspectRepositorySettings(repository).fields.some((field) => field.key.startsWith("frontend")), false);
+    assert.equal(inspectRepositorySettings(repository).fields.some((field) => field.key.startsWith("devApi")), false);
     const preview = plan(repository, { name: "Updated API workspace" }, false);
     assert.equal(preview.profile.applications.frontend, undefined);
     assert.equal(preview.profile.browserAutomation.browser, undefined);

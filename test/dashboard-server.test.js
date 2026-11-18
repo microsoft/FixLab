@@ -2334,6 +2334,49 @@ test("new DEV/PPE portal defaults use real reads only in their environments and 
   assert.equal(configuredTestSynthesis(profile, "", undefined, "dev").unitTestsOnly, true);
 });
 
+test("persistent DEV setup authorizes real workflows without job consent and revalidates after restart", async () => {
+  const repository = createGitRepository();
+  const profile = validProfile();
+  profile.browserAutomation.testSynthesis.devReadOnly = true;
+  profile.browserAutomation.dataSafety.devWrite = {
+    allowAll: true, scope: "api://example-service/access", sessionHelper: "dev-session.mjs",
+    origins: ["https://api.dev.example.test"]
+  };
+  writeFileSync(join(repository, "dev-session.mjs"),
+    'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+  const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+  writeFileSync(profilePath, JSON.stringify(profile));
+  const launches = [];
+  const executor = input => { launches.push(input); return { completion: new Promise(() => {}) }; };
+  let running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
+  try {
+    const created = await jsonRequest(running.url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Exercise real DEV create/update/submit.", mode: "validate-only",
+        targetEnvironment: "dev" })
+    });
+    assert.equal(created.response.status, 202, created.body.error);
+    assert.equal(launches[0].allowPostRequests, true);
+    assert.equal(launches[0].postWriteApproval.mode, "dev-origin");
+    assert.match(launches[0].prompt, /without job permission prompts/u);
+    assert.match(launches[0].prompt, /createDevBrowserContext/u);
+    assert.equal(created.body.job.testEvidence.source, "non-production-approved");
+    assert.equal(created.body.job.testEvidence.mutationMode, "approved-write");
+    await running.dashboard.close();
+    running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
+    const resumed = await jsonRequest(running.url, "/api/job/input", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "retry", details: "Resume with persistent repository DEV access." })
+    });
+    assert.equal(resumed.response.status, 202, resumed.body.error);
+    assert.equal(launches.at(-1).postWriteApproval.mode, "dev-origin");
+    assert.equal(launches.at(-1).postWriteApproval.jobId, created.body.job.id);
+  } finally {
+    await running.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 for (const environment of ["dev", "ppe"]) {
 for (const enabled of [true, false]) {
   test(`${environment.toUpperCase()} portal default ${enabled} is environment-bound, recovered and cannot change on retry`, async () => {
@@ -3025,6 +3068,10 @@ test("native executor forwards budget/protected-path configuration and retains b
 process.stdin.once("data", (chunk) => {
   const config = JSON.parse(chunk.toString());
   const valid = config.inputTokenLimit === 100 &&
+    config.targetEnvironment === "dev" &&
+    process.env.FIXLAB_DEV_API_ENVIRONMENT === "dev" &&
+    process.env.FIXLAB_REPOSITORY === config.repository &&
+    process.env.FIXLAB_HELPER_ROOT === config.packageRoot &&
     config.fileAccess.mode === "source-read-write" &&
     config.fileAccess.jobId === config.sessionId &&
     config.postWriteApproval.jobId === config.sessionId &&
@@ -3047,7 +3094,7 @@ setInterval(() => {}, 1000);
   t.signal.addEventListener("abort", () => handle?.terminate(), { once: true });
   try {
     handle = createCopilotExecutor({ packageRoot: runtime })({
-      repository, sessionId, prompt: "Synthetic owned budget protocol.",
+      repository, sessionId, prompt: "Synthetic owned budget protocol.", targetEnvironment: "dev",
       postWriteApproval: { jobId: sessionId, environment: "dev", revision: "a".repeat(64), mode: "dev-origin" },
       fileAccess: { mode: "source-read-write", repository: realpathSync.native(repository), jobId: sessionId },
       inputTokenLimit: 100, protectedPaths: [join(repository, "session.js")],

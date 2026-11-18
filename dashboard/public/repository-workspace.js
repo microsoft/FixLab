@@ -212,7 +212,7 @@ wizardForm.addEventListener("submit", async (event) => {
       const value = field.type === "number" ? Number(text) : field.type === "boolean"
         ? (/^yes$/i.test(text) ? true : /^no$/i.test(text) ? false : undefined) : text;
       if (value === undefined || (field.type === "number" && (!Number.isInteger(value) || value < 1 || value > field.max)) ||
-          (field.type === "text" && !text)) {
+          (field.type === "text" && !text && !field.optional)) {
         throw new Error(field.type === "boolean" ? "Answer yes or no." : "Enter a valid value or use the suggested answer.");
       }
       current.values[field.key] = value;

@@ -95,7 +95,24 @@ alone does not prove a scenario passed. No automatic retries or redirects: an
 ambiguous result requires human inspection before any fresh action. Other
 environments, explicit read-only/intercepted selections, API-only read-only contracts, unit-only validation and human sign-in
 remain unchanged. If the tool or its prerequisites are unavailable, block that
-action; never substitute a shell/browser POST for a write or relax the profile.
+action; never substitute a shell/browser POST for a write outside the configured
+guarded DEV path, or relax the profile.
+
+Persistent DEV API access: `dataSafety.devWrite.allowAll=true` authorizes real
+GET/HEAD/OPTIONS/POST/PUT/PATCH/DELETE on the reviewed DEV origins without per-job
+permission prompts. It overrides DEV read-only/intercepted defaults, not explicit
+stricter selections, API-only/unit-only/production restrictions or normal
+authentication. Use `createDevBrowserContext` from
+`FIXLAB_HELPER_ROOT/dashboard/dev-browser.js` with `FIXLAB_REPOSITORY`,
+`FIXLAB_DEV_API_ENVIRONMENT=dev` and existing authenticated `storageState`.
+Reviewed `browserProxyPaths` may cover the owned loopback frontend's API proxies
+to those DEV origins; never infer or retarget a proxy. Use `fixlab_dev_write` for
+native API writes. Do not mock DEV responses or replace the guard. Assert real
+UI/API behavior, call `assertHealthy` and close. Profile/helper changes require
+fresh validation; redirects, automatic transport retries, unknown outcomes and
+unrelated API origins are blocked. API success alone is not scenario success.
+Other environments retain their existing policy. The read-only defaults below
+apply only without this persistent DEV configuration.
 
 Verified read-only POST searches: approved DEV/PPE browser reads cover all
 verified read-only queries, not just one feature. Installation/onboarding
