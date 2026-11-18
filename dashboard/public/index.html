@@ -406,7 +406,21 @@
             <h3>Running queue</h3>
             <span id="queue-count"></span>
           </div>
-          <ol id="queue-list"></ol>
+          <p id="queue-empty" class="guidance" hidden>No jobs yet. Start a request to add a job.</p>
+          <div id="queue-grid" class="table-scroll" role="region" aria-label="Job queue" tabindex="0" hidden>
+            <table aria-label="Job queue and recent jobs">
+              <thead>
+                <tr>
+                  <th scope="col">Position</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Bugs</th>
+                  <th scope="col">Request</th>
+                </tr>
+              </thead>
+              <tbody id="queue-list"></tbody>
+            </table>
+          </div>
         </div>
         <div class="job-controls">
           <div class="section-heading">

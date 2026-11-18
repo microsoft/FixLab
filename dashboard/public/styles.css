@@ -458,25 +458,34 @@ button.secondary {
   margin: 0;
 }
 
-.queue-panel ol {
+.queue-panel .table-scroll {
   margin: .75rem 0 0;
-  padding: 0;
-  list-style: none;
 }
 
-.queue-panel li + li {
-  margin-top: .5rem;
+.queue-panel table {
+  min-width: 40rem;
+  table-layout: fixed;
+}
+
+.queue-panel th:nth-child(1),
+.queue-panel th:nth-child(2) {
+  width: 7rem;
+}
+
+.queue-panel th:nth-child(3) {
+  width: 8rem;
+}
+
+.queue-panel th:nth-child(4) {
+  width: 4rem;
 }
 
 .queue-panel span {
   color: #b5c0d4;
 }
 
-.job-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
-  gap: .5rem;
+.job-request-cell {
+  overflow-wrap: anywhere;
 }
 
 .job-selector {
@@ -513,6 +522,7 @@ button.secondary {
 
 .job-expand {
   width: 2.75rem;
+  margin-top: .5rem;
   padding: .55rem;
   border: 1px solid #405275;
   background: #0b1324;

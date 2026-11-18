@@ -2305,7 +2305,10 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
     rememberJob(job);
   }
   for (const job of queue) {
-    if (!observedJobs.has(job.id)) {
+    const observed = observedJobs.get(job.id);
+    if (observed) {
+      observedJobs.set(job.id, { ...observed, ...job, status: job.status ?? "queued" });
+    } else {
       observedJobs.set(job.id, queuedJobView(job));
     }
   }
@@ -2336,9 +2339,11 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
     `${queue.length} waiting · ${held.length} held · ${recentJobs.length} recent`;
   jobLifecycleStatus.textContent =
     `${queue.length} waiting · ${held.length} held · ${recentJobs.length} recent`;
+  document.querySelector("#queue-grid").hidden = entries.length === 0;
+  document.querySelector("#queue-empty").hidden = entries.length > 0;
   queueList.replaceChildren();
   for (const { job, label } of entries) {
-    const item = document.createElement("li");
+    const item = document.createElement("tr");
     item.className = "job-row";
     if (expandedJobIds.has(job.id)) {
       item.classList.add("expanded");
@@ -2346,22 +2351,33 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "job-selector";
-    if ((selectedJobId ?? currentJob?.id) === job.id) {
+    const selected = (selectedJobId ?? currentJob?.id) === job.id;
+    if (selected) {
       button.classList.add("selected");
+      button.setAttribute("aria-current", "true");
     }
-    const summary = document.createElement("strong");
-    summary.textContent = `${label} · ${job.status} · ${job.requestType}`;
+    const bugCount = job.bugCount ?? job.bugs?.length ?? 0;
+    button.setAttribute(
+      "aria-label",
+      `${label} · ${job.status} · ${job.requestType} · ${bugCount} bug(s) · ${job.request}`
+    );
+    for (const value of [label, job.status, job.requestType, bugCount]) {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      item.append(cell);
+    }
+    const requestCell = document.createElement("td");
+    requestCell.className = "job-request-cell";
     const details = document.createElement("span");
     details.className = "job-request";
-    details.textContent =
-      ` · ${job.bugCount ?? job.bugs?.length ?? 0} bug(s) · ${job.request}`;
-    button.append(summary, details);
+    details.textContent = job.request;
+    button.append(details);
     button.addEventListener("click", () => {
       selectJob(job.id);
       renderQueue(currentJob, queue, held, history);
     });
 
-    item.append(button);
+    requestCell.append(button);
     if (job.request.length > 160) {
       const expandButton = document.createElement("button");
       const expanded = expandedJobIds.has(job.id);
@@ -2388,8 +2404,9 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
           `${nextExpanded ? "Collapse" : "Expand"} bug text for ${label}`
         );
       });
-      item.append(expandButton);
+      requestCell.append(expandButton);
     }
+    item.append(requestCell);
     queueList.append(item);
   }
   renderRepositoryMemory();

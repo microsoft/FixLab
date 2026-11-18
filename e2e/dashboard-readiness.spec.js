@@ -2691,7 +2691,7 @@ test("dashboard exposes explicit pull-request approval when validation is comple
   expect(submittedInput.details).toContain("explicitly approve");
 });
 
-async function mockChatWorkspace(page, { job = null, queue = [], history = [], environments,
+async function mockChatWorkspace(page, { job = null, queue = [], held = [], history = [], environments,
   profileReady = true, draftOnlyReady = false, ppeWriteConfigured = false } = {}) {
   await page.route("**/api/status", (route) => route.fulfill({
     contentType: "application/json",
@@ -2700,7 +2700,7 @@ async function mockChatWorkspace(page, { job = null, queue = [], history = [], e
       readiness: { repositoryReady: true, profileReady, draftOnlyReady, ppeWriteConfigured,
         repository: "C:\\code\\alpha", profileName: "Alpha workspace", environments },
       runtime: { name: "copilot", supportsModelSelection: true, defaultModel: "" },
-      job, queue, held: [], history
+      job, queue, held, history
     })
   }));
   await page.route("**/api/repositories", (route) => route.fulfill({
@@ -2724,6 +2724,8 @@ test("chat workspace defaults to a compact composer and local repository navigat
   await page.goto(baseUrl);
   await expect(page.locator("#workspace-title")).toHaveText("Alpha workspace");
   await expect(page.locator("#chat-welcome")).toBeVisible();
+  await expect(page.locator("#queue-empty")).toHaveText("No jobs yet. Start a request to add a job.");
+  await expect(page.locator("#queue-grid")).toBeHidden();
   await expect(page.locator("#run-options")).not.toHaveAttribute("open");
   await expect(page.locator("#details-group")).not.toHaveAttribute("open");
   await expect(page.locator("#connections-group")).not.toHaveAttribute("open");
@@ -2811,15 +2813,21 @@ test("chat keeps manual permissions inline and mobile layout within the viewport
   await page.screenshot({ path: test.info().outputPath("chat-workspace-mobile.png"), fullPage: true });
 });
 
-test("queue navigation opens the inspector at the first card without changing jobs", async ({ page }) => {
+test("queue grid shows separate text statuses and selecting a row never starts a job", async ({ page }) => {
   let posts = 0;
   page.on("request", (request) => { if (request.method() === "POST") { posts++; } });
   const job = { id: "queue-current", request: "Synthetic blocked browser check",
     requestType: "bug-fix", mode: "playwright-only", status: "blocked",
     stages: {}, bugs: [], logs: [], activity: [], canResume: false };
-  await mockChatWorkspace(page, { job, queue: [{
+  const queue = [{
     id: "queue-next", request: "Synthetic next bug", requestType: "bug-fix",
     mode: "playwright-only", status: "queued", position: 1, bugCount: 1
+  }];
+  const heldJob = { ...job, id: "queue-held", request: "Synthetic held bug", status: "held" };
+  const held = [heldJob];
+  await mockChatWorkspace(page, { job, queue, held, history: [{
+    ...job, id: "queue-passed", request: "<img src=x onerror=alert(1)> Synthetic completed bug",
+    status: "passed"
   }] });
   await page.goto(baseUrl);
   await expect(page.locator("#queue-nav-count")).toHaveText("1");
@@ -2828,8 +2836,35 @@ test("queue navigation opens the inspector at the first card without changing jo
   await expect(page.locator("#details-group")).toHaveAttribute("open", "");
   await expect(page.locator("#queue-panel")).toBeInViewport();
   await expect(page.locator("#details-view > :first-child")).toHaveAttribute("id", "queue-panel");
-  await expect(page.locator("#queue-list")).toContainText("Waiting #1");
-  await expect(page.locator("#queue-list")).toContainText("Synthetic next bug");
+  const grid = page.getByRole("table", { name: "Job queue and recent jobs" });
+  await expect(grid.getByRole("columnheader")).toHaveText([
+    "Position", "Status", "Type", "Bugs", "Request"
+  ]);
+  const current = grid.getByRole("row").filter({ hasText: "Synthetic blocked browser check" });
+  await expect(current.getByRole("cell").nth(0)).toHaveText("Current");
+  await expect(current.getByRole("cell").nth(1)).toHaveText("blocked");
+  const waiting = grid.getByRole("row").filter({ hasText: "Synthetic next bug" });
+  await expect(waiting.getByRole("cell").nth(0)).toHaveText("Waiting #1");
+  await expect(waiting.getByRole("cell").nth(1)).toHaveText("queued");
+  await expect(waiting.getByRole("cell").nth(3)).toHaveText("1");
+  const completed = grid.getByRole("row").filter({ hasText: "Synthetic completed bug" });
+  await expect(completed.getByRole("cell").nth(1)).toHaveText("passed");
+  await expect(completed.getByRole("img")).toHaveCount(0);
+  const heldRow = grid.getByRole("row").filter({ hasText: "Synthetic held bug" });
+  await expect(heldRow.getByRole("cell").nth(1)).toHaveText("held");
+  queue.push({ ...heldJob, status: "queued", position: 2, bugCount: 0 });
+  held.length = 0;
+  await expect(heldRow.getByRole("cell").nth(0)).toHaveText("Waiting #2");
+  await expect(heldRow.getByRole("cell").nth(1)).toHaveText("queued");
+  await waiting.getByRole("button").click();
+  await expect(waiting.getByRole("button")).toHaveAttribute("aria-current", "true");
+  await expect(page.locator("#job-status")).toContainText("queued");
+  await expect(page.locator("#job-input-submit")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Remove from queue" })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await waiting.getByRole("cell").nth(1).scrollIntoViewIfNeeded();
+  await expect(waiting.getByRole("cell").nth(1)).toBeInViewport();
   expect(posts).toBe(0);
 });
 
