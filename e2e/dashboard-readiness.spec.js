@@ -156,10 +156,115 @@ test.afterAll(async () => {
   rmSync(repository, { recursive: true, force: true });
 });
 
-test("watcher jobs show live recorded activity, failed checks and retained history without dashboard execution", async ({ page }) => {
+test("watcher jobs retain detailed evidence and prepare reviewed local handoffs without automatic execution", async ({ page }) => {
   const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-ui-"));
   const profile = {
+    ...JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8")),
     name: "Synthetic watcher fixture", environments: ["dev"],
+    pullRequests: { defaultTargetBranch: "develop" },
+    ticketAutomation: { areaPaths: ["Example\\Application"] }
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  for (const args of [
+    ["init", directory], ["-C", directory, "remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"],
+    ["-C", directory, "add", "."],
+    ["-C", directory, "-c", "user.name=FixLab Test", "-c", "user.email=fixlab@example.invalid", "commit", "-qm", "Synthetic fixture"]
+  ]) {
+    expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
+  }
+  const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
+  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture", comments: [] };
+  let release;
+  let launches = 0;
+  const client = {
+    findTagged: async () => [42], load: async () => item, hasComment: async () => false,
+    async comment() {}, reviewPullRequests: async () => []
+  };
+  const result = new Promise(resolve => { release = resolve; });
+  const watching = watchTickets({
+    repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    client,
+    execute: async ({ onActivity }) => executeTicketAgent({
+      repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
+      executor(options) {
+        options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|Investigating the reported mapping.\n");
+        options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed; live testing did not run.\n");
+        return {
+          completion: result.then(() => {
+            options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A focused check failed; the work item stays open.","report":{"plannedWork":["Implement the reviewed scope after the prerequisite is supplied."]}}\n');
+            return { code: 0 };
+          }), hasStopped: () => true, terminate() { release(); }
+        };
+      }
+    })
+  });
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {},
+    ticketClient: client,
+    executor() {
+      launches += 1;
+      let finish;
+      const completion = new Promise(resolve => { finish = resolve; });
+      return { completion, terminate() { finish({ code: null, signal: "SIGTERM" }); } };
+    }
+  });
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await page.goto(address.url);
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await expect(page.locator("#watcher-status")).toContainText("investigating");
+    const attempt = page.locator("#watcher-attempts > li > details").first();
+    await attempt.locator("summary").click();
+    await expect(attempt).toContainText("focused regression: failed");
+    await expect(attempt).toContainText("Investigating the reported mapping");
+    await expect(attempt.getByRole("link", { name: "ADO 42 - Synthetic UI fixture (work item and Discussion)", exact: true })).toHaveAttribute(
+      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
+    );
+    expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
+    release();
+    await watching;
+    await expect(page.locator("#watcher-status")).toContainText("stopped");
+    await expect(attempt).toContainText("Feedback recorded - blocked");
+    await page.reload();
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await page.locator("#watcher-attempts > li > details > summary").first().click();
+    await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
+    await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
+    const retained = page.locator("#watcher-attempts > li > details").first();
+    await retained.getByText("Detailed investigation report", { exact: true }).click();
+    await expect(retained).toContainText("Implement the reviewed scope after the prerequisite is supplied.");
+    await retained.getByRole("button", { name: "Continue in FixLab", exact: true }).click();
+    const prepare = retained.getByRole("button", { name: "Prepare local job", exact: true });
+    await expect(prepare).toBeDisabled();
+    await retained.getByRole("checkbox", { name: "I reviewed the findings, dependencies and implementation scope." }).check();
+    await prepare.click();
+    await expect(page.locator("#watcher-handoff-notice")).toContainText("No job has started");
+    await expect(page.locator("#request")).toHaveValue(/Continue work item 42/);
+    await expect(page.locator('[name="requestType"][value="feature"]')).toBeChecked();
+    await expect(page.locator('[name="allowAllTools"]')).not.toBeChecked();
+    expect(launches).toBe(0);
+    await page.locator('#job-form button[type="submit"]').click();
+    await expect.poll(() => launches).toBe(1);
+    const started = (await (await page.request.get(`${address.url}/api/status`)).json()).job;
+    expect(started.watcherHandoff.workItemId).toBe(42);
+    expect(started.toolApprovalMode).toBe("ask");
+    expect(started.devWriteApproved).toBe(false);
+    expect(started.ppeWriteApproved).toBe(false);
+    await page.screenshot({ path: test.info().outputPath("watcher-history.png"), fullPage: true });
+  } finally {
+    release();
+    await watching;
+    await instance.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("interrupted watcher recovery requires review and confirmation and preserves the attempt without launching work", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-recovery-ui-"));
+  const profile = {
+    name: "Synthetic recovery fixture", environments: ["dev"],
     pullRequests: { defaultTargetBranch: "develop" },
     ticketAutomation: { areaPaths: ["Example\\Application"] }
   };
@@ -172,56 +277,38 @@ test("watcher jobs show live recorded activity, failed checks and retained histo
   }
   const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
   const item = { id: 42, project: "Example", areaPath: "Example\\Application",
-    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture", comments: [] };
-  let release;
-  const result = new Promise(resolve => { release = resolve; });
-  const watching = watchTickets({
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic interrupted fixture", comments: [] };
+  await expect(watchTickets({
     repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
-    client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
-    execute: async ({ onActivity }) => executeTicketAgent({
-      repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
-      executor(options) {
-        options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|Investigating the reported mapping.\n");
-        options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed; live testing did not run.\n");
-        return {
-          completion: result.then(() => {
-            options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A focused check failed; the work item stays open."}\n');
-            return { code: 0 };
-          }), hasStopped: () => true, terminate() { release(); }
-        };
-      }
-    })
-  });
+    client: { findTagged: async () => [42], load: async () => item },
+    execute() { throw new Error("Synthetic interruption"); }
+  })).rejects.toThrow("Synthetic interruption");
   const instance = createDashboardServer({
     repository: directory, packageRoot, browserOpener() {},
-    executor() { throw new Error("Opening watcher monitoring must not start a dashboard job."); }
+    ticketClient: { load: async () => item, reviewPullRequests: async () => [] },
+    executor() { throw new Error("Recovery must not start a dashboard job."); }
   });
   try {
     const address = await instance.listen({ port: await availablePort() });
     await page.goto(address.url);
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
-    await expect(page.locator("#watcher-status")).toContainText("investigating");
     const attempt = page.locator("#watcher-attempts > li > details").first();
     await attempt.locator("summary").click();
-    await expect(attempt).toContainText("focused regression: failed");
-    await expect(attempt).toContainText("Investigating the reported mapping");
-    await expect(attempt.getByRole("link", { name: "Open work item and Discussion" })).toHaveAttribute(
-      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
-    );
+    await attempt.getByRole("button", { name: "Review interrupted attempt" }).click();
+    const retry = attempt.getByRole("button", { name: "Authorize safe retry" });
+    await expect(retry).toBeDisabled();
+    await expect(attempt).toContainText("No final result was retained");
+    await expect(attempt.getByRole("button", { name: "Accept recorded result" })).toBeDisabled();
+    await attempt.getByRole("checkbox", { name: "I reviewed the ticket, existing work and limitations." }).check();
+    await expect(retry).toBeEnabled();
+    await retry.click();
+    await expect(attempt).toContainText("Reviewed recovery - retry");
+    await expect(attempt).toContainText("Recovery decision: retry");
     expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
-    release();
-    await watching;
-    await expect(page.locator("#watcher-status")).toContainText("stopped");
-    await expect(attempt).toContainText("Feedback recorded - blocked");
     await page.reload();
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
-    await page.locator("#watcher-attempts summary").click();
-    await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
-    await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
-    await page.screenshot({ path: test.info().outputPath("watcher-history.png"), fullPage: true });
+    await expect(page.locator("#watcher-attempts")).toContainText("Reviewed recovery - retry");
   } finally {
-    release();
-    await watching;
     await instance.close();
     rmSync(directory, { recursive: true, force: true });
   }

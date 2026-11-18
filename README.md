@@ -47,16 +47,27 @@ establish application readiness or grant permissions.
 | Fix a bug or small enhancement | Scoped changes, validation evidence, and an authorized pull request |
 | Validate an existing change or PR | Findings and evidence without source or PR changes |
 | Run focused Playwright validation | Browser or configured API assertions without an implementation job |
-| Watch explicitly tagged ADO tickets (Agency) | Reviewed local polling produces a draft PR or feedback on the existing ticket's Discussion |
+| Watch explicitly tagged ADO tickets (Agency or Copilot) | Reviewed local polling produces a draft PR or feedback on the existing ticket's Discussion |
 
 The optional [tagged-ticket watcher](docs/commands.md#tagged-ticket-watcher)
 starts only after a separate scope review and explicit session approval.
 Onboarding supplies defaults, not automatic activation. IcM requires a linked
 ADO item; no direct IcM listener is installed.
-Use **Watcher jobs** in the existing dashboard for read-only attempt status,
-recorded activity, check outcomes and work-item/PR links. Older attempts may
+Use **Watcher jobs** in the existing dashboard for attempt status,
+recorded activity, check outcomes and work-item/PR links. **Review interrupted
+attempt** offers separately confirmed recovery without editing private files.
+Older attempts may
 have basic history only. Optional `--resolve-on-completion` hands off a verified
 draft PR or confirmed cause as `Resolved`; this is not merge or deployment.
+
+Completed investigations offer **Continue in FixLab**: review the refreshed
+ticket and related PRs, confirm the scope, then prepare and submit a normal
+local job. Existing work is preserved; tool/data grants do not transfer.
+Ticket comments use a moderate high-level summary with changes, actual checks
+and a next action; expandable reports retain the technical detail.
+Optional [incident evidence helpers](docs/commands.md#incident-evidence-helpers)
+make approved, environment-bound Cosmos/trace tooling discoverable without
+automatically connecting, copying credentials or granting production access.
 
 ## Architecture and benefits
 

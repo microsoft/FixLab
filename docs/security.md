@@ -25,7 +25,7 @@ operations. Treat every runner as privileged engineering infrastructure.
 
 ## Process isolation
 
-- Optional ticket watching is an explicitly started local Agency session, not
+- Optional ticket watching is an explicitly started local Agency or Copilot CLI session, not
   an onboarding side effect. Its fresh `--yes --allow-all-tools` consent binds
   the checkout's ADO origin, configured area subtrees, exact tag, target branch,
   non-production environment and installed helper directory. This is a
@@ -47,12 +47,39 @@ operations. Treat every runner as privileged engineering infrastructure.
   that lease is released only after verified termination. Executor output is
   bounded and line-buffered for credential suppression before display, independently
   of raw structured-result parsing.
+- A reviewed `ticketAutomation.migrations` entry permits a dedicated migration
+  for one exact work-item ID within validated, existing non-linked source
+  directories. This is agent-enforced change scope, not a filesystem sandbox or
+  data-access grant. Unapproved migrations remain analysis-only. Profile changes
+  invalidate the watcher session; historical approval hashes are deduplication
+  metadata, never continuing authority after revocation. Required checks, draft
+  verification, repository instructions and read-only business-data controls remain.
+- Recovery review is read-only. Dashboard recovery requires the exact loopback
+  host/origin; CLI decisions require `--yes` and a matching review token.
+  Reconciliation holds both ownership locks, rechecks the journal/profile/ticket,
+  linked PRs and matching branches, and preserves a bounded decision audit.
+  Retained or uncertain ownership remains blocked; recovery never clears it or
+  kills a process. Missing results and changed ticket content cannot be accepted.
+  Active linked PRs prevent retry; draft acceptance re-verifies provider linkage.
+  Recovery neither publishes feedback nor changes work-item state or Git.
 - Ticket content is credential-screened before prompt construction or executor
   handoff, including descriptions, all comments and credential-bearing URLs.
   Rejected content is not copied into diagnostics or journal entries.
   The selected POST and broad-write safety helpers and the API authentication
   helper are bound by contained real path and content revision, then revalidated
   before launch and feedback; changing a helper requires a fresh scope review.
+- Completed-attempt handoff requires exact dashboard host/origin, an explicit
+  confirmation bound to its instance and a fresh ticket/profile/helper/PR review
+  token. It prepares normal canonical intake and preserves durable attempt
+  provenance; duplicate retained handoffs are rejected. No watcher state is
+  replayed or tool, write, data or deferred-validation grant transferred.
+- Optional `analysis.evidenceSources` is discovery metadata, not a connector or
+  read-only capability. Entries select only configured non-production
+  environments and bounded, unlinked repository-owned JavaScript helpers.
+  Discovery never executes them. Helpers still require normal authorization,
+  authentication and independently established read-only enforcement; privileged
+  tool execution is not sandboxed. Production helpers, credential files and
+  automatic host-session MCP inheritance are not supported by this configuration.
 - Dashboard watcher monitoring is read-only and bound to the checkout's
   reviewed journal scope. It retains bounded sanitized structured progress,
   not raw output, credentials or browser state. Check messages remain

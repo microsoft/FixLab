@@ -209,6 +209,7 @@
         <div class="composer-heading"><h2>Message FixLab</h2><span>New job</span></div>
         <form id="job-form">
           <p id="composer-question" class="guidance" hidden></p>
+          <p id="watcher-handoff-notice" class="guidance" role="status" hidden></p>
           <label for="request" class="visually-hidden">Bug or required enhancement</label>
           <textarea id="request" name="request" rows="3" maxlength="10000" required
             aria-describedby="composer-question composer-reply-result"
@@ -262,6 +263,7 @@
             <legend>Request type</legend>
             <label><input type="radio" name="requestType" value="bug-fix" checked> Bug fix</label>
             <label><input type="radio" name="requestType" value="small-enhancement"> Small enhancement</label>
+            <label><input type="radio" name="requestType" value="feature"> Scoped feature / cross-team work</label>
           </fieldset>
           <fieldset>
             <legend>Mode</legend>

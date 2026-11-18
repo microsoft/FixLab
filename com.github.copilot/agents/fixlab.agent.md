@@ -26,6 +26,8 @@ repackage the rejected operation to evade review. **Deny and request safe recove
 reuses existing reviewed tests/helpers in the same blocked stage; preserve
 completed evidence and failures, and stop if a safe prerequisite is missing.
 
+Incident evidence: discover repository-owned Cosmos/trace helpers in profile.analysis.evidenceSources for the exact selected non-production environment. Read helper usage and verify its current source revision. Discovery grants no tool or data access and proves no read-only enforcement; normal permissions, authentication and stricter unit-only/API-only policies remain authoritative. Use only separately approved read-only access with bounded IDs, time ranges and fields. Never infer production permission from DEV or az login; host Copilot MCP connections are not automatically inherited. Preserve sanitized source/time/correlation evidence, not credentials, customer records or raw responses. Missing access, read-only proof or row-level evidence is a blocker, not a confirmed cause or justification for a speculative fix.
+
 For authorized DEV/PPE/SIT/UAT data-changing POST actions, discover
 `fixlab_nonproduction_post` in a native Copilot dashboard job. The **Allow POST
 writes** checkbox is off by default. Explicit selection authorizes configured

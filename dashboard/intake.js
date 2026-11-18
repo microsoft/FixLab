@@ -816,9 +816,16 @@ export function createAzureDevOpsTicketClient({
       if (typeof text !== "string" || !text.trim() || text.length > 10000) {
         throw new Error("Ticket feedback requires bounded nonempty text.");
       }
-      const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "<br>");
-      return request(`wit/workItems/${workItemId(id)}/comments?api-version=7.1-preview.4`, {
-        method: "POST", body: { text: escaped }
+      const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      const formatted = escaped.split("\n\n").map(block => {
+        const [heading, ...lines] = block.split("\n");
+        if (heading.startsWith("## ") && lines.length && lines.every(line => line.startsWith("- "))) {
+          return `<h3>${heading.slice(3)}</h3><ul>${lines.map(line => `<li>${line.slice(2)}</li>`).join("")}</ul>`;
+        }
+        return block.replaceAll("\n", "<br>");
+      }).join("<br><br>");
+      return request(`wit/workItems/${workItemId(id)}/comments?format=html&api-version=7.1-preview.4`, {
+        method: "POST", body: { text: formatted }
       });
     },
     async resolve(id, revision, workItemType) {
@@ -844,6 +851,58 @@ export function createAzureDevOpsTicketClient({
         throw new Error("Azure DevOps did not verify the requested Resolved state.");
       }
       return result.rev;
+    },
+    async loadTitles(ids) {
+      if (!Array.isArray(ids) || !ids.length || ids.length > 20) {
+        throw new Error("Title lookup requires 1–20 work-item IDs.");
+      }
+      ids.forEach(workItemId);
+      const result = await request(`wit/workitems?ids=${ids.join(",")}&fields=System.Title,System.TeamProject&api-version=7.1`);
+      if (!Array.isArray(result?.value) || result.value.length !== ids.length ||
+          new Set(result.value.map(item => item.id)).size !== ids.length ||
+          result.value.some(item => !ids.includes(item.id) ||
+            item.fields?.["System.TeamProject"]?.toLowerCase() !== target.project.toLowerCase() ||
+            typeof item.fields?.["System.Title"] !== "string" || !item.fields["System.Title"].trim() ||
+            item.fields["System.Title"].length > 1000)) {
+        throw new Error("ADO did not return the exact recorded work-item titles in this project.");
+      }
+      return Object.fromEntries(result.value.map(item => [item.id, item.fields["System.Title"]]));
+    },
+    async reviewPullRequests(repository, ticketId) {
+      workItemId(ticketId);
+      if (typeof repository !== "string" || !repository.trim() || repository.length > 200) {
+        throw new Error("Recovery requires the configured repository.");
+      }
+      const item = await request(`wit/workitems/${ticketId}?$expand=relations&api-version=7.1`);
+      if (item?.id !== ticketId || item.fields?.["System.TeamProject"]?.toLowerCase() !== target.project.toLowerCase() ||
+          (item.relations !== undefined && !Array.isArray(item.relations))) {
+        throw new Error("Linked PR recovery requires the exact work-item identity and project.");
+      }
+      const links = (item.relations ?? []).filter(relation =>
+        relation.rel === "ArtifactLink" && typeof relation.url === "string" &&
+        relation.url.startsWith("vstfs:///Git/PullRequestId/"));
+      if (links.length > 20) { throw new Error("Too many linked PRs for bounded recovery; review the work item first."); }
+      const results = [];
+      for (const link of links) {
+        const parts = decodeURIComponent(link.url.slice("vstfs:///Git/PullRequestId/".length)).split("/");
+        if (parts.length !== 3 || !/^[1-9]\d{0,14}$/u.test(parts[2])) {
+          throw new Error("A linked PR has an invalid artifact identity; recovery remains blocked.");
+        }
+        const id = Number(parts[2]);
+        const pr = await request(`git/repositories/${encodeURIComponent(repository)}/pullrequests/${id}?api-version=7.1`);
+        if (pr?.pullRequestId !== id ||
+            !["active", "completed", "abandoned"].includes(pr.status) ||
+            ![pr.repository?.id, pr.repository?.name].some(value =>
+              typeof value === "string" && value.toLowerCase() === repository.toLowerCase()) ||
+            pr.repository?.id?.toLowerCase() !== parts[1].toLowerCase()) {
+          throw new Error("A linked PR could not be verified in the reviewed repository; inspect its work-item link.");
+        }
+        results.push({
+          id, status: pr.status, isDraft: pr.isDraft === true,
+          webUrl: `https://dev.azure.com/${encodeURIComponent(target.organization)}/${encodeURIComponent(target.project)}/_git/${encodeURIComponent(repository)}/pullrequest/${id}`
+        });
+      }
+      return results;
     },
     async verifyDraft(repository, id, targetBranch, ticketId) {
       const expectedTicketId = workItemId(ticketId);

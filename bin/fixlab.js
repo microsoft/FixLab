@@ -22,7 +22,7 @@ import {
   configuredValidationEnvironments,
   configuredTestSynthesis,
   createDashboardServer,
-  createAgencyExecutor,
+  createRuntimeExecutor,
   DEFAULT_DASHBOARD_PORT,
   FIXLAB_RUNTIMES,
   HYDRAFUSION_MODEL,
@@ -52,8 +52,9 @@ import { runValidationGate } from "./validation-gate-client.js";
 import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
-import { ticketAutomationPlan, watchTickets, executeTicketAgent } from "../dashboard/ticket-automation.js";
+import { ticketAutomationPlan, watchTickets, executeTicketAgent, reviewInterruptedTicket, reconcileInterruptedTicket } from "../dashboard/ticket-automation.js";
 import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -100,7 +101,9 @@ Usage:
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
   fixlab run [repository] [--runtime <agency|copilot>] [--model <model>] [--environment <name>] [--] [request...]
-  fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]
+  fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]
+  fixlab watch-review [repository] --ticket <id>
+  fixlab watch-recover [repository] --ticket <id> --decision <accept|retry|leave> --review-token <value> --yes
   fixlab validate [repository] --pr <number> [--runtime <agency|copilot>] [--model <model>]
   fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--runtime <agency|copilot>] [--model <model>]
   fixlab chat [repository] [--port <number>] [--runtime <agency|copilot>] [--model <model>]
@@ -1056,6 +1059,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   let selectedEnvironment;
   let workflow;
   let testEvidence;
+  let analysisEvidence;
   try {
     workflow = configuredWorkflow(profile);
     selectedEnvironment = validateTargetEnvironment(
@@ -1063,6 +1067,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
       configuredValidationEnvironments(profile)
     );
     testEvidence = configuredTestSynthesis(profile, "", undefined, selectedEnvironment);
+    analysisEvidence = configuredAnalysisEvidence(repository, profile, selectedEnvironment);
     if (choices.useDeployedBackend && (!/^(dev|development|ppe|sit|uat)$/iu.test(selectedEnvironment) ||
         testEvidence.unitTestsOnly)) {
       throw new Error("--deployed-backend requires an explicitly selected, profile-approved DEV/SIT/UAT/PPE environment permitting live access.");
@@ -1083,6 +1088,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   }
 
   const guidance = [
+    ...(analysisEvidence.length ? [analysisEvidenceContext(analysisEvidence)] : []),
     COPILOT_EXECUTION_GUIDANCE,
     ...(request ? [RUNTIME_RECOVERY_GUIDANCE] : []),
     // Interactive sessions use packaged guidance; request prompts go through stdin.
@@ -1432,7 +1438,7 @@ async function onboard({
   console.log("");
   console.log("Review this repository-owned profile before approving setup:");
   console.log(`  ${profilePath}`);
-  console.log("Optional tagged-ticket defaults: review `fixlab watch` for Agency-based ADO bug/story/feature investigation, draft PRs when code changes are warranted, or Discussion feedback otherwise. Onboarding never starts the watcher or grants publication/tool access.");
+  console.log("Optional tagged-ticket defaults: review `fixlab watch` for Agency or Copilot ADO bug/story/feature investigation, draft PRs when code changes are warranted, or Discussion feedback otherwise. Onboarding never starts the watcher or grants publication/tool access.");
   console.log("");
 
   if (!profileExisted) {
@@ -1825,6 +1831,42 @@ async function main(args) {
     return 0;
   }
 
+  if (command === "watch-review" || command === "watch-recover") {
+    let repositoryArgument;
+    const options = {};
+    for (let index = 0; index < rest.length; index += 1) {
+      const value = rest[index];
+      if (["--ticket", "--decision", "--review-token"].includes(value)) {
+        const argument = rest[++index];
+        if (!argument || argument.startsWith("-") || options[value] !== undefined) {
+          throw new Error(`Recovery requires one value after ${value}.`);
+        }
+        options[value] = argument;
+      } else if (value === "--yes") {
+        options.confirmed = true;
+      } else if (!value.startsWith("-") && !repositoryArgument) {
+        repositoryArgument = value;
+      } else {
+        throw new Error("Usage: fixlab watch-review [repository] --ticket <id>, or watch-recover with --decision <accept|retry|leave> --review-token <value> --yes.");
+      }
+    }
+    if (!/^[1-9]\d{0,14}$/u.test(options["--ticket"] ?? "")) {
+      throw new Error("Recovery requires a positive --ticket ID.");
+    }
+    if (command === "watch-review" && (options.confirmed || options["--decision"] || options["--review-token"])) {
+      throw new Error("watch-review is read-only; recovery decisions require watch-recover.");
+    }
+    const repository = resolveRepository(repositoryArgument);
+    const input = {
+      workItemId: Number(options["--ticket"]), decision: options["--decision"],
+      reviewToken: options["--review-token"], confirmed: options.confirmed === true
+    };
+    console.log(JSON.stringify(command === "watch-review"
+      ? await reviewInterruptedTicket(repository, input)
+      : await reconcileInterruptedTicket(repository, input), null, 2));
+    return 0;
+  }
+
   if (command === "watch") {
     const parsed = parseRuntimeArguments(rest);
     if (parsed.error) {
@@ -1845,7 +1887,7 @@ async function main(args) {
       } else if (!value.startsWith("-") && !repositoryArgument) {
         repositoryArgument = value;
       } else {
-        throw new Error("Usage: fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]");
+        throw new Error("Usage: fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]");
       }
     }
     const repository = resolveRepository(repositoryArgument);
@@ -1860,6 +1902,8 @@ async function main(args) {
     console.log(JSON.stringify({
       organization: plan.organization, project: plan.project, repository: plan.repository,
       tag: plan.tag, areaPaths: plan.areaPaths, targetBranch: plan.targetBranch, environment: plan.environment,
+      runtime: parsed.runtime, model: parsed.model || null,
+      migrations: plan.migrations,
       pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,
       resolution: plan.resolveOnCompletion
         ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
@@ -1883,7 +1927,8 @@ async function main(args) {
           const result = await launch(repository, request, parsed.runtime, environment, parsed.model, false, "", {
             ticketAutomation: true,
             execute: ({ repository: checkout, prompt }) => executeTicketAgent({
-              executor: createAgencyExecutor({ packageRoot }), repository: checkout, prompt,
+              executor: createRuntimeExecutor({ packageRoot, runtime: parsed.runtime, model: parsed.model, native: false }),
+              repository: checkout, prompt,
               runtimeDirectories: [packageRoot], signal: controller.signal,
               onActivity,
               idleTimeoutMs: (profile.validation?.agentIdleTimeoutMinutes ?? 20) * 60000

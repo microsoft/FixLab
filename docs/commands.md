@@ -739,10 +739,11 @@ section:
 
 ```powershell
 fixlab watch "C:\source\application" --runtime agency --environment dev
+fixlab watch "C:\source\application" --runtime copilot --model gpt-5.3-codex --environment dev
 ```
 
 This prints a plan only: checkout-derived ADO organization/project/repository,
-reviewed area paths, tag, target branch, environment and installed helper
+reviewed area paths, tag, target branch, environment, runtime/model and installed helper
 directory. Set the profile's `pullRequests.defaultTargetBranch` and
 `ticketAutomation.areaPaths` first. The default trigger is the exact `FixLab`
 tag, the interval is 300 seconds, and the outcome is `draft-pr-or-discussion`.
@@ -763,7 +764,51 @@ evidence, limitations and next steps, not an empty PR or a new story.
 Meaningful ticket edits or new human Discussion comments can trigger another
 investigation. FixLab's own feedback does not retrigger it.
 
-Open **Watcher jobs** in the existing dashboard to see read-only attempt history,
+Discussion feedback uses three short sections: **Summary**, **Changes and
+validation**, and **Next action**. Expect two summary sentences and a few compact
+bullets, not a long paragraph or a full implementation plan. Detailed cause,
+completed/proposed work and evidence remain expandable in **Watcher jobs**.
+The executor reports these separately; missing evidence remains unknown.
+A proposed cause is not promoted to a confirmed cause, planned work is not completed
+work, and skipped or unreported checks are not passed.
+
+#### Approve a dedicated migration
+
+Large features and unapproved migrations remain analysis-only. A repository owner
+can explicitly approve implementation for a particular ticket and existing source
+directories in the repository profile:
+
+```json
+{
+  "ticketAutomation": {
+    "migrations": [
+      { "workItemId": 42, "allowedPaths": ["frontend"] }
+    ]
+  }
+}
+```
+
+Merge this setting with the existing tag/area configuration; do not replace the
+profile. At most 20 unique work-item approvals and 1–8 repository-relative
+directories per approval are accepted. Root, hidden, traversal, missing and linked
+paths are rejected. The printed watcher plan discloses every migration approval.
+Ticket text cannot grant this permission.
+
+Change configuration only between attempts, let the old watcher stop normally
+when its reviewed profile changes, then review and restart the watcher. The
+approved migration requires an isolated worktree, compatible dependency/lockfile
+updates where necessary, complete in-scope diff review, unit tests, type-checking
+and a production build before draft publication. Repository instructions and
+existing read-only data, authentication and publication controls still apply.
+This is not blanket permission for dependency/security work or other tickets.
+
+Adding or changing a ticket's migration approval creates a new deduplication
+fingerprint only for that ticket, retaining its earlier analysis. An unchanged
+approval does not repeatedly queue work. Revocation alone does not queue work;
+historical approval hashes may remain for deduplication but never authorize
+execution. New ticket revisions without a current approval are analysis-only.
+
+Open **Watcher jobs** in the existing dashboard to see attempt history,
 timestamps, safe activity, recorded checks, actual resolution status and
 work-item/verified PR links. This does not start a watcher or grant permissions.
 Finished means feedback was recorded, not that tests passed. Check/scenario
@@ -771,6 +816,100 @@ messages are agent-reported, not independent runner proof. Old attempts may
 have basic history only. Detailed history retains the latest 20 attempts,
 20 activity and 10 check updates per attempt; raw console output is not stored.
 Worker status is the last reported state, not a process health check.
+Work-item links show the ADO ID and a safely bounded title. New attempts retain
+their title; older missing titles are read from ADO for at most 20 recent attempts
+and cached in memory for five minutes without rewriting the journal. If ADO is
+unavailable, IDs remain visible with an explicit title-lookup warning.
+
+#### Continue a completed investigation locally
+
+Select **Continue in FixLab** on a completed attempt with retained findings.
+FixLab refreshes the scoped ticket and related PRs without changing the watcher.
+Review the findings, dependencies, environment and target branch, confirm the
+scope, then select **Prepare local job**. Review the normal job form and submit
+it separately; preparing it never starts execution.
+
+The normal queue, workspace review, executor lease, permission prompts and
+publication gates still apply. Broad tool/write grants and deferred-validation
+choices are not inherited. Changed ticket/profile/helper evidence requires a
+fresh review. A recorded attempt can link to only one retained local job;
+continue that job instead of creating duplicates. Existing active/failed jobs
+are not repurposed. Interrupted or legacy attempts require their own recovery.
+Cross-layer features can use **Scoped feature / cross-team work**: implement the
+approved portion, keep missing external contracts as explicit blockers and
+resume the same job. Work in another repository requires separate review.
+Reconcile existing PRs before publishing; do not create an empty/duplicate PR.
+
+#### Incident evidence helpers
+
+Configure existing reviewed repository-owned JavaScript helpers in the profile:
+
+```json
+{
+  "analysis": {
+    "evidenceSources": [
+      { "id": "incident-records", "kind": "cosmos", "environment": "dev", "helper": "tools/read-incident.mjs" },
+      { "id": "incident-traces", "kind": "traces", "environment": "sit", "helper": "tools/read-traces.mjs" }
+    ]
+  }
+}
+```
+
+These are illustrative paths, not bundled connectors. Supply real helpers and
+their repository-owned usage, approved identities and data-plane read-only
+enforcement first. At most ten unique sources are allowed; helpers must be
+bounded regular, unlinked repository modules, not credential/state files.
+The environment must be explicitly configured and non-production.
+
+Watcher, direct CLI and dashboard launches discover only matching sources,
+including their source revision, without executing them. Dashboard continuation
+rediscovers current helpers; watcher helper changes invalidate its reviewed
+session. Normal runtime permissions, authentication, unit-only/API-only policies
+and data-safety controls remain authoritative. Metadata is not read-only proof
+or a permission grant. Use bounded IDs/time windows/fields and retain sanitized
+source/correlation findings, not raw records.
+
+Host Copilot MCP connections are not automatically inherited. Existing MCP
+tools must separately be available and authorized in the executing runtime.
+No Cosmos credentials, connection strings or production scope are configured
+by this feature. Direct production helpers are not supported here; the existing
+separately approved local-API production-read-only exception is unchanged.
+Missing access or row-level evidence remains a blocker, not proof that SAP
+rejected an item or a reason to invent a code fix.
+
+#### Review an interrupted attempt
+
+Open the attempt in **Watcher jobs**, select **Review interrupted attempt**, and
+inspect its ticket, retained result/checks, matching local branches, linked PRs
+and ownership status. Check the review confirmation before choosing **Accept
+recorded result**, **Authorize safe retry**, or **Leave blocked**.
+The same review is available without the dashboard:
+
+```powershell
+fixlab watch-review "C:\source\application" --ticket 42
+fixlab watch-recover "C:\source\application" --ticket 42 --decision retry --review-token "<reviewToken from watch-review>" --yes
+```
+
+Decisions are `accept`, `retry` and `leave`. Use the token from your actual fresh
+review, not the placeholder. Changes to the journal, profile, ticket, linked PRs
+or matching branches require another review. The previous watcher lock and
+canonical executor reservation must already be absent; retained/unknown ownership
+blocks recovery. Reconnect to its owner to confirm termination. Never delete
+locks, leases or edit the journal to work around that check.
+
+Acceptance requires a retained successful result for the unchanged ticket;
+drafts must still pass provider verification. Analysis/check records remain
+agent-reported, so review their evidence yourself. A legacy missing result
+cannot be accepted. An active linked PR prevents retry: inspect and reconcile
+that PR first. Local branch discovery is limited to 20 names containing the
+ticket ID, not proof that no other work exists.
+
+Every confirmed decision is saved against the original attempt (up to 20
+decisions per attempt); history and artifacts are preserved. Recovery does not
+post Discussion feedback, resolve work items, alter Git or start an executor.
+After retry authorization, separately restart the watcher with its normal
+reviewed `--yes --allow-all-tools` session. Leaving blocked retains the barrier.
+Recovery does not grant tool permissions or bypass organization policy.
 
 To opt into automatic investigation handoff, first review the plan with
 `--resolve-on-completion`, then add the normal session confirmations:
@@ -792,11 +931,14 @@ opt-in retain their no-state-change behavior. Resolved items are no longer picke
 Reopening an automatically resolved item at a newer work-item revision permits
 one new attempt even if its problem text is unchanged; own feedback remains deduplicated.
 
-This version requires Agency and a locally authenticated Azure CLI identity
+Install and authenticate the selected Agency or Copilot runtime and a local Azure CLI identity
 with the relevant ADO permissions. IcM enters through a tagged linked ADO
 record, not a direct IcM connector. Watcher intake is text-only. It is not a
 dashboard job, hosted service, webhook or boot-time task: the local command
 must remain running. Ctrl+C stops it; `--once` permits at most one investigation.
+On Windows the owned executor requires the runtime's actual `.exe`, not a shell
+wrapper. Copilot model selection uses `--model`; Agency does not accept that flag.
+The watcher uses owned CLI transport, not the dashboard's interactive native SDK.
 More than 20 eligible candidates explicitly stops the scan; narrow the tag or
 areas instead of silently omitting tickets.
 

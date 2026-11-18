@@ -103,6 +103,15 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     assert.match(plan.stdout, /"requiresConfirmation": true/);
     assert.match(plan.stdout, /"targetBranch": "develop"/);
     assert.match(plan.stdout, /No work-item state changes/);
+    const copilotArgs = ["watch", repository, "--runtime", "copilot", "--model", "gpt-5.3-codex", "--environment", "dev"];
+    const copilot = run(copilotArgs, repository);
+    assert.equal(copilot.status, 0, copilot.stderr);
+    assert.match(copilot.stdout, /"runtime": "copilot"/);
+    assert.match(copilot.stdout, /"model": "gpt-5.3-codex"/);
+    assert.match(copilot.stdout, /Plan only/);
+    const copilotUnapproved = run([...copilotArgs, "--yes", "--once"], repository);
+    assert.equal(copilotUnapproved.status, 1);
+    assert.match(copilotUnapproved.stderr, /--allow-all-tools/);
     const resolutionPlan = run([...args, "--resolve-on-completion"], repository);
     assert.equal(resolutionPlan.status, 0, resolutionPlan.stderr);
     assert.match(resolutionPlan.stdout, /Resolved after a verified draft PR or a confirmed cause/);
@@ -111,6 +120,16 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     const unapproved = run([...args, "--yes", "--once"], repository);
     assert.equal(unapproved.status, 1);
     assert.match(unapproved.stderr, /--allow-all-tools/);
+    const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+    const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+    mkdirSync(join(repository, "portal"));
+    profile.ticketAutomation.migrations = [{ workItemId: 42, allowedPaths: ["portal"] }];
+    writeFileSync(profilePath, JSON.stringify(profile));
+    const migrationPlan = run(args, repository);
+    assert.equal(migrationPlan.status, 0, migrationPlan.stderr);
+    const disclosure = JSON.parse(migrationPlan.stdout.slice(0, migrationPlan.stdout.lastIndexOf("}") + 1));
+    assert.deepEqual(disclosure.migrations, [{ workItemId: 42, allowedPaths: ["portal"] }]);
+    assert.match(migrationPlan.stdout, /Plan only/);
     const unknown = run([...args, "--unknown-watch-option"], repository);
     assert.equal(unknown.status, 1);
     assert.match(unknown.stderr, /Usage: fixlab watch/);
@@ -118,6 +137,23 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
   } finally {
     rmSync(repository, { recursive: true, force: true });
   }
+});
+
+test("watch recovery CLI validates IDs and confirmation before accessing providers or changing state", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-recovery-"));
+  try {
+    const review = run(["watch-review", repository, "--ticket", "../42"], repository);
+    assert.equal(review.status, 1);
+    assert.match(review.stderr, /positive --ticket/);
+    const mutatingReview = run(["watch-review", repository, "--ticket", "42", "--yes"], repository);
+    assert.equal(mutatingReview.status, 1);
+    assert.match(mutatingReview.stderr, /read-only/);
+    const recover = run(["watch-recover", repository, "--ticket", "42", "--decision", "retry",
+      "--review-token", "a".repeat(64)], repository);
+    assert.equal(recover.status, 1);
+    assert.match(recover.stderr, /explicitly confirm/);
+    assert.equal(existsSync(join(repository, ".git")), false);
+  } finally { rmSync(repository, { recursive: true, force: true }); }
 });
 
 test("direct shared-mode bug fixing requires dashboard-owned branch acquisition", () => {

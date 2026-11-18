@@ -157,6 +157,7 @@ const watcherStatus = document.querySelector("#watcher-status");
 const watcherAttempts = document.querySelector("#watcher-attempts");
 const expandedWatcherAttempts = new Set();
 let watcherHistorySignature = "";
+let pendingWatcherHandoff = null;
 const bugResultsPanel = document.querySelector("#bug-results-panel");
 const bugResultsElement = document.querySelector("#bug-results");
 const agentActivityPanel = document.querySelector("#agent-activity-panel");
@@ -1259,6 +1260,8 @@ document.querySelectorAll("[data-open]").forEach((button) => {
   button.addEventListener("click", () => openWorkspaceSection(button.dataset.open));
 });
 document.querySelector("#new-conversation").addEventListener("click", () => {
+  pendingWatcherHandoff = null;
+  document.querySelector("#watcher-handoff-notice").hidden = true;
   draftingConversation = true;
   renderJob(null, activeJob);
   openWorkspaceSection("new-job-panel");
@@ -2562,11 +2565,15 @@ function loadedScreenshotFile(screenshot) {
 
 document.querySelectorAll("input[name='intakeSource']").forEach((input) => {
   input.addEventListener("change", () => {
+    pendingWatcherHandoff = null;
+    document.querySelector("#watcher-handoff-notice").hidden = true;
     azureDevOpsIntake.hidden = selectedIntakeSource() !== "azure-devops";
   });
 });
 
 loadWorkItemButton.addEventListener("click", async () => {
+  pendingWatcherHandoff = null;
+  document.querySelector("#watcher-handoff-notice").hidden = true;
   formError.textContent = "";
   loadWorkItemButton.disabled = true;
   try {
@@ -2718,6 +2725,7 @@ async function refreshWatcherHistory() {
     const reported = body.updatedAt ? new Date(body.updatedAt).toLocaleString() : "time not recorded";
     watcherStatus.textContent = labels[body.status] ??
       `Last reported: ${body.status} at ${reported}. Scan interval: ${body.pollSeconds} seconds. ${body.message || ""}`;
+    if (body.titleWarning) { watcherStatus.textContent += ` ${body.titleWarning}`; }
     watcherAttempts.replaceChildren();
     const link = (text, url) => {
       if (!/^https:\/\/dev\.azure\.com\//u.test(url)) { throw new Error("Recorded watcher link is invalid."); }
@@ -2741,12 +2749,14 @@ async function refreshWatcherHistory() {
       if (attempt.status === "feedback-pending") { status = "Result ready; feedback pending"; }
       if (attempt.status === "complete") {
         status = `Feedback recorded - ${attempt.outcome || "validation status unknown"}`;
+      } else if (attempt.status === "reconciled") {
+        status = `Reviewed recovery - ${attempt.recovery.at(-1)?.decision || "unknown"}`;
       } else if (body.status === "blocked" || body.status === "stopped") {
         status = `Review required - last recorded ${attempt.status}`;
       }
       heading.textContent = `Work item ${attempt.workItemId} - ${status}`;
       const links = document.createElement("p");
-      links.append(link("Open work item and Discussion", attempt.workItemUrl));
+      links.append(link(`ADO ${attempt.workItemId}${attempt.title ? ` - ${attempt.title}` : ""} (work item and Discussion)`, attempt.workItemUrl));
       if (attempt.pullRequestUrl) {
         links.append(" | ", link("Recorded PR", attempt.pullRequestUrl));
       }
@@ -2757,12 +2767,197 @@ async function refreshWatcherHistory() {
         ? attempt.summary || "No final summary recorded yet."
         : "Detailed history was not recorded or has expired. See the work item's Discussion.";
       detail.append(heading, links, timing, summary);
+      if (attempt.status === "complete" && attempt.historyAvailable && attempt.outcome) {
+        const prepare = document.createElement("button");
+        prepare.type = "button";
+        prepare.textContent = "Continue in FixLab";
+        const panel = document.createElement("div");
+        prepare.addEventListener("click", async () => {
+          prepare.disabled = true;
+          panel.textContent = "Refreshing the ticket, existing PRs and recorded evidence...";
+          const instance = dashboardInstanceId;
+          try {
+            const review = await fetchJson("/api/ticket-automation/handoff-review", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ attemptId: attempt.id })
+            });
+            panel.replaceChildren();
+            for (const text of [
+              `${review.title}. Environment: ${review.environment}; target: ${review.targetBranch}.`,
+              review.message,
+              "Continue only the approved repository work. Cross-team dependencies remain explicit blockers; watcher tool/data permissions do not transfer."
+            ]) {
+              const description = document.createElement("p");
+              description.textContent = text;
+              panel.append(description);
+            }
+            for (const pr of review.pullRequests) {
+              const description = document.createElement("p");
+              description.append(link(`Related PR ${pr.id}: ${pr.status}`, pr.webUrl));
+              panel.append(description);
+            }
+            const confirmation = document.createElement("input");
+            confirmation.type = "checkbox";
+            const label = document.createElement("label");
+            label.append(confirmation, " I reviewed the findings, dependencies and implementation scope.");
+            const compose = document.createElement("button");
+            compose.type = "button";
+            compose.textContent = "Prepare local job";
+            compose.disabled = true;
+            confirmation.addEventListener("change", () => { compose.disabled = !confirmation.checked; });
+            compose.addEventListener("click", () => {
+              if (instance !== dashboardInstanceId) {
+                panel.textContent = "The dashboard instance changed. Review the attempt again.";
+                return;
+              }
+              const environment = [...targetEnvironmentSelect.options].find(option =>
+                option.value.toLowerCase() === review.environment.toLowerCase());
+              if (!environment) {
+                panel.textContent = "The recorded environment is unavailable. Review the profile first.";
+                return;
+              }
+              if ((requestInput.value || selectedScreenshots.length) &&
+                  !window.confirm("Replace the current draft request and attached screenshots with this reviewed handoff? Existing jobs remain unchanged.")) { return; }
+              draftingConversation = true;
+              renderJob(null, activeJob);
+              loadedWorkItems = review.jobInput.workItems;
+              form.elements.intakeSource.value = "azure-devops";
+              azureDevOpsIntake.hidden = false;
+              form.querySelector('[name="mode"][value="fix-and-validate"]').checked = true;
+              form.elements.requestType.value = review.jobInput.requestType;
+              targetEnvironmentSelect.value = environment.value;
+              updatePostRequestsOption();
+              for (const name of ["allowAllTools", "deferValidation", "skipLiveTests", "useDeployedBackend"]) {
+                form.querySelector(`[name="${name}"]`).checked = false;
+              }
+              allowPostRequestsInput.checked = false;
+              allowDevWritesInput.checked = false;
+              selectedScreenshots = [];
+              renderScreenshots();
+              renderWorkItems(loadedWorkItems);
+              requestInput.value = review.jobInput.request;
+              pendingWatcherHandoff = {
+                attemptId: review.attemptId, reviewToken: review.reviewToken,
+                instanceId: instance, confirmed: true
+              };
+              const notice = document.querySelector("#watcher-handoff-notice");
+              notice.textContent = `Prepared from watcher ticket ${review.workItemId}. Review scope and run options, then submit. No job has started.`;
+              notice.hidden = false;
+              openWorkspaceSection("new-job-panel");
+              requestInput.focus();
+            });
+            panel.append(label, compose);
+          } catch (error) {
+            panel.textContent = error.message;
+          } finally {
+            prepare.disabled = false;
+          }
+        });
+        detail.append(prepare, panel);
+      }
+      for (const record of attempt.recovery ?? []) {
+        const audit = document.createElement("p");
+        audit.textContent = `Recovery decision: ${record.decision} at ${new Date(record.reviewedAt).toLocaleString()}.`;
+        detail.append(audit);
+      }
+      if (attempt.status === "running") {
+        const reviewButton = document.createElement("button");
+        reviewButton.type = "button";
+        reviewButton.textContent = "Review interrupted attempt";
+        const panel = document.createElement("div");
+        reviewButton.addEventListener("click", async () => {
+          reviewButton.disabled = true;
+          panel.textContent = "Checking ticket, linked PRs, local branches and executor ownership...";
+          try {
+            const review = await fetchJson("/api/ticket-automation/review", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ workItemId: attempt.workItemId })
+            });
+            panel.replaceChildren();
+            for (const text of [
+              `${review.title}. Environment: ${review.environment}; target: ${review.targetBranch}.`,
+              review.ownership,
+              review.ticketChanged ? "The ticket changed since this attempt. Acceptance is unavailable." : "The ticket still matches this attempt.",
+              review.result ? `Stored result (${review.result.outcome}): ${review.result.summary}` : "No final result was retained. Missing evidence cannot be accepted.",
+              `Matching local branches: ${review.branches.join("; ") || "none found"}.`,
+              review.limitations, review.acceptMessage, review.retryMessage
+            ]) {
+              const description = document.createElement("p");
+              description.textContent = text;
+              panel.append(description);
+            }
+            for (const pr of review.pullRequests) {
+              const description = document.createElement("p");
+              description.append(link(`Linked PR ${pr.id}: ${pr.status}${pr.isDraft ? " (draft)" : ""}`, pr.webUrl));
+              panel.append(description);
+            }
+            const label = document.createElement("label");
+            const confirmation = document.createElement("input");
+            confirmation.type = "checkbox";
+            label.append(confirmation, " I reviewed the ticket, existing work and limitations.");
+            panel.append(label);
+            for (const [decision, title, allowed] of [
+              ["accept", "Accept recorded result", review.canAccept],
+              ["retry", "Authorize safe retry", review.canRetry],
+              ["leave", "Leave blocked", review.executorStopped]
+            ]) {
+              const action = document.createElement("button");
+              action.type = "button";
+              action.textContent = title;
+              action.disabled = true;
+              confirmation.addEventListener("change", () => { action.disabled = !confirmation.checked || !allowed; });
+              action.addEventListener("click", async () => {
+                for (const button of panel.querySelectorAll("button")) { button.disabled = true; }
+                confirmation.disabled = true;
+                try {
+                  const result = await fetchJson("/api/ticket-automation/reconcile", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      workItemId: attempt.workItemId, reviewToken: review.reviewToken, decision, confirmed: true
+                    })
+                  });
+                  panel.textContent = result.message;
+                  watcherHistorySignature = "";
+                  await refreshWatcherHistory();
+                } catch (error) {
+                  panel.textContent = `${error.message} Review the attempt again before deciding.`;
+                  reviewButton.disabled = false;
+                }
+              });
+              panel.append(action);
+            }
+          } catch (error) {
+            panel.textContent = `${error.message} Nothing was reconciled.`;
+          } finally {
+            reviewButton.disabled = false;
+          }
+        });
+        detail.append(reviewButton, panel);
+      }
       if (attempt.confirmedCause) {
         for (const [label, field] of [["Confirmed cause (agent-reported)", "cause"], ["Recorded evidence", "evidence"], ["Next steps", "nextSteps"]]) {
           const description = document.createElement("p");
           description.textContent = `${label}: ${attempt.confirmedCause[field]}`;
           detail.append(description);
         }
+      }
+      if (attempt.report) {
+        const report = document.createElement("details");
+        const title = document.createElement("summary");
+        title.textContent = "Detailed investigation report";
+        report.append(title);
+        for (const [field, values] of Object.entries(attempt.report)) {
+          const heading = document.createElement("h4");
+          heading.textContent = field.replace(/([a-z])([A-Z])/gu, "$1 $2");
+          const list = document.createElement("ul");
+          for (const value of Array.isArray(values) ? values : [values]) {
+            const item = document.createElement("li");
+            item.textContent = value;
+            list.append(item);
+          }
+          report.append(heading, list);
+        }
+        detail.append(report);
       }
       if (attempt.resolution) {
         const resolution = document.createElement("p");
@@ -2877,11 +3072,14 @@ form.addEventListener("submit", async (event) => {
         manualLocalhostTest:
           data.get("manualLocalhostTest") === "on",
         intakeSource,
+        ...(pendingWatcherHandoff ? { watcherHandoff: pendingWatcherHandoff } : {}),
         workItems: intakeSource === "azure-devops" ? loadedWorkItems : [],
         screenshots
       })
     });
     requestInput.value = "";
+    pendingWatcherHandoff = null;
+    document.querySelector("#watcher-handoff-notice").hidden = true;
     form.querySelector('[name="allowAllTools"]').checked = false;
     for (const name of ["deferValidation", "skipLiveTests", "useDeployedBackend"]) {
       form.querySelector(`[name="${name}"]`).checked = false;

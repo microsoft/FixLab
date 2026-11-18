@@ -29,6 +29,7 @@ import {
   buildJobPrompt,
   createCacheContext,
   createCopilotExecutor,
+  createRuntimeExecutor,
   createDashboardServer,
   configuredTestSynthesis,
   createProcessCompletion,
@@ -75,18 +76,71 @@ test("watcher monitoring exposes only this repository's recorded history and nev
     client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
     execute: async () => ({ outcome: "blocked", summary: "Human sign-in is required; no live tests ran." })
   });
-  const current = await startDashboard(repository, () => { assert.fail("Monitoring must not execute a job."); });
+  const journalPath = join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+  const legacy = JSON.parse(readFileSync(journalPath, "utf8"));
+  delete legacy.entries[0].title;
+  writeFileSync(journalPath, JSON.stringify(legacy));
+  const legacyBefore = readFileSync(journalPath, "utf8");
+  let titleCalls = 0;
+  const current = await startDashboard(repository, () => { assert.fail("Monitoring must not execute a job."); },
+    undefined, { ticketClient: {
+      load: async () => item, reviewPullRequests: async () => [],
+      loadTitles: async () => {
+        titleCalls += 1;
+        if (titleCalls > 1) { throw new Error("Synthetic title access failure"); }
+        return { 42: "Synthetic ADO title" };
+      }
+    } });
   try {
     const response = await jsonRequest(current.url, "/api/ticket-automation");
     assert.equal(response.response.status, 200);
     assert.equal(response.body.environment, "DEV");
     assert.equal(response.body.attempts[0].outcome, "blocked");
+    assert.equal(response.body.attempts[0].title, "Synthetic ADO title");
+    assert.equal(readFileSync(journalPath, "utf8"), legacyBefore);
+    await jsonRequest(current.url, "/api/ticket-automation");
+    assert.equal(titleCalls, 1, "Repeated polling must reuse bounded title metadata");
     assert.match(response.body.attempts[0].workItemUrl, /^https:\/\/dev\.azure\.com\/example-org\/Example\//);
     assert.equal((await jsonRequest(current.url, "/api/status")).body.job, null);
     const denied = await jsonRequest(current.url, "/api/ticket-automation", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "retry" })
     });
     assert.equal(denied.response.status, 404);
+    item.title = "Synthetic interrupted fixture";
+    await assert.rejects(watchTickets({
+      repository, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+      client: { findTagged: async () => [42], load: async () => item },
+      execute() { throw new Error("Synthetic interrupted execution"); }
+    }), /Synthetic interrupted/);
+    git(repository, ["branch", "fix/42-interrupted"]);
+    const journal = join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const before = readFileSync(journal, "utf8");
+    const request = (path, body, origin = current.url) => jsonRequest(current.url, path, {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify(body)
+    });
+    const rejected = await request("/api/ticket-automation/review", { workItemId: 42 }, "https://untrusted.example");
+    assert.equal(rejected.response.status, 403);
+    const review = await request("/api/ticket-automation/review", { workItemId: 42 });
+    assert.equal(review.response.status, 200);
+    assert.equal(review.body.canRetry, true);
+    assert.ok(review.body.branches.some(branch => branch.startsWith("fix/42-interrupted ")));
+    assert.equal(readFileSync(journal, "utf8"), before);
+    const recovery = { workItemId: 42, reviewToken: review.body.reviewToken, decision: "retry" };
+    assert.equal((await request("/api/ticket-automation/reconcile", recovery)).response.status, 409);
+    assert.equal(readFileSync(journal, "utf8"), before);
+    const recovered = await request("/api/ticket-automation/reconcile", { ...recovery, confirmed: true });
+    assert.equal(recovered.response.status, 200);
+    assert.equal((await jsonRequest(current.url, "/api/status")).body.job, null);
+    const retired = JSON.parse(readFileSync(journalPath, "utf8"));
+    retired.entries.at(-1).id = 43;
+    delete retired.entries.at(-1).title;
+    writeFileSync(journalPath, JSON.stringify(retired));
+    const unavailable = await jsonRequest(current.url, "/api/ticket-automation");
+    assert.equal(unavailable.response.status, 200);
+    assert.match(unavailable.body.titleWarning, /ADO titles could not be loaded/);
+    assert.equal(unavailable.body.attempts[0].workItemId, 43);
+    assert.doesNotMatch(JSON.stringify(unavailable.body), /Synthetic title access failure/);
     writeFileSync(join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json"),
       '{"private-sentinel-malformed');
     const invalid = await jsonRequest(current.url, "/api/ticket-automation");
@@ -95,6 +149,118 @@ test("watcher monitoring exposes only this repository's recorded history and nev
   } finally {
     await current.dashboard.close();
     rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("reviewed watcher handoff preserves the active job, canonical intake, permissions and durable duplicate protection", async () => {
+  const repository = createGitRepository();
+  git(repository, ["remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]);
+  const profile = validProfile({
+    environments: ["dev", "sit"], ticketAutomation: { areaPaths: ["Example\\Application"] },
+    analysis: { evidenceSources: [{ id: "incident-traces", kind: "traces", environment: "dev", helper: "trace-helper.mjs" }] }
+  });
+  writeFileSync(join(repository, "trace-helper.mjs"), 'throw new Error("Do not execute discovery.");');
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  git(repository, ["add", "."]);
+  git(repository, ["commit", "--quiet", "-m", "Reviewed fixture profile"]);
+  const item = { id: 42, revision: 1, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic handoff", comments: [] };
+  const ticketClient = {
+    findTagged: async () => [42], load: async () => structuredClone(item),
+    hasComment: async () => false, async comment() {}, reviewPullRequests: async () => []
+  };
+  await watchTickets({
+    repository, plan: ticketAutomationPlan(repository, profile, { environment: "dev" }),
+    once: true, confirmed: true, allowAllTools: true, onEvent() {}, client: ticketClient,
+    execute: async () => ({ outcome: "analysis", summary: "Requires an agreed cross-layer implementation." })
+  });
+  let executions = 0;
+  const current = await startDashboard(repository, ({ prompt }) => {
+    executions += 1;
+    assert.match(prompt, /incident-traces/);
+    assert.match(prompt, /Discovery grants no tool or data access/);
+    return { completion: new Promise(() => {}), terminate() {} };
+  }, undefined, { ticketClient });
+  let restored;
+  try {
+    const post = (path, body, origin = current.url) => jsonRequest(current.url, path, {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify(body)
+    });
+    const active = await post("/api/jobs", {
+      request: "Keep the existing validation job.", mode: "validate-only", targetEnvironment: "dev"
+    });
+    assert.equal(active.response.status, 202);
+    const status = (await jsonRequest(current.url, "/api/status")).body;
+    const history = (await jsonRequest(current.url, "/api/ticket-automation")).body;
+    const attemptId = history.attempts[0].id;
+    assert.equal((await post("/api/ticket-automation/handoff-review", { attemptId },
+      "https://untrusted.example")).response.status, 403);
+    const review = (await post("/api/ticket-automation/handoff-review", { attemptId })).body;
+    const input = {
+      ...review.jobInput, mode: "fix-and-validate",
+      workItems: [{ id: 999, title: "Forged item must not replace the reviewed ticket." }],
+      watcherHandoff: { attemptId, reviewToken: review.reviewToken, instanceId: status.instanceId }
+    };
+    assert.equal((await post("/api/jobs", input)).response.status, 409);
+    input.watcherHandoff.confirmed = true;
+    assert.equal((await post("/api/jobs", input, "https://untrusted.example")).response.status, 403);
+    assert.equal((await post("/api/jobs", { ...input, targetEnvironment: "sit" })).response.status, 409);
+    item.revision += 1;
+    assert.equal((await post("/api/jobs", input)).response.status, 409);
+    input.watcherHandoff.reviewToken =
+      (await post("/api/ticket-automation/handoff-review", { attemptId })).body.reviewToken;
+    const started = await post("/api/jobs", input);
+    assert.equal(started.response.status, 202, JSON.stringify(started.body));
+    assert.equal(started.body.queued, true);
+    assert.equal(started.body.job.id, active.body.job.id);
+    assert.equal(started.body.queuedJob.bugs[0].id, "42");
+    assert.equal(started.body.queuedJob.toolApprovalMode, "ask");
+    assert.equal(started.body.queuedJob.watcherHandoff.attemptId, attemptId);
+    assert.equal(executions, 1, "The handoff queues normally and never replays the watcher.");
+    assert.equal((await post("/api/jobs", input)).response.status, 409);
+    await current.dashboard.close();
+    restored = await startDashboard(repository, () => { assert.fail("Recovery must not auto-execute."); },
+      undefined, { ticketClient });
+    const recovered = (await jsonRequest(restored.url, "/api/status")).body;
+    assert.equal(recovered.history.find(job => job.id === started.body.queuedJob.id)
+      .watcherHandoff.attemptId, attemptId);
+    const duplicate = await jsonRequest(restored.url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: restored.url },
+      body: JSON.stringify({ ...input, watcherHandoff: {
+        ...input.watcherHandoff, instanceId: recovered.instanceId
+      } })
+    });
+    assert.equal(duplicate.response.status, 409);
+    assert.match(duplicate.body.error, /already linked to local job/);
+  } finally {
+    if (restored) { await restored.dashboard.close(); }
+    await current.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("headless runtime selection resolves Copilot directly rather than falling back to Agency or the native SDK", context => {
+  const original = childProcess.spawnSync;
+  const calls = [];
+  const lookup = context.mock.method(childProcess, "spawnSync", (command, args, options) => {
+    if (args?.[0] === "copilot" && ["where.exe", "which"].includes(command)) {
+      calls.push({ command, args });
+      return { status: 1, stdout: "", stderr: "" };
+    }
+    return original(command, args, options);
+  });
+  syncBuiltinESMExports();
+  try {
+    const executor = createRuntimeExecutor({
+      packageRoot, runtime: "copilot", model: "gpt-5.3-codex", native: false
+    });
+    assert.throws(() => executor({ repository: process.cwd(), prompt: "Do not launch a real runtime." }),
+      error => error.executorNotStarted === true && /copilot executable is unavailable/.test(error.message));
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args, ["copilot"]);
+  } finally {
+    lookup.mock.restore();
+    syncBuiltinESMExports();
   }
 });
 
@@ -5585,7 +5751,7 @@ test("dashboard queues concurrent jobs and starts the next passed job", async ()
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         request: "Reject this request type.",
-        requestType: "feature",
+        requestType: "unsupported-type",
         mode: "validate-only"
       })
     });

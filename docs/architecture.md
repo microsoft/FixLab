@@ -10,7 +10,7 @@ FixLab separates orchestration from repository-specific behavior.
 The optional `fixlab watch` entry point polls explicitly tagged ADO work items
 under reviewed application area paths. It derives repository authority from the
 checkout's Git origin, requires a selected non-production environment, and uses
-the owned Agency executor for one sequential investigation per polling pass.
+the owned Agency or Copilot CLI executor for one sequential investigation per polling pass.
 The agent proposes either a draft PR or analysis; the watcher independently
 verifies draft/repository/branch/work-item linkage and owns escaped Discussion
 feedback. Its Git-private journal records execution before launch and feedback
@@ -20,12 +20,43 @@ approved local session is separate from dashboard jobs and normal per-executor
 tool consent. Setup only supplies defaults; it never starts a watcher.
 
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
-journal through `GET /api/ticket-automation`; it never starts, retries or controls
+journal through `GET /api/ticket-automation`; reading never starts or changes
 watcher work. Future attempts retain timestamps, safe structured activity and
 agent-reported check/scenario outcomes. Raw output is not retained. The latest
 20 attempts retain at most 20 activity and 10 check updates each; older entries
 keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown.
 Last reported worker status is not a process-liveness assertion.
+
+Completed attempts support a separate local-job handoff review. An exact-origin
+POST refreshes the ticket and linked PRs and binds a token to the attempt,
+profile/helper revisions and provider evidence. Confirmation prepares the normal
+job form only; submission rechecks that evidence and attaches canonical intake
+plus durable attempt provenance. Duplicate retained handoffs are rejected.
+Ordinary queues, leases, workspace review, permissions and PR gates remain
+authoritative; watcher grants never transfer. Short Discussion comments retain
+full structured reports in expandable watcher history.
+
+Optional `analysis.evidenceSources` identifies contained repository-owned
+Cosmos/trace helpers by non-production environment. Shared discovery emits
+bounded metadata and content revisions to watcher, CLI and dashboard execution;
+it never runs a helper or grants access. Dashboard launches refresh discovery,
+including continuations. The helper's reviewed authentication/read-only
+enforcement and normal runtime permissions remain necessary; no host MCP
+configuration or production access is inherited.
+
+Interrupted-attempt review is shared by the dashboard and `watch-review` CLI.
+It reads the bound ticket, linked provider PRs, matching local branches and
+ownership reservations. Separately confirmed reconciliation acquires the watcher
+lock and canonical executor lease and checks a fresh snapshot token before
+recording acceptance, retry authorization or a decision to remain blocked.
+It never clears another ownership reservation, launches an executor, changes
+Git/ADO state or deletes prior attempts. Retry removes only that attempt's
+deduplication barrier; a normally approved watcher restart is still required.
+Acceptance requires a stored successful result and unchanged ticket, plus fresh
+provider verification for draft PRs. Results returned before a ticket/configuration
+change are retained for review, not automatically published.
+Copilot watcher sessions explicitly use CLI transport; dashboard sessions retain
+the native SDK transport and its existing interactive publication permissions.
 
 Explicit `--resolve-on-completion` (or reviewed `ticketAutomation.resolveOnCompletion`)
 permits the watcher, not the agent, to set `Resolved` after a separately verified

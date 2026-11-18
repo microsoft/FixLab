@@ -44,6 +44,7 @@ import { validateJobFileAccess } from "./runtime-permission-policy.js";
 import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, allowsUnverifiedDraft, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-policy.js";
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
+import { analysisEvidenceContext, configuredAnalysisEvidence } from "./analysis-evidence.js";
 import { createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval, inspectPpeWriteConfiguration, isOriginWriteApproval } from "./dev-post.js";
 import { browserConfigurationErrors } from "./repository-setup.js";
 import { applyRepositorySettings, inspectRepositorySettings, localRepository, planRepositorySettings } from "./repository-settings.js";
@@ -55,7 +56,8 @@ import { compactControlResult, conversationOperations } from "./conversation-ope
 const windowsOwnedTrees = new WeakMap();
 import { ValidationSession, validationGates, selectedValidationGates, defaultValidationIntent } from "./validation-gates.js";
 import { repositoryState } from "../bin/structured-command.js";
-import { readTicketAutomationHistory } from "./ticket-automation.js";
+import { readTicketAutomationHistory, readTicketAutomationTitles, reviewInterruptedTicket, reconcileInterruptedTicket, reviewTicketHandoff } from "./ticket-automation.js";
+import { sanitizeCommandOutput } from "../bin/structured-command.js";
 import { configuredValidationEnvironments, validateTargetEnvironment } from "./validation-environments.js";
 export { configuredValidationEnvironments, validateTargetEnvironment } from "./validation-environments.js";
 import {
@@ -537,6 +539,7 @@ function publicQueue(jobs) {
   return jobs.map((job, index) => ({
     id: job.id,
     position: index + 1,
+    watcherHandoff: job.watcherHandoff ?? null,
     request: safeSummary(job.request),
     requestType: job.requestType,
     engineeringSummary: job.engineeringSummary ?? null,
@@ -702,6 +705,7 @@ function dashboardSnapshot(job) {
     intakeSource: job.intakeSource,
     workItem: persistedWorkItem(job.workItem),
     workItems: job.workItems.map(persistedWorkItem),
+    watcherHandoff: job.watcherHandoff ?? null,
     mode: job.mode,
     status: job.status,
     createdAt: job.createdAt,
@@ -812,6 +816,7 @@ function restoreDashboardJob(snapshot, repository) {
     manualLocalhostResult: snapshot.manualLocalhostResult ?? null,
     workItem: snapshot.workItem ?? null,
     workItems: snapshot.workItems ?? [],
+    watcherHandoff: snapshot.watcherHandoff ?? null,
     screenshots: [],
     artifactDirectory: null,
     inputs: [],
@@ -1159,7 +1164,7 @@ export function buildJobPrompt({
   const unverifiedDraft = allowsUnverifiedDraft({
     mode, workflow, deferValidation, manualLocalhostTest, runAllUiScenarios, testEvidence
   });
-  const smallEnhancement = requestType === "small-enhancement";
+  const smallEnhancement = ["small-enhancement", "feature"].includes(requestType);
   const intakeWorkItems =
     workItems.length > 0 ? workItems : workItem ? [workItem] : [];
   const intakeSummary = intakeWorkItems.map(
@@ -1253,7 +1258,8 @@ ${process.platform === "win32" ? "- Windows executor children are job-contained 
 - Check the affected surface and bound the file scope before editing.
 - Do not manufacture a failing defect reproduction. Use the smallest existing focused test that proves the acceptance contract.
 - Skip broad test suites and full builds unless the repository profile requires them or user-visible/risk evidence makes them necessary.
-- Preserve review, live-test, and pull-request evidence, and make no unrelated changes.`
+- Preserve review, live-test, and pull-request evidence, and make no unrelated changes.
+${requestType === "feature" ? "- Implement the user-approved feature scope rather than returning a plan solely because it crosses layers. Confirm unclear contracts and other teams' dependencies; keep them as explicit blockers in this same resumable job. Another repository requires its own reviewed job and permissions." : ""}`
     : `- Generate a concise fix contract from the reported behavior and expected outcome.
 - Diagnose/reproduce with repository evidence; never claim an unproven cause or reproduction. Use the smallest focused reproduction.`;
   if (playwrightOnly) {
@@ -2303,18 +2309,18 @@ export function createAgencyExecutor({ packageRoot }) {
   });
 }
 
-export function createCopilotExecutor({ packageRoot, model = "" }) {
+export function createCopilotExecutor({ packageRoot, model = "", native = true }) {
   const selectedModel = validateCopilotModel(model);
   return createExecutor({
     command: "copilot",
     packageRoot,
     buildInvocation: buildCopilotInvocation,
     defaultModel: selectedModel,
-    native: true
+    native
   });
 }
 
-export function createRuntimeExecutor({ packageRoot, runtime = "agency", model = "" }) {
+export function createRuntimeExecutor({ packageRoot, runtime = "agency", model = "", native = true }) {
   if (!FIXLAB_RUNTIMES.includes(runtime)) {
     throw new Error(
       `FixLab runtime must be one of: ${FIXLAB_RUNTIMES.join(", ")}`
@@ -2322,7 +2328,7 @@ export function createRuntimeExecutor({ packageRoot, runtime = "agency", model =
   }
   const selectedModel = validateCopilotModel(model, runtime);
   return runtime === "copilot"
-    ? createCopilotExecutor({ packageRoot, model: selectedModel })
+    ? createCopilotExecutor({ packageRoot, model: selectedModel, native })
     : createAgencyExecutor({ packageRoot });
 }
 
@@ -2372,6 +2378,7 @@ function publicJob(job) {
     intakeSource: job.intakeSource,
     workItem: publicWorkItem(job.workItem),
     workItems: job.workItems.map(publicWorkItem),
+    watcherHandoff: job.watcherHandoff ?? null,
     screenshots: job.screenshots.map(({ name, mimeType, bytes }) => ({
       name,
       mimeType,
@@ -3607,6 +3614,7 @@ export function createDashboardServer({
   publicDirectory = join(packageRoot, "dashboard", "public"),
   executor = createRuntimeExecutor({ packageRoot, runtime, model }),
   workItemLoader = createAzureDevOpsLoader(),
+  ticketClient,
   browserOpener = openLocalUrl,
   browserOwnership = inspectBrowserProfileOwnership,
   preflight = null,
@@ -3636,6 +3644,8 @@ export function createDashboardServer({
   const executorLease = createExecutorLease(resolvedRepository, sessions.id);
   let dashboardUrl = "";
   let closing = false;
+  let watcherTitleCache = { key: "", checkedAt: 0, titles: {}, warning: "" };
+  let watcherTitleLoad;
   const setupPlans = new Map();
 
   async function repositoryWorkspaceOwners(root) {
@@ -4020,6 +4030,10 @@ export function createDashboardServer({
       throw new Error("Saved job runtime does not match this dashboard; reconnect using its originating runtime.");
     }
     const currentProfile = loadRepositoryProfile(resolvedRepository);
+    const evidenceContext = analysisEvidenceContext(
+      configuredAnalysisEvidence(resolvedRepository, currentProfile, job.targetEnvironment)
+    );
+    if (evidenceContext) { prompt += `\n\n${evidenceContext}`; }
     if ((job.testEvidence.unitTestsOnly === true) !==
         (currentProfile.validation?.liveTestsRequired === false)) {
       throw new Error("The repository live-test policy changed; start a newly reviewed job.");
@@ -4920,11 +4934,56 @@ export function createDashboardServer({
 
     if (request.method === "GET" && requestUrl.pathname === "/api/ticket-automation") {
       try {
-        sendJson(response, 200, readTicketAutomationHistory(resolvedRepository));
+        const history = readTicketAutomationHistory(resolvedRepository);
+        const missing = history.attempts.filter(attempt => !attempt.title).slice(0, 20);
+        if (missing.length) {
+          const key = JSON.stringify(missing.map(attempt => attempt.workItemUrl));
+          if (watcherTitleCache.key !== key || Date.now() - watcherTitleCache.checkedAt > 300000) {
+            watcherTitleLoad ??= (async () => {
+              try {
+                const titles = await readTicketAutomationTitles(resolvedRepository,
+                  [...new Set(missing.map(attempt => attempt.workItemId))], ticketClient);
+                watcherTitleCache = { key, checkedAt: Date.now(), titles, warning: "" };
+              } catch {
+                watcherTitleCache = { key, checkedAt: Date.now(), titles: {},
+                  warning: "ADO titles could not be loaded. Showing recorded titles or work-item IDs; retry after five minutes." };
+              } finally { watcherTitleLoad = null; }
+            })();
+            await watcherTitleLoad;
+          }
+          for (const attempt of history.attempts) {
+            attempt.title ||= watcherTitleCache.titles[attempt.workItemId] ?? "";
+          }
+          history.titleWarning = watcherTitleCache.warning;
+        }
+        sendJson(response, 200, history);
       } catch {
         sendJson(response, 503, {
           error: "Watcher history could not be read. Review the private journal and repository scope. Nothing was started or changed."
         });
+      }
+      return;
+    }
+
+    if (request.method === "POST" &&
+        ["/api/ticket-automation/review", "/api/ticket-automation/reconcile", "/api/ticket-automation/handoff-review"].includes(requestUrl.pathname)) {
+      const expectedOrigin = `http://${DASHBOARD_HOST}:${server.address().port}`;
+      if (request.headers.host !== new URL(expectedOrigin).host || request.headers.origin !== expectedOrigin ||
+          !request.headers["content-type"]?.startsWith("application/json")) {
+        sendJson(response, 403, { error: "Watcher review requires this dashboard's exact loopback host and origin." });
+        return;
+      }
+      try {
+        const body = await readJsonBody(request, 4096);
+        const options = { ...body, client: ticketClient };
+        const result = requestUrl.pathname.endsWith("/handoff-review")
+          ? await reviewTicketHandoff(resolvedRepository, options)
+          : requestUrl.pathname.endsWith("/review")
+            ? await reviewInterruptedTicket(resolvedRepository, options)
+            : await reconcileInterruptedTicket(resolvedRepository, options);
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 409, { error: sanitizeCommandOutput(error.message).slice(0, 2000) });
       }
       return;
     }
@@ -6626,6 +6685,39 @@ export function createDashboardServer({
         });
         return;
       }
+      let watcherHandoff = null;
+      if (body.watcherHandoff !== undefined) {
+        const expectedOrigin = `http://${DASHBOARD_HOST}:${server.address().port}`;
+        if (request.headers.host !== new URL(expectedOrigin).host || request.headers.origin !== expectedOrigin) {
+          sendJson(response, 403, { error: "Watcher handoff requires this dashboard's exact loopback host and origin." });
+          return;
+        }
+        try {
+          if (body.watcherHandoff?.confirmed !== true ||
+              body.watcherHandoff.instanceId !== sessions.id || body.mode === "playwright-only") {
+            throw new Error("Explicitly review a watcher handoff for an implementation or analysis job.");
+          }
+          const review = await reviewTicketHandoff(resolvedRepository, {
+            attemptId: body.watcherHandoff.attemptId, client: ticketClient
+          });
+          if (body.watcherHandoff.reviewToken !== review.reviewToken ||
+              body.targetEnvironment !== review.environment) {
+            throw new Error("The handoff review is stale or its environment changed. Review the attempt again.");
+          }
+          const previous = [currentJob, ...queuedJobs, ...heldJobs, ...completedJobs, ...persistedJobs]
+            .find(job => job?.watcherHandoff?.attemptId === review.attemptId);
+          if (previous) { throw new Error(`This attempt is already linked to local job ${previous.id}; resume that job instead.`); }
+          watcherHandoff = {
+            attemptId: review.attemptId, workItemId: review.workItemId,
+            environment: review.environment, targetBranch: review.targetBranch
+          };
+          body.intakeSource = review.jobInput.intakeSource;
+          body.workItems = review.jobInput.workItems;
+        } catch (error) {
+          sendJson(response, 409, { error: sanitizeCommandOutput(error.message).slice(0, 2000) });
+          return;
+        }
+      }
       let validationIntent;
       try {
         validationIntent = body.validationIntent ??
@@ -6709,9 +6801,9 @@ export function createDashboardServer({
         return;
       }
       const requestType = body.requestType ?? "bug-fix";
-      if (!["bug-fix", "small-enhancement"].includes(requestType)) {
+      if (!["bug-fix", "small-enhancement", "feature"].includes(requestType)) {
         sendJson(response, 400, {
-          error: "requestType must be bug-fix or small-enhancement"
+          error: "requestType must be bug-fix, small-enhancement or feature"
         });
         return;
       }
@@ -7048,6 +7140,7 @@ export function createDashboardServer({
         intakeSource,
         workItem,
         workItems,
+        watcherHandoff,
         screenshots: storedScreenshots.files,
         artifactDirectory: storedScreenshots.directory,
         mode: body.mode,

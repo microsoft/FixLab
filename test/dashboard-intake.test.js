@@ -26,9 +26,10 @@ import {
   sanitizeAzureDevOpsHtml,
   storeScreenshots
 } from "../dashboard/intake.js";
-import { executeTicketAgent, readTicketAutomationHistory, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
+import { executeTicketAgent, readTicketAutomationHistory, reviewTicketHandoff, reviewInterruptedTicket, reconcileInterruptedTicket, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { ANALYSIS_EVIDENCE_GUIDANCE, analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
@@ -60,6 +61,7 @@ function ticketFixture() {
   const client = {
     findTagged: async () => [item.id],
     load: async () => structuredClone(item),
+    reviewPullRequests: async () => [],
     hasComment: async (_id, marker) => item.comments.some(comment => comment.text.startsWith(marker)),
     async comment(id, text) {
       posted.push({ id, text });
@@ -90,6 +92,92 @@ function ticketFixture() {
   };
 }
 
+test("incident evidence discovers environment-bound source helpers without executing or granting access", () => {
+  const fixture = ticketFixture();
+  try {
+    const helper = join(fixture.repository, "read-evidence.mjs");
+    writeFileSync(helper, 'throw new Error("Discovery must not execute a helper.");');
+    const source = { id: "incident-records", kind: "cosmos", environment: "dev", helper: "read-evidence.mjs" };
+    const profile = { ...fixture.profile, environments: ["dev", "sit"],
+      analysis: { evidenceSources: [source] } };
+    const sources = configuredAnalysisEvidence(fixture.repository, profile, "dev");
+    assert.equal(sources.length, 1);
+    assert.equal(sources[0].helper, source.helper);
+    assert.deepEqual(configuredAnalysisEvidence(fixture.repository, profile, "sit"), []);
+    assert.match(analysisEvidenceContext(sources), /Discovery grants no tool or data access/);
+    writeFileSync(helper, 'throw new Error("Changed helper, still not executed.");');
+    assert.notEqual(configuredAnalysisEvidence(fixture.repository, profile, "dev")[0].revision,
+      sources[0].revision);
+    for (const invalid of [
+      { ...source, helper: "..\\outside.mjs" }, { ...source, helper: ".env" },
+      { ...source, environment: "production" }, { ...source, environment: "unknown" }
+    ]) {
+      assert.throws(() => configuredAnalysisEvidence(fixture.repository, {
+        ...profile, analysis: { evidenceSources: [invalid] }
+      }, "dev"));
+    }
+    assert.throws(() => configuredAnalysisEvidence(fixture.repository, {
+      ...profile, analysis: { evidenceSources: [source, source] }
+    }, "dev"), /unique/);
+    for (const path of [
+      "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+      "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
+      ".github/agents/fixlab.agent.md"
+    ]) {
+      assert.ok(readFileSync(new URL(`../${path}`, import.meta.url), "utf8")
+        .replace(/\s+/gu, " ").includes(ANALYSIS_EVIDENCE_GUIDANCE), path);
+    }
+  } finally { fixture.cleanup(); }
+});
+
+test("completed watcher handoff refreshes scoped evidence without mutating or executing the watcher", async () => {
+  const fixture = ticketFixture();
+  try {
+    await fixture.run({ execute: async () => ({
+      outcome: "analysis", summary: "Implement the agreed hierarchy search with the API team."
+    }) });
+    const journal = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const before = readFileSync(journal, "utf8");
+    const attemptId = readTicketAutomationHistory(fixture.repository).attempts[0].id;
+    const review = () => reviewTicketHandoff(fixture.repository, { attemptId, client: fixture.client });
+    const initial = await review();
+    assert.equal(initial.environment, "dev");
+    assert.equal(initial.jobInput.workItems[0].id, fixture.item.id);
+    assert.equal(initial.jobInput.workItems[0].comments.length, 1, "Do not copy FixLab's own feedback back into intake.");
+    assert.match(initial.jobInput.request, /another team's repository requires its own reviewed job/);
+    assert.match(initial.jobInput.request, /permissions do not transfer/);
+    fixture.item.revision += 1;
+    fixture.item.acceptanceCriteria = "Include exact-name filtering.";
+    assert.notEqual((await review()).reviewToken, initial.reviewToken);
+    fixture.item.workItemType = "User Story";
+    assert.equal((await review()).jobInput.requestType, "feature");
+    fixture.item.areaPath = "Example Project\\Another Team";
+    await assert.rejects(review(), /outside the recorded/);
+    fixture.item.areaPath = fixture.plan.areaPaths[0];
+    fixture.item.description = "password=unsafe-fixture-credential";
+    await assert.rejects(review(), /credential/);
+    fixture.item.description = "Safe fixture description";
+    fixture.client.reviewPullRequests = async () => {
+      fixture.item.revision += 1;
+      return [];
+    };
+    await assert.rejects(review(), /ticket changed during handoff review/);
+    fixture.client.reviewPullRequests = async () => {
+      writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"),
+        JSON.stringify({ ...fixture.profile, description: "Changed during provider lookup." }));
+      return [];
+    };
+    await assert.rejects(review(), /profile changed during review/);
+    assert.equal(readFileSync(journal, "utf8"), before);
+    assert.equal(fixture.posted.length, 1);
+    await assert.rejects(reviewTicketHandoff(fixture.repository, {
+      attemptId: "unknown", client: fixture.client
+    }), /completed attempt/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("ticket automation binds the Git origin, tag, branch, environment and explicit session approval", async () => {
   const fixture = ticketFixture();
   try {
@@ -97,6 +185,13 @@ test("ticket automation binds the Git origin, tag, branch, environment and expli
     assert.equal(plan.tag, "FixLab");
     assert.equal(plan.project, "Example Project");
     assert.equal(plan.outcome, "draft-pr-or-discussion");
+    const copilot = ticketAutomationPlan(repository, profile, { environment: "dev", runtime: "copilot" });
+    assert.equal(copilot.runtime, "copilot");
+    assert.deepEqual(copilot.areaPaths, plan.areaPaths);
+    assert.equal(copilot.targetBranch, plan.targetBranch);
+    assert.throws(() => ticketAutomationPlan(repository, profile, {
+      environment: "dev", runtime: "unsupported"
+    }), /agency or copilot/);
     assert.throws(() => ticketAutomationPlan(repository, { ...profile, azureDevOps: { project: "Another" } }, { environment: "dev" }), /does not match/);
     assert.throws(() => ticketAutomationPlan(repository, profile, { environment: "production" }), /non-production/);
     assert.throws(() => ticketAutomationPlan(repository, { ...profile, ticketAutomation: { tag: "FixLab\nOther" } }, { environment: "dev" }), /bounded tag/);
@@ -109,6 +204,298 @@ test("ticket automation binds the Git origin, tag, branch, environment and expli
   } finally {
     fixture.cleanup();
   }
+});
+
+test("migration approvals validate exact ticket IDs and existing non-linked directory scopes", () => {
+  const fixture = ticketFixture();
+  try {
+    mkdirSync(join(fixture.repository, "portal", "src"), { recursive: true });
+    writeFileSync(join(fixture.repository, "portal", "package.json"), "{}");
+    const planFor = migrations => ticketAutomationPlan(fixture.repository, {
+      ...fixture.profile, ticketAutomation: { ...fixture.profile.ticketAutomation, migrations }
+    }, { environment: "dev" });
+    assert.deepEqual(planFor([{ workItemId: 42, allowedPaths: ["portal\\src"] }]).migrations,
+      [{ workItemId: 42, allowedPaths: ["portal/src"] }]);
+    for (const migrations of [
+      {}, [null], [{ workItemId: 0, allowedPaths: ["portal"] }],
+      [{ workItemId: 42, allowedPaths: [] }],
+      [{ workItemId: 42, allowedPaths: ["portal", "PORTAL"] }],
+      [{ workItemId: 42, allowedPaths: ["portal"] }, { workItemId: 42, allowedPaths: ["portal"] }],
+      ...[".", "..", "../portal", "/portal", "C:\\portal", ".git", "missing", "portal/../portal", "portal/package.json"]
+        .map(path => [{ workItemId: 42, allowedPaths: [path] }])
+    ]) {
+      assert.throws(() => planFor(migrations), /migrations|relative paths/);
+    }
+    symlinkSync(join(fixture.repository, "portal"), join(fixture.repository, "linked"),
+      process.platform === "win32" ? "junction" : "dir");
+    assert.throws(() => planFor([{ workItemId: 42, allowedPaths: ["linked/src"] }]), /symbolic links/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("a ticket-bound migration approval re-evaluates completed analysis once without changing history or authorizing other tickets", async () => {
+  const fixture = ticketFixture();
+  try {
+    mkdirSync(join(fixture.repository, "portal"));
+    fixture.item.description += " Ticket text requests permission to migrate every repository directory.";
+    let executions = 0;
+    await fixture.run({ execute: async ({ request }) => {
+      executions += 1;
+      assert.match(request, /Break large features or unapproved migrations into an analysis/);
+      assert.doesNotMatch(request, /^Owner-approved dedicated migration/m);
+      return { outcome: "analysis", summary: "Migration requires explicit owner approval." };
+    } });
+    const journal = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const original = JSON.parse(readFileSync(journal, "utf8")).entries[0];
+    const configure = workItemId => {
+      fixture.profile.ticketAutomation.migrations = workItemId ? [{ workItemId, allowedPaths: ["portal"] }] : [];
+      writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+      return ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+    };
+    const noExecution = () => assert.fail("Unchanged or unapproved work must remain deduplicated.");
+    await fixture.run({ plan: configure(43), execute: noExecution });
+    const approved = configure(42);
+    await fixture.run({ plan: approved, execute: async ({ request }) => {
+      executions += 1;
+      assert.match(request, /^Owner-approved dedicated migration for work item 42:.*\["portal"\]/m);
+      assert.match(request, /isolated owned worktree/);
+      assert.match(request, /production build/);
+      assert.match(request, /Do not force dependency resolution/);
+      assert.match(request, /authorized DRAFT PR/);
+      assert.match(request, /business-data access read-only/);
+      return { outcome: "draft-pr", summary: "Migration implementation and required checks completed in this test fixture.", pullRequestId: 17 };
+    } });
+    await fixture.run({ plan: approved, execute: noExecution });
+    const revoked = configure(null);
+    await fixture.run({ plan: revoked, execute: noExecution });
+    fixture.item.comments.unshift({ id: 1000, text: "Additional migration requirements need analysis." });
+    fixture.item.revision += 1;
+    await fixture.run({ plan: revoked, execute: async ({ request }) => {
+      executions += 1;
+      assert.match(request, /Break large features or unapproved migrations into an analysis/);
+      assert.doesNotMatch(request, /^Owner-approved dedicated migration/m);
+      return { outcome: "analysis", summary: "The changed request is analysis-only after approval revocation." };
+    } });
+    const state = JSON.parse(readFileSync(journal, "utf8"));
+    assert.deepEqual(state.entries[0], original);
+    assert.equal(state.entries.length, 3);
+    assert.equal(executions, 3);
+    assert.notEqual(state.entries[0].fingerprint, state.entries[1].fingerprint);
+    assert.match(state.entries[1].migrationApproval, /^[a-f0-9]{64}$/);
+    assert.equal(fixture.posted.length, 3);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("revoking a migration approval during execution retains its result and blocks feedback pending a fresh review", async () => {
+  const fixture = ticketFixture();
+  try {
+    mkdirSync(join(fixture.repository, "portal"));
+    fixture.profile.ticketAutomation.migrations = [{ workItemId: 42, allowedPaths: ["portal"] }];
+    const profilePath = join(fixture.repository, ".github", "fixlab", "repository-profile.json");
+    writeFileSync(profilePath, JSON.stringify(fixture.profile));
+    const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+    await assert.rejects(fixture.run({ plan, execute: async () => {
+      fixture.profile.ticketAutomation.migrations = [];
+      writeFileSync(profilePath, JSON.stringify(fixture.profile));
+      return { outcome: "analysis", summary: "Completed evidence retained for review." };
+    } }), /configuration or Git origin changed/);
+    assert.equal(fixture.posted.length, 0);
+    const state = JSON.parse(readFileSync(join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json")));
+    assert.equal(state.entries[0].result.summary, "Completed evidence retained for review.");
+    assert.equal(state.entries[0].status, "running");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("ticket feedback gives a high-level summary while retaining detailed work and evidence in history", async () => {
+  const fixture = ticketFixture();
+  try {
+    const result = {
+      outcome: "analysis", summary: "The saved edit is overwritten by a stale row snapshot.",
+      confirmedCause: { cause: "A stale row snapshot wins.", evidence: "The reducer replaces the saved value.", nextSteps: "Update the reducer and add a focused regression." },
+      report: {
+        changesMade: ["No product changes made."],
+        inProgress: ["None; investigation has finished."],
+        plannedWork: ["Update the reducer after scope approval."],
+        validation: ["Passed: focused reproduction.", "Not run: type-check, build and live journey."],
+        nextSteps: ["Review the proposed fix."]
+      }
+    };
+    assert.deepEqual(ticketOutcome(result).report, result.report);
+    await fixture.run({ execute: async ({ request }) => {
+      assert.match(request, /Include a report object for structured ADO feedback/);
+      assert.match(request, /Distinguish completed changes from actual continuing work/);
+      return result;
+    } });
+    const text = fixture.posted[0].text;
+    for (const heading of ["Summary", "Changes and validation", "Next action"]) {
+      assert.match(text, new RegExp(`## ${heading}\\n- `));
+    }
+    assert.match(text, /- Confirmed cause: A stale row snapshot wins\./);
+    assert.doesNotMatch(text, /## (Overview|Work in progress|Planned work|Root cause)/);
+    assert.doesNotMatch(text, /- Evidence: The reducer replaces the saved value\./);
+    assert.match(text, /- Not run: type-check, build and live journey\./);
+    assert.ok(text.length < 1500);
+    const history = readTicketAutomationHistory(fixture.repository);
+    assert.deepEqual(history.attempts[0].report, result.report);
+    assert.equal(history.attempts[0].confirmedCause.evidence, result.confirmedCause.evidence);
+    assert.equal(fixture.item.state, "Active");
+    await fixture.run({ execute() { assert.fail("Feedback must remain deduplicated."); } });
+    assert.equal(fixture.posted.length, 1);
+    for (const report of [{}, { rootCause: "x".repeat(501) }, { validation: "Passed" },
+      { validation: ["x".repeat(201)] }, { inProgress: Array(5).fill("Pending") }, { extra: ["Unexpected field"] }]) {
+      assert.throws(() => ticketOutcome({ ...result, report }), /valid bounded/);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("legacy long ticket summaries stay bounded in comments without replacing retained evidence", async () => {
+  const fixture = ticketFixture();
+  try {
+    const summary = "A source-grounded finding needs an approved follow-up. ".repeat(70);
+    await fixture.run({ execute: async () => ({ outcome: "analysis", summary }) });
+    const text = fixture.posted[0].text;
+    assert.ok(text.length < 1100, "The ADO comment must not repeat a multi-page paragraph.");
+    assert.match(text, /\.\.\./);
+    assert.doesNotMatch(text, /No continuing implementation|No additional implementation plan/);
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].summary.length, 2000);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("interrupted recovery is read-only until confirmed and records leave/retry without losing history or replaying twice", async () => {
+  const fixture = ticketFixture();
+  const { repository, client } = fixture;
+  const description = fixture.item.description;
+  const options = { workItemId: 42, client };
+  try {
+    await assert.rejects(fixture.run({ execute() { throw new Error("Synthetic interrupted attempt"); } }), /Synthetic interrupted/);
+    const path = join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const before = readFileSync(path, "utf8");
+    let review = await reviewInterruptedTicket(repository, options);
+    assert.equal(readFileSync(path, "utf8"), before);
+    assert.equal(review.executorStopped, true);
+    assert.equal(review.canAccept, false);
+    assert.equal(review.canRetry, true);
+    const input = { ...options, reviewToken: review.reviewToken, decision: "retry" };
+    await assert.rejects(reconcileInterruptedTicket(repository, input), /explicitly confirm/);
+    await assert.rejects(reconcileInterruptedTicket(repository, { ...input, confirmed: true, decision: "accept" }), /stored successful result/);
+    assert.equal(readFileSync(path, "utf8"), before);
+    await reconcileInterruptedTicket(repository, { ...input, confirmed: true, decision: "leave" });
+    await assert.rejects(fixture.run({ execute() { assert.fail("Still blocked"); } }), /interrupted execution/);
+    review = await reviewInterruptedTicket(repository, options);
+    const retry = { ...input, confirmed: true, reviewToken: review.reviewToken };
+    fixture.item.description += " Updated requirement.";
+    await assert.rejects(reconcileInterruptedTicket(repository, retry), /stale/);
+    fixture.item.description = description;
+    review = await reviewInterruptedTicket(repository, options);
+    await reconcileInterruptedTicket(repository, { ...retry, reviewToken: review.reviewToken });
+    assert.equal(fixture.posted.length, 0);
+    let executions = 0;
+    const execute = async () => {
+      executions += 1;
+      return { outcome: "analysis", summary: "Focused checks confirm the existing behavior; no source changes needed." };
+    };
+    await fixture.run({ execute });
+    await fixture.run({ execute });
+    assert.equal(executions, 1);
+    const history = readTicketAutomationHistory(repository);
+    assert.equal(history.attempts.length, 2);
+    assert.equal(history.attempts[1].status, "reconciled");
+    assert.deepEqual(history.attempts[1].recovery.map(record => record.decision), ["leave", "retry"]);
+    await assert.rejects(reconcileInterruptedTicket(repository, retry), /No interrupted/);
+  } finally { fixture.cleanup(); }
+});
+
+test("recovery retains results before changed-ticket checks and accepts only unchanged verified draft results", async () => {
+  const fixture = ticketFixture();
+  const { repository, client, item } = fixture;
+  const description = item.description;
+  const options = { workItemId: item.id, client };
+  try {
+    await assert.rejects(fixture.run({ execute: async () => {
+      item.description = "A changed requirement";
+      return { outcome: "draft-pr", summary: "A scoped draft exists; integration remains unverified.", pullRequestId: 123 };
+    } }), /changed during execution/);
+    let review = await reviewInterruptedTicket(repository, options);
+    assert.equal(review.result.pullRequestId, 123);
+    assert.equal(review.ticketChanged, true);
+    assert.equal(review.canAccept, false);
+    item.description = description;
+    review = await reviewInterruptedTicket(repository, options);
+    const input = { ...options, decision: "accept", confirmed: true, reviewToken: review.reviewToken };
+    const verify = client.verifyDraft;
+    client.verifyDraft = async () => { throw new Error("Provider no longer verifies this draft"); };
+    await assert.rejects(reconcileInterruptedTicket(repository, input), /no longer verifies/);
+    assert.equal(readTicketAutomationHistory(repository).attempts[0].status, "running");
+    client.verifyDraft = async () => {
+      item.description = "A requirement changed during provider verification";
+      return "https://dev.azure.com/example-org/Example%20Project/_git/example-repo/pullrequest/123";
+    };
+    await assert.rejects(reconcileInterruptedTicket(repository, input), /changed during draft verification/);
+    item.description = description;
+    client.verifyDraft = verify;
+    await reconcileInterruptedTicket(repository, input);
+    await fixture.run({ execute() { assert.fail("Accepted revision must not rerun"); } });
+    assert.equal(fixture.posted.length, 0);
+    assert.equal(readTicketAutomationHistory(repository).attempts[0].outcome, "draft-pr");
+    assert.match(readTicketAutomationHistory(repository).attempts[0].pullRequestUrl, /pullrequest\/123$/);
+  } finally { fixture.cleanup(); }
+});
+
+test("recovery refuses live or uncertain ownership, active PR retries and changed review snapshots", async () => {
+  const fixture = ticketFixture();
+  const { repository, client } = fixture;
+  const options = { workItemId: 42, client };
+  let lease;
+  try {
+    await assert.rejects(fixture.run({ execute() { throw new Error("Synthetic interruption"); } }), /Synthetic/);
+    lease = createExecutorLease(repository, "synthetic-live-owner").acquire("fixture");
+    let review = await reviewInterruptedTicket(repository, options);
+    assert.equal(review.executorStopped, false);
+    await assert.rejects(reconcileInterruptedTicket(repository, {
+      ...options, decision: "retry", confirmed: true, reviewToken: review.reviewToken
+    }), /reservation remains/);
+    lease.release();
+    lease = null;
+    const lock = join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "watcher.lock");
+    writeFileSync(lock, "legacy-unknown-owner");
+    review = await reviewInterruptedTicket(repository, options);
+    assert.equal(review.executorStopped, false);
+    assert.equal(readFileSync(lock, "utf8"), "legacy-unknown-owner");
+    rmSync(lock);
+    let queries = 0;
+    client.reviewPullRequests = async () => {
+      queries += 1;
+      if (queries === 2) { lease = createExecutorLease(repository, "racing-owner").acquire("fixture"); }
+      return [];
+    };
+    review = await reviewInterruptedTicket(repository, options);
+    await assert.rejects(reconcileInterruptedTicket(repository, {
+      ...options, decision: "retry", confirmed: true, reviewToken: review.reviewToken
+    }), /lease is reserved/);
+    assert.throws(() => createExecutorLease(repository, "another-owner").acquire("fixture"), /lease is reserved/);
+    lease.release();
+    lease = null;
+    client.reviewPullRequests = async () => [{
+      id: 123, status: "active", isDraft: true,
+      webUrl: "https://dev.azure.com/example-org/Example%20Project/_git/example-repo/pullrequest/123"
+    }];
+    review = await reviewInterruptedTicket(repository, options);
+    assert.equal(review.canRetry, false);
+    await assert.rejects(reconcileInterruptedTicket(repository, {
+      ...options, decision: "retry", confirmed: true, reviewToken: review.reviewToken
+    }), /linked active PR/);
+    assert.equal(readTicketAutomationHistory(repository).attempts[0].status, "running");
+    assert.equal(fixture.posted.length, 0);
+  } finally { lease?.release(); fixture.cleanup(); }
 });
 
 test("ticket watcher persists deduplication, ignores its own feedback and responds to new human discussion", async () => {
@@ -745,6 +1132,7 @@ test("ADO automation client confines reads and feedback to the configured projec
   const calls = [];
   let draft = true;
   let linkedTicketId = "42";
+  let linkedRepository = "repo-id";
   const client = createAzureDevOpsTicketClient({
     profile: { azureDevOps: { organization: "example-org", project: "Example Project" } },
     tokenProvider: () => "private-test-token",
@@ -752,6 +1140,16 @@ test("ADO automation client confines reads and feedback to the configured projec
       assert.equal(token, "private-test-token");
       assert.match(url, /^https:\/\/dev\.azure\.com\/example-org\/Example%20Project\/_apis\//);
       calls.push({ url, options });
+      if (url.includes("/wit/workitems?ids=")) {
+        return { value: [{ id: 42, fields: {
+          "System.Title": "Synthetic title", "System.TeamProject": "Example Project"
+        } }] };
+      }
+      if (url.includes("$expand=relations")) {
+        return { id: 42, fields: { "System.TeamProject": "Example Project" }, relations: [{
+          rel: "ArtifactLink", url: "vstfs:///Git/PullRequestId/project-id%2Frepo-id%2F17"
+        }] };
+      }
       if (url.includes("/wiql?")) {
         assert.match(options.body.query, /Tags.*CONTAINS 'FixLab'/);
         return { workItems: [{ id: 42 }] };
@@ -760,7 +1158,8 @@ test("ADO automation client confines reads and feedback to the configured projec
         return { value: [{ id: linkedTicketId }] };
       }
       if (url.includes("/pullrequests/")) {
-        return { isDraft: draft, status: "active", targetRefName: "refs/heads/develop", repository: { name: "example-repo" } };
+        return { pullRequestId: 17, isDraft: draft, status: "active",
+          targetRefName: "refs/heads/develop", repository: { id: linkedRepository, name: "example-repo" } };
       }
       if (url.includes("/comments?")) {
         return { comments: [] };
@@ -772,11 +1171,25 @@ test("ADO automation client confines reads and feedback to the configured projec
   });
   assert.deepEqual(await client.findTagged("FixLab", ["Example Project\\Application"]), [42]);
   assert.equal((await client.load(42)).workItemType, "Feature");
+  assert.deepEqual(await client.loadTitles([42]), { 42: "Synthetic title" });
+  await assert.rejects(client.loadTitles([43]), /exact recorded/);
   assert.equal(await client.hasComment(42, "[FixLab automation 42:abc]"), false);
   await client.comment(42, "Analysis <script>must be text</script>");
   const posted = calls.find(call => call.options.method === "POST" && call.url.includes("/comments?"));
   assert.equal(posted.options.body.text, "Analysis &lt;script&gt;must be text&lt;/script&gt;");
+  await client.comment(42, "[FixLab automation 42:abc]\nOutcome: analysis\n\n## Root cause\n- A <script> must remain text & escaped.\n- Evidence: the scoped source.\n\n## Planned work\n- No changes are in progress.");
+  const formatted = calls.filter(call => call.options.method === "POST" && call.url.includes("/comments?")).at(-1);
+  assert.equal(new URL(formatted.url).searchParams.get("format"), "html");
+  assert.equal(formatted.options.body.text, "[FixLab automation 42:abc]<br>Outcome: analysis<br><br><h3>Root cause</h3><ul><li>A &lt;script&gt; must remain text &amp; escaped.</li><li>Evidence: the scoped source.</li></ul><br><br><h3>Planned work</h3><ul><li>No changes are in progress.</li></ul>");
   assert.match(await client.verifyDraft("example-repo", 17, "develop", 42), /pullrequest\/17$/);
+  const reviewed = await client.reviewPullRequests("example-repo", 42);
+  assert.equal(reviewed[0].id, 17);
+  assert.equal(reviewed[0].isDraft, true);
+  assert.equal(reviewed[0].status, "active");
+  assert.match(reviewed[0].webUrl, /example-repo\/pullrequest\/17$/);
+  linkedRepository = "other-repository";
+  await assert.rejects(client.reviewPullRequests("example-repo", 42), /could not be verified/);
+  linkedRepository = "repo-id";
   draft = false;
   await assert.rejects(client.verifyDraft("example-repo", 17, "develop", 42), /did not verify/);
   draft = true;

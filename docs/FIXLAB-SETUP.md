@@ -501,6 +501,31 @@ environment configuration, required live coverage, or job-bound proof remains
 unverified. Do not commit credentials, start jobs, change application UI,
 publish, or stop unrelated resources as part of setup.
 
+## Optional tagged-ticket watcher (separate approval)
+
+The same FixLab installation includes the watcher; no separate watcher package
+is needed. Updating an older install is still necessary to receive new features.
+Setup above does not start it. Only when the user requests unattended ticket
+investigation, review `pullRequests.defaultTargetBranch`, exact
+`ticketAutomation.areaPaths`, the trigger tag and a configured non-production
+environment. Install and sign in to the selected runtime separately and verify
+the local Azure CLI identity has the required ADO access.
+
+```powershell
+fixlab watch $Repo --runtime copilot --environment dev
+```
+
+Agency is also supported with `--runtime agency`. Review the printed plan first;
+then obtain separate approval before adding `--yes --allow-all-tools`. Installation,
+MCP registration and onboarding grant none of those permissions. Keep the approved
+local watcher process running; dashboard startup alone does not start it.
+
+Use **Watcher jobs** for status and **Review interrupted attempt** for supported
+recovery. CLI users can run `fixlab watch-review $Repo --ticket <id>` and confirm
+a fresh reviewed decision with `fixlab watch-recover`. Never edit private JSON
+or delete a retained lock/lease. See [watcher commands and recovery](commands.md#tagged-ticket-watcher)
+for the exact controls and limits.
+
 ## Troubleshooting summary
 
 | Symptom | Focused recovery |
