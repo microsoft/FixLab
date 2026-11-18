@@ -13,6 +13,22 @@ import {
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 
+test("automatic checkout assignment and shared-testing waits stay aligned across execution surfaces", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of [
+    "dashboard/server.js", "bin/fixlab.js", "agents/fixlab.md",
+    "com.github.copilot/agents/fixlab.agent.md", "templates/fixlab-autofix.agent.md",
+    ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"
+  ]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/\s+/gu, " ");
+    for (const contract of [
+      /[Ii]solation is assigned automatically/u, /same job/u, /parallel in separate owned checkouts/u,
+      /--resource local-testing/u, /wait without failing/u, /reservation until it stops/u,
+      /not validation evidence/u, /never clear another owner's reservation/u
+    ]) { assert.match(text, contract, entryPoint); }
+  }
+});
+
 test("safe recovery and scoped DEV/PPE/SIT/UAT POST guidance stay aligned across execution surfaces", () => {
   const root = join(testDirectory, "..");
   for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {

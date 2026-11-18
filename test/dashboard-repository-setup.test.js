@@ -4,6 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { randomUUID } from "node:crypto";
+import { assignedJobWorktree, needsJobWorktree, prepareJobWorktree, restoreJobWorktree } from "../dashboard/job-worktree.js";
+import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { applyWorktreeSetup, browserConfigurationErrors, planWorktreeSetup, SETUP_PROFILE_PATH } from "../dashboard/repository-setup.js";
 
 function fixture() {
@@ -30,6 +33,75 @@ function fixture() {
   writeFileSync(join(source, "frontend", "playwright.local.ts"), "export default {};");
   return { root, source, repository, profile };
 }
+
+test("detached editing jobs automatically receive a reusable owned checkout without changing the source", () => {
+  const f = fixture();
+  try {
+    applyWorktreeSetup(planWorktreeSetup(f));
+    const jobId = randomUUID();
+    assert.equal(needsJobWorktree(f.repository, f.profile, "fix-and-validate"), true);
+    assert.equal(needsJobWorktree(f.repository, f.profile, "playwright-only"), false);
+    assert.equal(needsJobWorktree(f.repository, { worktreeSetup: { mode: "shared" } }, "fix-and-validate"), false);
+    writeFileSync(join(f.repository, "tracked.txt"), "preserve unrelated source edits");
+    const workspace = prepareJobWorktree({ repository: f.repository, jobId });
+    assert.notEqual(workspace.repository, f.repository);
+    assert.equal(readFileSync(join(f.repository, "tracked.txt"), "utf8"), "preserve unrelated source edits");
+    assert.equal(readFileSync(join(workspace.repository, "tracked.txt"), "utf8"), "fixture");
+    assert.deepEqual(JSON.parse(readFileSync(join(workspace.repository, SETUP_PROFILE_PATH))), f.profile);
+    writeFileSync(join(workspace.repository, "tracked.txt"), "retained job changes");
+    assert.deepEqual(prepareJobWorktree({ repository: f.repository, jobId }), workspace);
+    assert.deepEqual(assignedJobWorktree({ repository: workspace.repository, jobId }), workspace);
+    assert.equal(assignedJobWorktree({ repository: f.repository, jobId }), null);
+    assert.equal(readFileSync(join(workspace.repository, "tracked.txt"), "utf8"), "retained job changes");
+    writeFileSync(join(f.repository, SETUP_PROFILE_PATH), '{"changed":true}');
+    assert.throws(() => prepareJobWorktree({ repository: f.repository, jobId }), /configuration changed/);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("owned checkout onboarding runs declared setup and reports a failed restore without claiming readiness", async () => {
+  const f = fixture();
+  try {
+    const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    const cli = join(packageRoot, "bin", "fixlab.js");
+    writeFileSync(cli, "if (process.argv[2] !== 'onboard' || !process.argv.includes('--from') || !process.argv.includes('--yes') || process.argv.includes('--authenticate')) process.exit(8); console.log('fixture restore');");
+    const output = [];
+    assert.equal((await restoreJobWorktree({ workspace, packageRoot, runtime: "copilot",
+      onOutput: text => output.push(text) })).ready, true);
+    assert.match(output.join(""), /fixture restore/);
+    writeFileSync(cli, "process.exit(7);");
+    const failed = await restoreJobWorktree({ workspace, packageRoot, runtime: "copilot" });
+    assert.equal(failed.ready, false);
+    assert.match(failed.message, /exited 7.*no check is claimed passed/);
+    const cancellation = new AbortController();
+    cancellation.abort();
+    await assert.rejects(restoreJobWorktree({ workspace, packageRoot, runtime: "copilot",
+      signal: cancellation.signal }), { name: "AbortError" });
+    writeFileSync(cli, "console.log('fixture running'); setInterval(() => {}, 1000);");
+    const running = new AbortController();
+    await assert.rejects(restoreJobWorktree({ workspace, packageRoot, runtime: "copilot",
+      signal: running.signal, onOutput: text => { if (text.includes("fixture running")) { running.abort(); } }
+    }), { name: "AbortError" });
+    createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+      .acquire(workspace.jobId).release();
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("automatic checkout recovery never borrows a different branch or invents job ownership", () => {
+  const f = fixture();
+  try {
+    const jobId = randomUUID();
+    const workspace = prepareJobWorktree({ repository: f.source, jobId });
+    const changed = spawnSync("git", ["switch", "-c", "unrelated-work"], {
+      cwd: workspace.repository, encoding: "utf8", windowsHide: true
+    });
+    assert.equal(changed.status, 0, changed.stderr);
+    assert.throws(() => prepareJobWorktree({ repository: f.source, jobId }), /owned worktree/);
+    assert.throws(() => prepareJobWorktree({ repository: f.source, jobId: "../other" }), /valid job ID/);
+    assert.equal(needsJobWorktree(f.source, { worktreeSetup: { mode: "isolated" } }, "fix-and-validate"), true);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
 
 test("worktree setup is plan-first, explicit, idempotent and configuration-only", () => {
   const f = fixture();

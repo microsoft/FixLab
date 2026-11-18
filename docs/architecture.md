@@ -1190,8 +1190,20 @@ It accepts only the current running job, rejects browser-origin requests,
 restricts the target to the assigned dashboard checkout, and runs one bounded
 gate at a time through the structured executor. This applies in shared and
 isolated modes; sharing a Git common directory does not establish assignment.
-For isolation, onboard the worktree and start its dashboard before creating a
-gated job. Gated jobs cannot switch checkouts through a validation request.
+For explicitly isolated editing jobs, and detached checkouts outside shared
+mode, the dashboard prepares a receipt-bound worktree and assigns the same job
+ID to its owned dashboard automatically. Declared non-sensitive configuration
+and dependency restores are prepared there; source edits and other owners are
+preserved. Checkout-specific grants, credentials and successful gate evidence
+do not transfer. The browser and MCP follow that assignment. Gated jobs cannot
+switch checkouts through a validation request.
+Independent isolated jobs execute concurrently. A separate Git-common-directory
+reservation serializes local-stack/live gates, owned application startup and
+authentication. Waiting is cancellable and resumes automatically after verified
+release; a kept-open preview retains its reservation. Direct native checks use
+the supplied `fixlab gate --resource local-testing` command first. Acquiring
+this resource is not passing validation evidence. Stop also cancels owned
+checkout setup before an executor starts; no unverified owner is reclaimed.
 Requests are rejected after owned executor stop or dashboard shutdown begins,
 including requests whose bodies were still arriving when shutdown began.
 Only executor results can pass these gates; agent stage markers cannot.

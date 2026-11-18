@@ -25,6 +25,13 @@ operations. Treat every runner as privileged engineering infrastructure.
 
 ## Process isolation
 
+- Automatically assigned dashboard worktrees are bound to a private receipt
+  containing the job, source, branch, base commit and profile revision. Existing
+  directories without matching ownership are not adopted. Isolated executors
+  use per-worktree leases; local testing uses a separate shared reservation
+  across the Git common repository. Waits are cancellable, never reclaimed
+  using heartbeat age or a PID alone. Credentials, browser state, path grants
+  and successful validation evidence are not copied to the new checkout.
 - Optional ticket watching is an explicitly started local Agency or Copilot CLI session, not
   an onboarding side effect. Its fresh `--yes --allow-all-tools` consent binds
   the checkout's ADO origin, configured area subtrees, exact tag, target branch,

@@ -123,8 +123,17 @@ executor. The dashboard supplies this command with the correct job and port.
 It returns a nonzero exit code for failed, cancelled, timed-out, or stale
 validation. It does not accept arbitrary commands or an arbitrary repository.
 The repository must be the checkout selected when starting that dashboard.
-For an isolated checkout, onboard it and start its dashboard before the job;
-an agent-created sibling cannot substitute evidence for the assigned source.
+The dashboard automatically provisions and assigns owned checkouts for
+explicitly isolated editing jobs or detached checkouts outside shared mode.
+Continue the same job through its assigned dashboard; an arbitrary sibling
+cannot substitute evidence for that checkout.
+
+Isolated code jobs run concurrently. Local-stack/live gates and managed
+application/authentication startup wait automatically for the repository's
+shared local-testing reservation. Before direct native startup or live checks,
+use the job-supplied command with `--resource local-testing` instead of `--gate`.
+This acquisition is not validation evidence. Stop cancels a queued wait or an
+owned setup; a kept-open preview retains testing ownership until stopped.
 
 Configure each gate in the repository profile:
 

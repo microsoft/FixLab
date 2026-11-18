@@ -45,6 +45,36 @@ test("session ownership refuses a reused port or another repository's live owner
   }
 });
 
+test("scoped checkout discovery waits for a slow live owner but still rejects a reused identity", async () => {
+  const repository = join(tmpdir(), `fixlab-slow-owner-${randomUUID()}`);
+  const registry = createSessionRegistry(repository);
+  let delay = 2000;
+  let id = registry.id;
+  const server = createServer((_request, response) => {
+    setTimeout(() => {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ id, scopeId: registry.scopeId, repository }));
+    }, delay);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  registry.register(`http://127.0.0.1:${server.address().port}`);
+  try {
+    const options = { scopeIds: [registry.scopeId], timeoutMs: 10000 };
+    const catalog = await registry.repositories(options);
+    assert.equal(catalog.unavailableCount, 0);
+    assert.equal(catalog.repositories[0].id, registry.id);
+    delay = 0;
+    id = randomUUID();
+    const replaced = await registry.repositories(options);
+    assert.deepEqual(replaced.repositories, []);
+    assert.equal(replaced.unavailableCount, 1);
+  } finally {
+    registry.unregister();
+    server.closeIdleConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test("repository catalog discovers verified local owners without starting or controlling jobs", async () => {
   const repositories = [join(tmpdir(), `fixlab-catalog-${randomUUID()}`),
     join(tmpdir(), `fixlab-catalog-${randomUUID()}`)];

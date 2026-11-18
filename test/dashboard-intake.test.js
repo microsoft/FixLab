@@ -10,6 +10,7 @@ import {
   rmSync
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -18,6 +19,8 @@ import test, { mock } from "node:test";
 import {
   createAzureDevOpsLoader,
   createAzureDevOpsTicketClient,
+  azureDevOpsCommentFingerprint,
+  formatAzureDevOpsComment,
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOT_TOTAL_BYTES,
   MAX_SCREENSHOTS,
@@ -35,7 +38,7 @@ const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
 ]);
 
-function ticketFixture() {
+function ticketFixture({ readable = false } = {}) {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-ticket-"));
   for (const args of [
     ["init", repository],
@@ -82,6 +85,17 @@ function ticketFixture() {
       return `https://dev.azure.com/example-org/Example%20Project/_git/example-repo/pullrequest/${id}`;
     }
   };
+  if (readable) {
+    client.commentIds = async (_id, fingerprint) =>
+      item.comments.filter(comment => comment.contentFingerprint === fingerprint).map(comment => comment.id);
+    const comment = client.comment;
+    client.comment = async (id, text) => {
+      await comment(id, text);
+      const plain = sanitizeAzureDevOpsHtml(formatAzureDevOpsComment(text));
+      item.comments[0].text = plain.slice(0, 2000);
+      item.comments[0].contentFingerprint = azureDevOpsCommentFingerprint(plain);
+    };
+  }
   return {
     repository, profile, plan, item, client, posted,
     run: options => watchTickets({
@@ -386,6 +400,25 @@ test("ticket feedback gives a high-level summary while retaining detailed work a
     }
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("unsuccessful runs without findings post only a bounded status, not an empty investigation report", async () => {
+  for (const outcome of ["blocked", "failed"]) {
+    const fixture = ticketFixture();
+    try {
+      const summary = "The executor emitted an invalid or ambiguous ticket outcome.";
+      await fixture.run({ execute: async () => ({ outcome, summary }) });
+      const text = fixture.posted[0].text;
+      assert.match(text, new RegExp(`Run ${outcome}: The executor emitted an invalid or ambiguous ticket outcome\\.`));
+      assert.match(text, /No fix or successful validation is confirmed\./);
+      assert.doesNotMatch(text, /##|Root cause|Changes made|Work in progress|Planned work|Next steps|Next action|Watcher jobs/);
+      assert.ok(text.length < 400);
+      assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].summary, summary);
+      assert.equal(fixture.item.state, "Active");
+      await fixture.run({ execute() { assert.fail("An unsuccessful update must still be deduplicated."); } });
+      assert.equal(fixture.posted.length, 1);
+    } finally { fixture.cleanup(); }
   }
 });
 
@@ -720,6 +753,114 @@ test("watcher binds API authentication and distinct selected safety helpers befo
   }
 });
 
+test("readable feedback reconciles uncertain delivery and ignores its truncated comment without exposing tracking IDs", async () => {
+  const fixture = ticketFixture({ readable: true });
+  const commentIds = fixture.client.commentIds;
+  let executions = 0;
+  let lookups = 0;
+  try {
+    fixture.client.commentIds = async (...args) => ++lookups < 3 ? commentIds(...args) : [];
+    await assert.rejects(fixture.run({ execute: async () => {
+      executions += 1;
+      return { outcome: "analysis", summary: "Findings remain provisional; no causal reproduction or successful validation." };
+    } }), /read-back is unconfirmed/);
+    await assert.rejects(fixture.run({ execute() { assert.fail("Uncertain delivery must not rerun code."); } }),
+      /previous feedback submission is unconfirmed/);
+    fixture.item.comments[0].text = "Truncated visible context.";
+    fixture.client.commentIds = commentIds;
+    await fixture.run({ execute() { assert.fail("Reconcile existing delivery only."); } });
+    await fixture.run({ execute() { assert.fail("Own feedback must not retrigger investigation."); } });
+    assert.equal(executions, 1);
+    assert.equal(fixture.posted.length, 1);
+    assert.doesNotMatch(fixture.posted[0].text, /FixLab automation|Outcome:|[a-f0-9]{64}/u);
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status, "complete");
+  } finally { fixture.cleanup(); }
+});
+
+test("authentication pauses one ticket while others proceed and explicit restart resumes the same owned session", async () => {
+  const fixture = ticketFixture({ readable: true });
+  const sessionId = randomUUID();
+  const items = new Map([[42, fixture.item], [43, { ...structuredClone(fixture.item), id: 43, comments: [] }]]);
+  fixture.client.findTagged = async () => [42, 43];
+  fixture.client.load = async id => structuredClone(items.get(id));
+  fixture.client.commentIds = async (id, fingerprint) =>
+    items.get(id).comments.filter(value => value.contentFingerprint === fingerprint).map(value => value.id);
+  fixture.client.comment = async (id, text) => {
+    fixture.posted.push({ id, text });
+    const plain = sanitizeAzureDevOpsHtml(formatAzureDevOpsComment(text));
+    items.get(id).comments.unshift({ id: 100 + fixture.posted.length,
+      text: plain.slice(0, 2000), contentFingerprint: azureDevOpsCommentFingerprint(plain) });
+  };
+  try {
+    await fixture.run({ execute: async ({ request, onSession }) => {
+      assert.match(request, /missing or expired sign-in/);
+      assert.match(request, /403\/missing role is authorization/);
+      onSession(sessionId);
+      return { outcome: "blocked", summary: "Source analysis completed; the approved read needs sign-in.",
+        authenticationRequired: { provider: "azure-cli", reason: "The approved Azure session expired." } };
+    } });
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status, "authentication-pending");
+    assert.match(fixture.posted[0].text, /--resume-ticket 42/);
+    assert.doesNotMatch(fixture.posted[0].text, /FixLab automation|Outcome:|[a-f0-9]{64}/u);
+    await fixture.run({ execute: async ({ item }) => {
+      assert.equal(item.id, 43);
+      return { outcome: "analysis", summary: "Independent source analysis completed." };
+    } });
+    await fixture.run({ resumeWorkItemId: 42, execute: async options => {
+      assert.equal(options.item.id, 42);
+      assert.equal(options.sessionId, sessionId);
+      assert.equal(options.resume, true);
+      options.onSession(sessionId);
+      return { outcome: "analysis", summary: "The approved read completed after human sign-in; reproduction remains pending." };
+    } });
+    await fixture.run({ execute() { assert.fail("Neither job should repeat."); } });
+    const history = readTicketAutomationHistory(fixture.repository);
+    assert.equal(history.attempts.length, 2);
+    assert.equal(history.attempts.find(entry => entry.workItemId === 42).status, "complete");
+    assert.equal(fixture.posted.length, 3);
+  } finally { fixture.cleanup(); }
+});
+
+test("authentication recovery retains pending feedback and refuses changed ticket or runtime scope", async () => {
+  for (const change of ["none", "ticket", "runtime"]) {
+    const fixture = ticketFixture({ readable: true });
+    const load = fixture.client.load;
+    let unavailable = false;
+    fixture.client.load = async (...args) => {
+      if (unavailable) { throw new Error("ADO sign-in unavailable."); }
+      return load(...args);
+    };
+    try {
+      await assert.rejects(fixture.run({ execute: async ({ onSession }) => {
+        onSession(randomUUID());
+        unavailable = true;
+        return { outcome: "blocked", summary: "Independent analysis completed before sign-in expired.",
+          authenticationRequired: { provider: "azure-cli", reason: "Azure session expired." } };
+      } }), /ADO sign-in unavailable/);
+      assert.equal(fixture.posted.length, 0);
+      unavailable = false;
+      if (change === "ticket") { fixture.item.description = "A changed scenario requires review."; }
+      const plan = ticketAutomationPlan(fixture.repository, fixture.profile, {
+        environment: "dev", runtime: change === "runtime" ? "copilot" : "agency"
+      });
+      const resume = fixture.run({ plan, resumeWorkItemId: 42, execute: async ({ resume }) => {
+        assert.equal(change, "none", "Changed scope must never resume.");
+        assert.equal(resume, true);
+        return { outcome: "analysis", summary: "Approved read completed after human sign-in." };
+      } });
+      if (change === "none") {
+        await resume;
+        assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status, "complete");
+        assert.equal(fixture.posted.length, 2);
+      } else {
+        await assert.rejects(resume, change === "ticket" ? /changed before feedback/ : /paused ticket changed/);
+        assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status,
+          change === "ticket" ? "feedback-pending" : "authentication-pending");
+      }
+    } finally { fixture.cleanup(); }
+  }
+});
+
 test("ticket watcher posts verified draft links but reports an unverified PR as blocked", async () => {
   const fixture = ticketFixture();
   try {
@@ -729,7 +870,7 @@ test("ticket watcher posts verified draft links but reports an unverified PR as 
     fixture.item.description = "Check a second scenario.";
     fixture.client.verifyDraft = async () => { throw new Error("PR is not draft."); };
     await fixture.run({ execute: async () => ({ outcome: "draft-pr", summary: "A result needs verification.", pullRequestId: 18 }) });
-    assert.match(fixture.posted[1].text, /Outcome: blocked/);
+    assert.match(fixture.posted[1].text, /Run blocked:/);
     assert.match(fixture.posted[1].text, /Publication is unconfirmed/);
     assert.doesNotMatch(fixture.posted[1].text, /Draft PR:/);
     assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].pullRequestUrl, null);
@@ -1390,7 +1531,8 @@ test("Azure DevOps loader returns safe fields without exposing tokens", async ()
     {
       author: "Reviewer",
       createdAt: "2026-03-09T10:00:00Z",
-      text: "Newest & useful"
+      text: "Newest & useful",
+      contentFingerprint: azureDevOpsCommentFingerprint("Newest & useful")
     }
   ]);
   assert.equal(item.commentsWarning, "");

@@ -1,6 +1,7 @@
 import { request } from "node:http";
 import { realpathSync } from "node:fs";
 import { conversationOperations } from "../dashboard/conversation-operations.js";
+import { canonicalExecutionRepository } from "../dashboard/executor-lease.js";
 
 function dashboardRequest(port, path, body, { headers = {}, timeoutMs = 10000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -88,18 +89,21 @@ export async function dashboardControl(args) {
   const path = args.operation === "metrics" && args.parameters.period
     ? `${operation.path}?period=${encodeURIComponent(args.parameters.period)}`
     : operation.path;
-  const result = await dashboardRequest(args.port, path, body, {
+  const coordinator = args.operation === "job-start" ? current.sourceConnection : null;
+  const result = await dashboardRequest(coordinator?.port ?? current.workspaceConnection?.port ?? args.port, path, body, {
     headers: {
       "x-fixlab-operation": args.operation,
-      "x-fixlab-instance": args.instanceId,
-      "x-fixlab-job": args.jobId ?? "none",
-      "x-fixlab-repository": encodeURIComponent(realpathSync(args.repository)),
+      "x-fixlab-instance": coordinator?.instanceId ?? args.instanceId,
+      "x-fixlab-job": coordinator?.jobId ?? args.jobId ?? "none",
+      "x-fixlab-repository": encodeURIComponent(realpathSync(coordinator?.repository ?? current.repository)),
       "x-fixlab-confirmed": String(args.confirmed === true)
     },
-    timeoutMs: args.operation === "validation-run" ? 7260000 : 10000
+    timeoutMs: ["validation-run", "job-start", "frontend-start"].includes(args.operation) ? 7260000 : 10000
   });
   const state = await dashboardConversation(args);
-  if (state.instanceId !== args.instanceId) {
+  const assignedStart = args.operation === "job-start" && result.job?.id === state.job?.id &&
+    (state.sourceConnection?.instanceId ?? state.instanceId) === (coordinator?.instanceId ?? current.instanceId);
+  if (state.instanceId !== args.instanceId && !assignedStart) {
     throw new Error("Dashboard instance changed after the operation; read status before taking further action.");
   }
   return { operation: args.operation, result, state };
@@ -112,7 +116,22 @@ export async function dashboardConversation(args, reply = false) {
   }
 
   const repository = realpathSync(args.repository);
-  const current = validateConversation(await dashboardRequest(args.port, "/api/conversation"), repository);
+  let current = validateConversation(await dashboardRequest(args.port, "/api/conversation"), repository);
+  const workspace = current.job?.workspace;
+  if (workspace && workspace.jobId === current.job.id && workspace.repository !== current.repository) {
+    const url = new URL(workspace.url);
+    if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port ||
+        url.username || url.password || url.pathname !== "/" || url.search || url.hash ||
+        canonicalExecutionRepository(workspace.repository).key !== canonicalExecutionRepository(repository).key) {
+      throw new Error("Assigned workspace is not an owned loopback checkout in this repository.");
+    }
+    const assigned = validateConversation(await dashboardRequest(Number(url.port), "/api/conversation"),
+      realpathSync(workspace.repository));
+    if (assigned.job?.id !== current.job.id) { throw new Error("Assigned workspace changed jobs; read status before continuing."); }
+    current = { ...assigned,
+      sourceConnection: { port: args.port, repository, instanceId: current.instanceId, jobId: current.job.id },
+      workspaceConnection: { port: Number(url.port), repository: assigned.repository } };
+  }
   if (!reply) {
     return current;
   }
@@ -125,11 +144,11 @@ export async function dashboardConversation(args, reply = false) {
       (args.validationIntent !== undefined && !["scoped", "full", "affected"].includes(args.validationIntent))) {
     throw new Error("Provide a valid action, explicit answer (1-10000 characters), and scoped, full, or affected validation intent.");
   }
-  const result = validateConversation(await dashboardRequest(args.port, "/api/conversation/reply", {
-    instanceId: args.instanceId, jobId: args.jobId, repository,
+  const result = validateConversation(await dashboardRequest(current.workspaceConnection?.port ?? args.port, "/api/conversation/reply", {
+    instanceId: args.instanceId, jobId: args.jobId, repository: current.repository,
     confirmed: true, action: args.action, details: args.details,
     validationIntent: args.validationIntent, reviewedWorkspace: args.reviewedWorkspace
-  }), repository);
+  }), realpathSync(current.repository));
   if (result.instanceId !== args.instanceId || result.job?.id !== args.jobId) {
     throw new Error("Dashboard or job changed during the reply. Read status before continuing.");
   }

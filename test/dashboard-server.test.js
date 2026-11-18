@@ -60,6 +60,152 @@ const packageRoot = new URL("..", import.meta.url).pathname.replace(
   "$1"
 );
 
+test("isolated dashboard jobs automatically hand off the same ID, run in parallel and queue only shared testing", async () => {
+  const repository = createGitRepository();
+  const workspaces = new Map();
+  const executions = [];
+  const profile = validProfile({
+    worktreeSetup: { mode: "isolated" },
+    validation: { gates: [{ id: "local-check", stage: "local-stack", requiresLiveIntegration: false,
+      command: process.execPath, args: ["-e", "console.log('owned checkout check')"],
+      workingDirectory: ".", timeoutSeconds: 30 }] }
+  });
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  git(repository, ["add", "."]);
+  git(repository, ["commit", "--quiet", "-m", "Configured isolated jobs"]);
+  git(repository, ["switch", "--detach", "HEAD"]);
+  writeFileSync(join(repository, "tracked.txt"), "preserve source edits");
+  let setups = 0;
+  const current = await startDashboard(repository, input => {
+    let finish;
+    const completion = new Promise(resolve => { finish = resolve; });
+    executions.push({ ...input, finish });
+    return { completion, terminate() {} };
+  }, undefined, {
+    workspaceServers: workspaces,
+    workspaceSetup: async ({ workspace }) => {
+      setups += 1;
+      assert.equal(readFileSync(join(workspace.repository, "tracked.txt"), "utf8").trim(), "initial");
+      return { ready: true, message: "Synthetic fixture restore completed." };
+    }
+  });
+  try {
+    const post = input => jsonRequest(current.url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Fix this isolated fixture.", mode: "fix-and-validate",
+        routineFileAccess: true, ...input })
+    });
+    const first = await post({});
+    assert.equal(first.response.status, 202, JSON.stringify(first.body));
+    assert.equal(first.body.job.status, "running", first.body.job.error);
+    const firstJob = first.body.job;
+    assert.equal(firstJob.workspace.jobId, firstJob.id);
+    assert.equal(executions[0].sessionId, firstJob.id);
+    assert.equal(executions[0].repository, firstJob.workspace.repository);
+    assert.equal(executions[0].fileAccess, null, "Checkout-specific trust is not copied to another directory.");
+    const firstArgs = { repository, port: Number(new URL(current.url).port) };
+    const forwarded = await dashboardConversation(firstArgs);
+    assert.equal(forwarded.repository, firstJob.workspace.repository);
+    const { result: second } = await dashboardControl({ ...firstArgs,
+      instanceId: forwarded.instanceId, jobId: forwarded.job.id, operation: "job-start", confirmed: true,
+      parameters: { request: "Fix another isolated fixture.", mode: "fix-and-validate" } });
+    assert.equal(second.queued, false);
+    assert.equal(second.job.status, "running", second.job.error);
+    const secondJob = (await jsonRequest(current.url, "/api/status")).body.job;
+    assert.equal(second.job.id, secondJob.id);
+    assert.equal(executions.length, 2);
+    assert.equal(setups, 2);
+    assert.notEqual(executions[0].repository, executions[1].repository);
+    assert.equal(readFileSync(join(repository, "tracked.txt"), "utf8"), "preserve source edits");
+    const invoke = (job, payload) => jsonRequest(job.workspace.url, "/api/validation/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: job.id, repository: job.workspace.repository, ...payload })
+    });
+    assert.equal((await invoke(firstJob, { resource: "local-testing" })).body.status, 0);
+    let finished = false;
+    const queued = invoke(secondJob, { gateId: "local-check" }).then(result => { finished = true; return result; });
+    let waiting = false;
+    for (let attempt = 0; attempt < 100 && !waiting; attempt += 1) {
+      const state = (await jsonRequest(secondJob.workspace.url, "/api/status")).body.job;
+      waiting = state.logs.some(entry => entry.message.includes("Waiting for another job"));
+      if (!waiting) { await new Promise(resolve => setTimeout(resolve, 20)); }
+    }
+    assert.equal(waiting, true);
+    assert.equal(finished, false);
+    executions[0].finish({ code: 0 });
+    const completed = await queued;
+    assert.equal(completed.response.status, 200, JSON.stringify(completed.body));
+    assert.equal(completed.body.status, 0, completed.body.summary);
+    const validated = (await jsonRequest(secondJob.workspace.url, "/api/status")).body.job;
+    assert.equal(validated.validation.gates.find(gate => gate.id === "local-check").status, "passed");
+    const active = await dashboardConversation(firstArgs);
+    const stopped = await dashboardControl({ ...firstArgs, instanceId: active.instanceId, jobId: active.job.id,
+      operation: "job-stop", parameters: {}, confirmed: true });
+    assert.equal(stopped.state.job.id, secondJob.id);
+  } finally {
+    await current.dashboard.close();
+    rmSync(`${repository}.fixlab-worktrees`, { recursive: true, force: true });
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("parallel checkout preparation retains each response identity and Stop cancels only its owned setup", async () => {
+  const repository = createGitRepository();
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"),
+    JSON.stringify(validProfile({ worktreeSetup: { mode: "isolated" } })));
+  git(repository, ["add", "."]);
+  git(repository, ["commit", "--quiet", "-m", "Isolated setup fixture"]);
+  const setups = [];
+  const executions = [];
+  const current = await startDashboard(repository, input => {
+    executions.push(input.repository);
+    return { completion: Promise.resolve({ code: 0 }), hasStopped: () => true };
+  }, undefined, {
+    workspaceSetup: ({ workspace, signal }) => new Promise((resolveSetup, reject) => {
+      setups.push({ workspace, finish: () => resolveSetup({ ready: true, message: "Synthetic restore completed." }) });
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    })
+  });
+  let first;
+  let second;
+  try {
+    const post = () => jsonRequest(current.url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Fix the synthetic fixture.", mode: "fix-and-validate" })
+    });
+    first = post();
+    for (let attempt = 0; attempt < 100 && setups.length < 1; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(setups.length, 1);
+    const firstJob = (await jsonRequest(current.url, "/api/status")).body.job;
+    second = post();
+    for (let attempt = 0; attempt < 100 && setups.length < 2; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(setups.length, 2, "Preparation must not wait for another job's setup.");
+    const stopped = await jsonRequest(firstJob.workspace.url, "/api/job/stop", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+    });
+    assert.equal(stopped.response.status, 202, JSON.stringify(stopped.body));
+    assert.equal(stopped.body.job.status, "cancelled");
+    const firstResult = await first;
+    assert.equal(firstResult.body.job.id, firstJob.id);
+    assert.equal(firstResult.body.job.status, "cancelled");
+    assert.equal(executions.length, 0);
+    setups[1].finish();
+    const secondResult = await second;
+    assert.notEqual(secondResult.body.job.id, firstJob.id);
+    assert.equal(secondResult.body.queued, false);
+    assert.deepEqual(executions, [secondResult.body.job.workspace.repository]);
+  } finally {
+    await current.dashboard.close();
+    await Promise.allSettled([first, second]);
+    rmSync(`${repository}.fixlab-worktrees`, { recursive: true, force: true });
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test("watcher monitoring exposes only this repository's recorded history and never starts or controls work", async () => {
   const repository = createGitRepository();
   git(repository, ["remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]);
@@ -6101,6 +6247,12 @@ test("dashboard restores held jobs after restart", async () => {
     await first.dashboard.close();
   }
 
+  const savedPath = join(repository, ".git", "fixlab", "dashboard-jobs.json");
+  const saved = JSON.parse(readFileSync(savedPath, "utf8"));
+  saved.jobs.find(job => job.id === heldJobId).workspace = {
+    jobId: heldJobId, repository: join(repository, "previous-checkout"), url: "http://127.0.0.1:1"
+  };
+  writeFileSync(savedPath, JSON.stringify(saved));
   const second = await startDashboard(repository, () => {
     throw new Error("executor should not run while restoring held jobs");
   });
@@ -6111,6 +6263,7 @@ test("dashboard restores held jobs after restart", async () => {
       [heldJobId]
     );
     assert.equal(status.body.held[0].status, "held");
+    assert.equal(status.body.held[0].workspace, null, "A new dashboard must not reuse a dead workspace URL.");
   } finally {
     await second.dashboard.close();
     rmSync(repository, { recursive: true, force: true });

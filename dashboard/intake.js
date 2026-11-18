@@ -321,6 +321,21 @@ export function sanitizeAzureDevOpsHtml(value) {
     .trim();
 }
 
+export function azureDevOpsCommentFingerprint(text) {
+  return createHash("sha256").update(text.replace(/\s+/gu, " ").trim()).digest("hex");
+}
+
+export function formatAzureDevOpsComment(text) {
+  const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  return escaped.split("\n\n").map(block => {
+    const [heading, ...lines] = block.split("\n");
+    if (heading.startsWith("## ") && lines.length && lines.every(line => line.startsWith("- "))) {
+      return `<h3>${heading.slice(3)}</h3><ul>${lines.map(line => `<li>${line.slice(2)}</li>`).join("")}</ul>`;
+    }
+    return block.replaceAll("\n", "<br>");
+  }).join("<br><br>");
+}
+
 function workItemText(value, maximumLength) {
   return sanitizeAzureDevOpsHtml(value).slice(0, maximumLength);
 }
@@ -617,7 +632,8 @@ export function createAzureDevOpsLoader({
             typeof comment?.createdDate === "string"
               ? comment.createdDate.slice(0, 100)
               : "",
-          text: workItemText(comment?.text, 2000)
+          text: workItemText(comment?.text, 2000),
+          contentFingerprint: azureDevOpsCommentFingerprint(sanitizeAzureDevOpsHtml(comment?.text))
         }))
         .filter((comment) => comment.text),
       commentsWarning: commentResult.warning,
@@ -758,6 +774,36 @@ export function createAzureDevOpsTicketClient({
     }
     return id;
   }
+  async function commentIds(id, marker) {
+    if (typeof marker !== "string" || marker.length > 200 ||
+        (!marker.startsWith("[FixLab automation ") && !/^[a-f0-9]{64}$/u.test(marker))) {
+      throw new Error("An exact feedback fingerprint or legacy automation marker is required.");
+    }
+    let continuation;
+    const matches = [];
+    for (let page = 0; page < 10; page += 1) {
+      const result = await request(`wit/workItems/${workItemId(id)}/comments?$top=100&order=desc&api-version=7.1-preview.4${continuation ? `&continuationToken=${encodeURIComponent(continuation)}` : ""}`);
+      if (!Array.isArray(result?.comments) || result.comments.length > 100) {
+        throw new Error("Azure DevOps returned an invalid comment collection.");
+      }
+      for (const comment of result.comments) {
+        const text = sanitizeAzureDevOpsHtml(comment.text);
+        if (!comment.isDeleted && (marker.startsWith("[FixLab automation ")
+          ? text.startsWith(marker) : azureDevOpsCommentFingerprint(text) === marker)) {
+          if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
+            throw new Error("Azure DevOps returned an invalid feedback comment ID.");
+          }
+          matches.push(comment.id);
+        }
+      }
+      continuation = result.continuationToken;
+      if (!continuation) { return [...new Set(matches)]; }
+      if (typeof continuation !== "string" || continuation.length > 500) {
+        throw new Error("Azure DevOps returned an invalid comments continuation token.");
+      }
+    }
+    throw new Error("Existing feedback could not be fully checked; no duplicate comment was posted.");
+  }
   return {
     async findTagged(tag, areaPaths) {
       if (typeof tag !== "string" || !tag.trim() || tag.length > 100 || /[\r\n;]/u.test(tag)) {
@@ -797,44 +843,14 @@ export function createAzureDevOpsTicketClient({
       delete item.screenshots;
       return item;
     },
-    async hasComment(id, marker) {
-      if (typeof marker !== "string" || marker.length > 200 || !marker.startsWith("[FixLab automation ")) {
-        throw new Error("An exact bounded automation feedback marker is required.");
-      }
-      let continuation;
-      for (let page = 0; page < 10; page += 1) {
-        const result = await request(`wit/workItems/${workItemId(id)}/comments?$top=100&order=desc&api-version=7.1-preview.4${continuation ? `&continuationToken=${encodeURIComponent(continuation)}` : ""}`);
-        if (!Array.isArray(result?.comments)) {
-          throw new Error("Azure DevOps returned an invalid comment collection.");
-        }
-        if (result.comments.some(comment => !comment.isDeleted &&
-            sanitizeAzureDevOpsHtml(comment.text).startsWith(marker))) {
-          return true;
-        }
-        continuation = result.continuationToken;
-        if (!continuation) {
-          return false;
-        }
-        if (typeof continuation !== "string" || continuation.length > 500) {
-          throw new Error("Azure DevOps returned an invalid comments continuation token.");
-        }
-      }
-      throw new Error("Existing feedback could not be fully checked; no duplicate comment was posted.");
-    },
+    commentIds,
+    async hasComment(id, marker) { return (await commentIds(id, marker)).length > 0; },
     async comment(id, text) {
       if (typeof text !== "string" || !text.trim() || text.length > 10000) {
         throw new Error("Ticket feedback requires bounded nonempty text.");
       }
-      const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-      const formatted = escaped.split("\n\n").map(block => {
-        const [heading, ...lines] = block.split("\n");
-        if (heading.startsWith("## ") && lines.length && lines.every(line => line.startsWith("- "))) {
-          return `<h3>${heading.slice(3)}</h3><ul>${lines.map(line => `<li>${line.slice(2)}</li>`).join("")}</ul>`;
-        }
-        return block.replaceAll("\n", "<br>");
-      }).join("<br><br>");
       return request(`wit/workItems/${workItemId(id)}/comments?format=html&api-version=7.1-preview.4`, {
-        method: "POST", body: { text: formatted }
+        method: "POST", body: { text: formatAzureDevOpsComment(text) }
       });
     },
     async resolve(id, revision, workItemType) {

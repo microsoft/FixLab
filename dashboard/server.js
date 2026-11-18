@@ -37,7 +37,8 @@ import {
 import { formatPreflightFailure } from "./preflight.js";
 import { createSessionRegistry } from "./sessions.js";
 import { inspectBrowserProfileOwnership } from "./browser-ownership.js";
-import { canonicalExecutionRepository, createExecutorLease } from "./executor-lease.js";
+import { canonicalExecutionRepository, createExecutorLease, waitForExecutorLease } from "./executor-lease.js";
+import { assignedJobWorktree, needsJobWorktree, prepareJobWorktree, restoreJobWorktree } from "./job-worktree.js";
 import { spawnWindowsExecutor } from "./windows-executor.js";
 import { createRuntimeRequestBridge, MAX_RUNTIME_FRAME_BYTES, recordedSourceEditReview, safeRuntimeText, sourceEditAuthorization, validateRuntimeUsage, validateToolApprovalMode } from "./runtime-requests.js";
 import { validateJobFileAccess } from "./runtime-permission-policy.js";
@@ -550,6 +551,7 @@ function publicQueue(jobs) {
     runAllUiScenarios: job.runAllUiScenarios,
     targetEnvironment: job.targetEnvironment,
     sharedWorkspace: job.sharedWorkspace ?? null,
+    workspace: job.workspace ?? null,
     workspaceReview: job.workspaceReview ?? null,
     workspaceStash: job.workspaceStash ?? null,
     validationIntent: job.validationIntent ?? "full",
@@ -696,6 +698,7 @@ function dashboardSnapshot(job) {
     },
     branchNaming: job.branchNaming ?? null,
     sharedWorkspace: job.sharedWorkspace ?? null,
+    workspace: job.workspace ?? null,
     workspaceReview: job.workspaceReview ?? null,
     workspaceStash: job.workspaceStash ?? null,
     validationIntent: job.validationIntent ?? "full",
@@ -783,6 +786,7 @@ function restoreDashboardJob(snapshot, repository) {
   }
   const restored = {
     ...snapshot,
+    workspace: null,
     sourceEditReview: recordedSourceEditReview(snapshot.sourceEditReview),
     ...(profile.browserAutomation?.mode === "api"
       ? { testEvidence: { ...snapshot.testEvidence, apiOnly: true } }
@@ -1752,6 +1756,8 @@ export function createCacheContext(repository) {
       ? commonGitDirectory
       : resolve(repository, commonGitDirectory);
     const repositoryIdentity = realpathSync.native(gitDirectoryPath);
+    const checkoutGitDirectory = runGit(repository, ["rev-parse", "--absolute-git-dir"]);
+    if (!checkoutGitDirectory) { return null; }
     const profileContent = readFileSync(profilePath);
     const profile = JSON.parse(profileContent.toString("utf8"));
     const profileSummary = {
@@ -1774,7 +1780,7 @@ export function createCacheContext(repository) {
       instructionHash,
       stateHash,
       profileSummary,
-      cachePath: join(gitDirectoryPath, "fixlab", "dashboard-cache.json")
+      cachePath: join(checkoutGitDirectory, "fixlab", "dashboard-cache.json")
     };
   } catch {
     return null;
@@ -2344,6 +2350,11 @@ function sendJson(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+function canResumeJob(job) {
+  return !job.resumeDisabled && !job.executorStopping && !job.budgetExceeded && !job.permissionRequest &&
+    ["blocked", "failed", "passed", "held"].includes(job.status);
+}
+
 function publicJob(job) {
   if (!job) {
     return null;
@@ -2364,6 +2375,7 @@ function publicJob(job) {
     runAllUiScenarios: job.runAllUiScenarios,
     targetEnvironment: job.targetEnvironment,
     sharedWorkspace: job.sharedWorkspace ?? null,
+    workspace: job.workspace ?? null,
     workspaceReview: job.workspaceReview ?? null,
     workspaceStash: job.workspaceStash ?? null,
     validationIntent: job.validationIntent ?? "full",
@@ -2405,12 +2417,7 @@ function publicJob(job) {
     ppeWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "ppe-origin",
     budgetExceeded: job.budgetExceeded === true,
     runtimeDirectoryGrants: (job.runtimeDirectoryGrants ?? []).map((scope) => scope.directory),
-    canResume:
-      !job.resumeDisabled &&
-      !job.executorStopping &&
-      !job.budgetExceeded &&
-      !job.permissionRequest &&
-      ["blocked", "failed", "passed", "held"].includes(job.status),
+    canResume: canResumeJob(job),
     canReviewPermissions:
       Boolean(job.permissionRequest) &&
       !job.resumeDisabled &&
@@ -3564,6 +3571,7 @@ function isPostPrLiveReviewPending(job) {
 }
 
 function resetJobForResume(job) {
+  delete job.localTestingAbort;
   const preserveDraftPublication = isPostPrLiveReviewPending(job);
   job.toolApprovalMode = "ask";
   job.postWriteApproval = null;
@@ -3622,7 +3630,9 @@ export function createDashboardServer({
   executionHeartbeatMs = DEFAULT_EXECUTION_HEARTBEAT_MS,
   workspaceServers = new Map(),
   ownsWorkspaceServers = true,
-  workspaceHostState = { closing: false }
+  workspaceHostState = { closing: false },
+  assignedWorkspace = null,
+  workspaceSetup = restoreJobWorktree
 }) {
   const resolvedRepository = resolve(repository);
   const defaultModel = validateCopilotModel(model, runtime);
@@ -3641,16 +3651,93 @@ export function createDashboardServer({
   const sessions = createSessionRegistry(
     cacheContext?.repositoryIdentityHash ?? resolvedRepository
   );
-  const executorLease = createExecutorLease(resolvedRepository, sessions.id);
+  let executorLease = createExecutorLease(resolvedRepository, sessions.id, { worktree: Boolean(assignedWorkspace) });
+  const testingOwner = createExecutorLease(resolvedRepository, sessions.id, { resource: "local-testing" });
+  const testingShutdown = new AbortController();
+  const setupShutdown = new AbortController();
+  const pendingSetups = new Set();
+  let testingReservation = null;
+  let testingWait = null;
   let dashboardUrl = "";
   let closing = false;
   let watcherTitleCache = { key: "", checkedAt: 0, titles: {}, warning: "" };
   let watcherTitleLoad;
   const setupPlans = new Map();
+  const isForwardedJob = job => Boolean(job?.workspace && job.workspace.url !== dashboardUrl);
+
+  async function reserveLocalTesting(job = currentJob?.status === "running" ? currentJob : null, { signal } = {}) {
+    if (job) { job.localTestingAbort ??= new AbortController(); }
+    if (!testingReservation) {
+      testingWait ??= waitForExecutorLease(testingOwner, job?.id ?? sessions.id, {
+        signal: AbortSignal.any([testingShutdown.signal, ...(job ? [job.localTestingAbort.signal] : []),
+          ...(signal ? [signal] : [])]),
+        onWaiting() {
+          if (job) {
+            job.waitingForLocalTesting = true;
+            job.refreshIdleWatchdog?.();
+            pushLog(job, { index: job.nextLogIndex, timestamp: new Date().toISOString(), stream: "dashboard",
+              message: "Waiting for another job to release shared local-testing resources. Code work remains isolated; testing resumes automatically." });
+          }
+        }
+      });
+      try { testingReservation = await testingWait; }
+      finally {
+        testingWait = null;
+        if (job) { job.waitingForLocalTesting = false; job.refreshIdleWatchdog?.(); }
+      }
+    }
+    if (closing || (job && (currentJob !== job || job.status !== "running" || job.executorStopping))) {
+      releaseLocalTesting();
+      throw new Error("Local testing was cancelled before the queued job could start.");
+    }
+  }
+
+  function releaseLocalTesting(executorStopped = false) {
+    if ((!activeHandle || executorStopped) && !frontendConnection.handle && !frontendConnection.starting &&
+        !playwrightConnection.handle && testingReservation) {
+      testingReservation.release();
+      testingReservation = null;
+    }
+  }
+
+  async function reserveTestingForRequest(job, response) {
+    const cancellation = new AbortController();
+    const cancel = () => { if (!response.writableFinished) { cancellation.abort(); } };
+    response.once("close", cancel);
+    try { await reserveLocalTesting(job, { signal: cancellation.signal }); }
+    finally { response.removeListener("close", cancel); }
+  }
+
+  async function assignJobWorkspace(job, prompt) {
+    const source = assignedWorkspace?.source ?? resolvedRepository;
+    const receipt = prepareJobWorktree({ repository: source, jobId: job.id,
+      branchPrefix: job.branchNaming?.prefix ?? "fixlab" });
+    let workspace = workspaceServers.get(receipt.repository);
+    if (!workspace) {
+      const owners = await repositoryWorkspaceOwners(receipt.repository);
+      if (owners.length) {
+        throw new Error("This job's isolated checkout has another registered owner; its work was preserved.");
+      }
+      if (workspaceServers.size >= 8) { throw new Error("Eight owned workspaces are already open; no existing work was interrupted."); }
+      const dashboard = createDashboardServer({
+        repository: receipt.repository, packageRoot, runtime, model, executor, preflight, browserOpener, browserOwnership,
+        workspaceServers, ownsWorkspaceServers: false, workspaceHostState, assignedWorkspace: receipt, workspaceSetup
+      });
+      workspace = { dashboard, ready: dashboard.listen({ port: 0 }) };
+      workspaceServers.set(receipt.repository, workspace);
+    }
+    const address = await workspace.ready;
+    if (closing || workspaceHostState.closing) { throw new Error("Checkout preparation was cancelled during shutdown."); }
+    job.workspace = { repository: receipt.repository, url: address.url, jobId: job.id };
+    pushLog(job, { index: job.nextLogIndex, timestamp: new Date().toISOString(), stream: "dashboard",
+      message: `Automatically assigned this same job to owned checkout ${receipt.repository} on ${receipt.branch}. Source edits and other jobs were preserved.` });
+    await Promise.all([workspace.dashboard.adoptJob(job, prompt), startNextJob()]);
+    persistDashboardState();
+  }
 
   async function repositoryWorkspaceOwners(root) {
     const common = canonicalExecutionRepository(root).repository;
-    const catalog = await sessions.repositories({ scopeIds: [
+    const catalog = await sessions.repositories({ timeoutMs: 10000, scopeIds: [
       createSessionRegistry(root).scopeId,
       createSessionRegistry(hash(common)).scopeId
     ] });
@@ -3706,7 +3793,9 @@ export function createDashboardServer({
       throw new Error("FixLab already started the frontend");
     }
     frontendConnection.starting = true;
+    frontendConnection.startAbort = new AbortController();
     try {
+      await reserveLocalTesting(undefined, { signal: frontendConnection.startAbort.signal });
       const owners = await sessions.list();
       const conflict = owners.find((owner) =>
         owner.id !== sessions.id && owner.available && owner.frontend?.running
@@ -3742,6 +3831,7 @@ export function createDashboardServer({
         };
         if (frontendConnection.handle === child) {
           frontendConnection.handle = null;
+          if (!activeHandle) { releaseLocalTesting(); }
         }
       });
       child.once("close", (code) => {
@@ -3766,6 +3856,7 @@ export function createDashboardServer({
             return;
           }
           frontendConnection.handle = null;
+          if (!activeHandle) { releaseLocalTesting(); }
           frontendConnection.lastResult = {
             ok: code === 0,
             message: `Frontend process exited with code ${code ?? "unknown"}.`,
@@ -3776,6 +3867,7 @@ export function createDashboardServer({
       return { started: true };
     } finally {
       frontendConnection.starting = false;
+      if (!activeHandle && !frontendConnection.handle) { releaseLocalTesting(); }
     }
   }
 
@@ -3993,7 +4085,22 @@ export function createDashboardServer({
     return Number.isFinite(timestamp) && timestamp < cutoff;
   }
 
-  function startJob(job, prompt, resume = false) {
+  async function startJob(job, prompt, resume = false) {
+    if (!assignedWorkspace) {
+      assignedWorkspace = assignedJobWorktree({ repository: resolvedRepository, jobId: job.id,
+        branchPrefix: job.branchNaming?.prefix ?? "fixlab" });
+      if (assignedWorkspace) {
+        executorLease = createExecutorLease(resolvedRepository, sessions.id, { worktree: true });
+      }
+    }
+    if (needsJobWorktree(resolvedRepository, loadRepositoryProfile(resolvedRepository), job.mode) &&
+        assignedWorkspace?.jobId !== job.id) {
+      return assignJobWorkspace(job, prompt);
+    }
+    if (assignedWorkspace?.jobId === job.id) {
+      prepareJobWorktree({ repository: assignedWorkspace.source, jobId: job.id,
+        branchPrefix: job.branchNaming?.prefix ?? "fixlab" });
+    }
     if (job.inputTokenLimit > 0 && job.usage.inputTokens >= job.inputTokenLimit) {
       const error = new Error("Input-token ceiling already reached. Explicitly review and increase or remove this job's budget before resuming.");
       error.code = "INPUT_TOKEN_LIMIT";
@@ -4244,11 +4351,14 @@ export function createDashboardServer({
       }
       initializeJobValidation(job, resolvedRepository);
       prompt += `\n${componentRetrievalGuidance(loadRepositoryProfile(resolvedRepository), job.request)}`;
+      prompt += `\nBefore directly starting local applications, authentication helpers or live checks outside configured gates, reserve shared testing:
+  node "${join(packageRoot, "bin", "fixlab.js")}" gate --port ${server.address().port} --job ${job.id} --resource local-testing --repository "${resolvedRepository}"
+Code work remains parallel in separate owned checkouts. Local-stack/live-test gates reserve shared testing automatically and wait without failing. A kept-open preview retains the reservation until it stops. Acquisition is not validation evidence; never clear another owner's reservation.`;
       const validation = job.validationSession.summary();
       if (validation.status !== "unconfigured" && validation.gates.length > 0) {
         prompt += `\nDashboard-owned required validation:
 - Required gates and code changes must use this job's assigned dashboard checkout. Do not validate a sibling checkout or move gated changes elsewhere.
-- For separate isolation, onboard the worktree and start its dashboard before creating a gated job.
+- Isolation is assigned automatically when required. Continue this same job in its owned checkout; do not ask the user to provision a routine workspace.
 - Run each gate using:
   node "${join(packageRoot, "bin", "fixlab.js")}" gate --port ${server.address().port} --job ${job.id} --gate <id> --repository "${resolvedRepository}"
 - Required gate IDs: ${validation.gates.filter((gate) => gate.required).map((gate) => gate.id).join(", ") || "none"}.
@@ -4274,7 +4384,7 @@ export function createDashboardServer({
     });
     const armIdleWatchdog = () => {
       clearTimeout(idleTimer);
-      if (!job.acceptsValidation || job.validationSession.active || job.status !== "running" ||
+      if (!job.acceptsValidation || job.validationSession.active || job.waitingForLocalTesting || job.status !== "running" ||
           job.runtimeRequests?.length) {
         return;
       }
@@ -4318,7 +4428,7 @@ export function createDashboardServer({
     };
     job.refreshIdleWatchdog = armIdleWatchdog;
     const emitHeartbeat = () => {
-      if (job.status !== "running" || job.validationSession.active || !job.lastActivityAt ||
+      if (job.status !== "running" || job.validationSession.active || job.waitingForLocalTesting || !job.lastActivityAt ||
           job.runtimeRequests?.length) {
         return;
       }
@@ -4443,6 +4553,7 @@ export function createDashboardServer({
     }
     const actualCompletion = Promise.resolve(handle.completion).then(async (result) => {
       job.acceptsValidation = false;
+      job.localTestingAbort?.abort();
       await job.validationCompletion;
       if (job.validationSession?.terminationUnverified) {
         throw new Error("Validation termination is unverified; the repository lease remains reserved.");
@@ -4457,6 +4568,7 @@ export function createDashboardServer({
         branchError = error;
       }
       lease.release();
+      releaseLocalTesting(true);
       return leaseMetadataError || branchError
         ? { code: null, error: leaseMetadataError ?? branchError }
         : result;
@@ -4582,7 +4694,7 @@ export function createDashboardServer({
           resetJobForResume(job);
           recordJobMetric(job);
           try {
-            startJob(job, prompt, true);
+            await startJob(job, prompt, true);
           } catch (error) {
             finishJob(job, { code: null, error });
             recordJobMetric(job);
@@ -4599,25 +4711,27 @@ export function createDashboardServer({
       closing || workspaceHostState.closing ||
       activeHandle || currentJob?.postValidation ||
       queuedJobs.length === 0 ||
-      (currentJob && currentJob.status !== "passed")
+      (!isForwardedJob(currentJob) && currentJob && currentJob.status !== "passed")
     ) {
       return;
     }
-    if (currentJob?.artifactDirectory) {
+    if (currentJob?.artifactDirectory && !isForwardedJob(currentJob)) {
       removeArtifactDirectory(currentJob.artifactDirectory);
       artifactDirectories.delete(currentJob.artifactDirectory);
     }
     archiveJob(currentJob);
     currentJob = queuedJobs.shift();
-    currentJob.status = "running";
-    currentJob.startedAt ??= new Date().toISOString();
-    currentJob.lastActivityAt = new Date().toISOString();
-    recordJobMetric(currentJob);
+    const job = currentJob;
+    job.status = "running";
+    job.startedAt ??= new Date().toISOString();
+    job.lastActivityAt = new Date().toISOString();
+    recordJobMetric(job);
     try {
       const owners = await sessions.list();
       const conflict = owners.find((owner) =>
         owner.id !== sessions.id && owner.available && (
-          owner.job?.running ||
+          (owner.job?.running && !assignedWorkspace &&
+            !needsJobWorktree(resolvedRepository, loadRepositoryProfile(resolvedRepository), job.mode)) ||
           (loadRepositoryProfile(resolvedRepository).worktreeSetup?.mode === "shared" &&
             (owner.frontend?.running || owner.authentication?.running))
         )
@@ -4625,17 +4739,17 @@ export function createDashboardServer({
       if (conflict) {
         throw new Error(`Queued job cannot start while FixLab dashboard ${conflict.id} owns the repository's agent session. Reconnect or confirm stopping that owner.`);
       }
-      startJob(
-        currentJob,
-        currentJob.pendingPrompt,
-        Boolean(currentJob.resumeSession)
+      await startJob(
+        job,
+        job.pendingPrompt,
+        Boolean(job.resumeSession)
       );
-      delete currentJob.pendingPrompt;
-      delete currentJob.resumeSession;
+      delete job.pendingPrompt;
+      delete job.resumeSession;
     } catch (error) {
-      finishJob(currentJob, { code: null, error });
-      recordJobMetric(currentJob);
-      activeHandle = null;
+      finishJob(job, { code: null, error });
+      recordJobMetric(job);
+      if (currentJob === job) { activeHandle = null; }
     }
   }
 
@@ -4698,6 +4812,7 @@ export function createDashboardServer({
         } : null,
         validationIntent: job.validationIntent,
         workflow: job.workflow ?? { mode: "strict" },
+        workspace: job.workspace ?? null,
         inputTokenLimit: job.inputTokenLimit,
         fileAccess: job.fileAccess ?? null,
         budgetExceeded: job.budgetExceeded,
@@ -4777,7 +4892,7 @@ export function createDashboardServer({
           id: currentJob.id,
           status: currentJob.status,
           running: Boolean(activeHandle),
-          canResume: publicJob(currentJob).canResume
+          canResume: canResumeJob(currentJob)
         } : null,
         frontend: {
           running: Boolean(frontendConnection.handle) || frontendConnection.starting,
@@ -4911,11 +5026,13 @@ export function createDashboardServer({
     ) {
       try {
         const resource = requestUrl.pathname === "/api/frontend/start" ? "frontend" : "job";
+        const isolatedCheckout =
+          (Boolean(assignedWorkspace) || needsJobWorktree(resolvedRepository, loadRepositoryProfile(resolvedRepository), "fix-and-validate"));
         const owners = await sessions.list();
         const shared = loadRepositoryProfile(resolvedRepository).worktreeSetup?.mode === "shared";
         const conflict = owners.find((owner) =>
           owner.id !== sessions.id && owner.available && (
-            owner[resource]?.running ||
+            (!isolatedCheckout && owner[resource]?.running) ||
             (shared && resource === "job" && (owner.frontend?.running || owner.authentication?.running))
           )
         );
@@ -5118,7 +5235,9 @@ export function createDashboardServer({
         if (closing || !job || job.executorStopping || job.status !== "running" || !job.acceptsValidation || body.jobId !== job.id) {
           throw new Error("Validation requires the current running job ID.");
         }
-        if (typeof body.gateId !== "string" || typeof body.repository !== "string") {
+        const resourceOnly = body.resource === "local-testing" && body.gateId === undefined;
+        if ((!resourceOnly && (typeof body.gateId !== "string" || body.resource !== undefined)) ||
+            typeof body.repository !== "string") {
           throw new Error("gateId and repository are required.");
         }
         if (realpathSync(body.repository) !== realpathSync(resolvedRepository)) {
@@ -5126,6 +5245,19 @@ export function createDashboardServer({
         }
         if (job.validationSession.active) {
           throw new Error("A validation gate is already running.");
+        }
+        const gate = validationGates(loadRepositoryProfile(resolvedRepository), job.mode)?.find(entry => entry.id === body.gateId);
+        if (resourceOnly || gate?.requiresLiveIntegration || ["local-stack", "live-test"].includes(gate?.stage)) {
+          await reserveTestingForRequest(job, response);
+          if (currentJob !== job || !job.acceptsValidation || response.destroyed) {
+            releaseLocalTesting();
+            throw new Error("The queued local test was cancelled before execution.");
+          }
+        }
+        if (resourceOnly) {
+          sendJson(response, 200, { status: 0,
+            summary: "Shared local-testing resources reserved for this job. This is not passing validation evidence.\n" });
+          return;
         }
         const cancel = () => {
           if (!response.writableFinished) {
@@ -5845,7 +5977,7 @@ export function createDashboardServer({
           });
         }
         try {
-          startJob(job, prompt, !pending.preflight);
+          await startJob(job, prompt, !pending.preflight);
         } catch (error) {
           job.toolApprovalMode = "ask";
           if (pending.preflight && error.workspaceReview) {
@@ -6117,7 +6249,7 @@ export function createDashboardServer({
       resetJobForResume(currentJob);
       recordJobMetric(currentJob);
       try {
-        startJob(currentJob, prompt, !freshRetry);
+        await startJob(currentJob, prompt, !freshRetry);
       } catch (error) {
         finishJob(currentJob, { code: null, error });
         recordJobMetric(currentJob);
@@ -6137,7 +6269,7 @@ export function createDashboardServer({
     ) {
       if (
         !currentJob ||
-        !activeHandle?.terminate
+        (!activeHandle?.terminate && !currentJob.workspaceSetupAbort)
       ) {
         sendJson(response, 409, {
           error: "no running FixLab-owned executor is available to stop"
@@ -6152,6 +6284,20 @@ export function createDashboardServer({
         sendJson(response, 400, {
           error: "Content-Type must be application/json"
         });
+        return;
+      }
+      if (requestUrl.pathname === "/api/job/stop" && currentJob.workspaceSetupAbort) {
+        const job = currentJob;
+        job.stopRequested = true;
+        job.workspaceSetupAbort.abort();
+        try { await job.workspaceSetupCompletion; }
+        catch (error) {
+          if (error.name !== "AbortError") {
+            sendJson(response, 500, { error: `Checkout setup termination is unconfirmed: ${error.message}` });
+            return;
+          }
+        }
+        sendJson(response, 202, { job: publicJob(job), queue: publicQueue(queuedJobs), held: publicHeld(heldJobs) });
         return;
       }
       if (requestUrl.pathname === "/api/job/source-edit-review") {
@@ -6182,6 +6328,7 @@ export function createDashboardServer({
       try {
         currentJob.executorStopping = true;
         currentJob.validationSession?.cancel();
+        currentJob.localTestingAbort?.abort();
         activeHandle.terminate();
         currentJob.pendingInputs = [];
         currentJob.stopRequested = true;
@@ -6417,7 +6564,7 @@ export function createDashboardServer({
         currentJob.lastActivityAt = new Date().toISOString();
         recordJobMetric(currentJob);
         try {
-          startJob(currentJob, prompt, resumeSession);
+          await startJob(currentJob, prompt, resumeSession);
         } catch (error) {
           finishJob(currentJob, { code: null, error });
           recordJobMetric(currentJob);
@@ -6539,12 +6686,12 @@ export function createDashboardServer({
       } else {
         currentJob = restartedJob;
         try {
-          startJob(currentJob, currentJob.pendingPrompt);
-          delete currentJob.pendingPrompt;
+          await startJob(restartedJob, restartedJob.pendingPrompt);
+          delete restartedJob.pendingPrompt;
         } catch (error) {
-          finishJob(currentJob, { code: null, error });
-          recordJobMetric(currentJob);
-          activeHandle = null;
+          finishJob(restartedJob, { code: null, error });
+          recordJobMetric(restartedJob);
+          if (currentJob === restartedJob) { activeHandle = null; }
         }
       }
       sendJson(response, 202, {
@@ -6642,7 +6789,8 @@ export function createDashboardServer({
     if (request.method === "POST" && requestUrl.pathname === "/api/jobs") {
       let shouldQueue =
         Boolean(activeHandle || currentJob?.postValidation) ||
-        ["running", "blocked", "failed"].includes(currentJob?.status) ||
+        (!isForwardedJob(currentJob) &&
+          ["running", "blocked", "failed"].includes(currentJob?.status)) ||
         queuedJobs.length > 0;
       if (shouldQueue && queuedJobs.length >= MAX_QUEUED_JOBS) {
         sendJson(response, 409, {
@@ -7066,7 +7214,7 @@ export function createDashboardServer({
       }
       shouldQueue =
         Boolean(activeHandle || currentJob?.postValidation) ||
-        ["running", "blocked", "failed"].includes(currentJob?.status) ||
+        (!isForwardedJob(currentJob) && ["running", "blocked", "failed"].includes(currentJob?.status)) ||
         queuedJobs.length > 0;
       if (shouldQueue && queuedJobs.length >= MAX_QUEUED_JOBS) {
         sendJson(response, 409, {
@@ -7074,7 +7222,7 @@ export function createDashboardServer({
         });
         return;
       }
-      if (!shouldQueue && currentJob?.artifactDirectory) {
+      if (!shouldQueue && currentJob?.artifactDirectory && !currentJob.workspace) {
         removeArtifactDirectory(currentJob.artifactDirectory);
         artifactDirectories.delete(currentJob.artifactDirectory);
       }
@@ -7221,17 +7369,17 @@ export function createDashboardServer({
       } else {
         currentJob = job;
         try {
-          startJob(currentJob, currentJob.pendingPrompt);
-          delete currentJob.pendingPrompt;
+          await startJob(job, job.pendingPrompt);
+          delete job.pendingPrompt;
         } catch (error) {
-          finishJob(currentJob, { code: null, error });
-          recordJobMetric(currentJob);
-          activeHandle = null;
+          finishJob(job, { code: null, error });
+          recordJobMetric(job);
+          if (currentJob === job) { activeHandle = null; }
         }
       }
 
       sendJson(response, 202, {
-        job: publicJob(currentJob),
+        job: publicJob(shouldQueue ? currentJob : job),
         queued: shouldQueue,
         queuedJob: shouldQueue ? publicQueue([job])[0] : null,
         queue: publicQueue(queuedJobs),
@@ -7436,6 +7584,15 @@ export function createDashboardServer({
         });
         return;
       }
+      try {
+        await reserveTestingForRequest(currentJob?.status === "running" ? currentJob : null, response);
+        if (playwrightConnection.handle || response.destroyed || closing) {
+          throw new Error("Authentication start was cancelled or another owned authentication is already running.");
+        }
+      } catch (error) {
+        sendJson(response, 409, { error: error.message });
+        return;
+      }
       playwrightConnection.lastResult = null;
       playwrightConnection.proof = null;
       playwrightConnection.apiProof = apiProof;
@@ -7462,6 +7619,7 @@ export function createDashboardServer({
           finishedAt: new Date().toISOString()
         };
         playwrightConnection.handle = null;
+        if (!activeHandle) { releaseLocalTesting(); }
       });
       child.once("close", (code, signal) => {
         try {
@@ -7486,6 +7644,7 @@ export function createDashboardServer({
             startAuthentication(true);
           } catch (error) {
             playwrightConnection.handle = null;
+            if (!activeHandle) { releaseLocalTesting(); }
             playwrightConnection.lastResult = { ok: false, message: `Authentication proof could not start: ${error.message}`,
               finishedAt: new Date().toISOString() };
           }
@@ -7576,6 +7735,7 @@ export function createDashboardServer({
       const child = frontendConnection.handle;
       const wasStarting = frontendConnection.starting;
       frontendStartGeneration += 1;
+      frontendConnection.startAbort?.abort();
       try {
         await stopProcessTree(child);
       } catch (error) {
@@ -7583,6 +7743,7 @@ export function createDashboardServer({
         return;
       }
       frontendConnection.handle = null;
+      if (!activeHandle) { releaseLocalTesting(); }
       sendJson(response, 200, {
         ...(await frontendStatus(resolvedRepository, frontendConnection)),
         stopped: Boolean(child) || wasStarting
@@ -7616,6 +7777,51 @@ export function createDashboardServer({
 
   return {
     server,
+    async adoptJob(job, prompt) {
+      if (!assignedWorkspace || assignedWorkspace.jobId !== job.id ||
+          (currentJob && currentJob.id !== job.id) || activeHandle || closing) {
+        throw new Error("The destination checkout is not idle and owned by this same job.");
+      }
+      if (job.fileAccess?.repository !== realpathSync.native(resolvedRepository)) {
+        job.fileAccess = null;
+        job.runtimeDirectoryGrants = [];
+        job.toolApprovalMode = "ask";
+        job.postWriteApproval = null;
+      }
+      job.cacheContext = createCacheContext(resolvedRepository);
+      job.validationBaseline ??= assignedWorkspace.baseCommit;
+      job.validationHistory = job.validationSession?.executedGates() ?? job.validationHistory;
+      delete job.validationSession;
+      delete job.localTestingAbort;
+      currentJob = job;
+      persistDashboardState();
+      job.workspaceSetupAbort = new AbortController();
+      const setupSignal = AbortSignal.any([setupShutdown.signal, job.workspaceSetupAbort.signal]);
+      const setupPromise = workspaceSetup({ workspace: assignedWorkspace, packageRoot, runtime, signal: setupSignal,
+        onOutput(message) {
+          pushLog(job, { index: job.nextLogIndex, timestamp: new Date().toISOString(), stream: "dashboard",
+            message: sanitizeCommandOutput(message).slice(0, 2000) });
+        } });
+      pendingSetups.add(setupPromise);
+      job.workspaceSetupCompletion = setupPromise;
+      let setup;
+      try { setup = await setupPromise; setupSignal.throwIfAborted(); }
+      catch (error) {
+        if (error.name !== "AbortError" || !job.stopRequested) { throw error; }
+        job.status = "cancelled";
+        job.finishedAt = new Date().toISOString();
+        job.error = "Checkout setup stopped by the user; existing work was preserved and no executor started.";
+        recordJobMetric(job);
+        persistDashboardState();
+        return;
+      } finally {
+        pendingSetups.delete(setupPromise);
+        delete job.workspaceSetupAbort;
+        delete job.workspaceSetupCompletion;
+      }
+      prompt += `\nOwned checkout setup: ${setup.message}`;
+      await startJob(job, `${prompt}\nAutomatically prepared checkout: ${resolvedRepository}. Continue this same job on ${assignedWorkspace.branch}. Required gates and code changes must use this checkout and this dashboard's gate commands; do not borrow validation from the source checkout.`, false);
+    },
     async listen({ port = DEFAULT_DASHBOARD_PORT } = {}) {
       const validatedPort = port === 0 ? 0 : validatePort(port);
       await new Promise((resolveListen, reject) => {
@@ -7638,6 +7844,9 @@ export function createDashboardServer({
     },
     async close() {
       closing = true;
+      testingShutdown.abort();
+      setupShutdown.abort();
+      await Promise.allSettled([...pendingSetups]);
       currentJob?.validationSession?.cancel();
       frontendStartGeneration += 1;
       const failures = [];
@@ -7684,6 +7893,7 @@ export function createDashboardServer({
         await stopProcessTree(frontendConnection.handle);
         frontendConnection.handle = null;
       });
+      await attempt(() => releaseLocalTesting());
       for (const directory of artifactDirectories) {
         await attempt(() => removeArtifactDirectory(directory));
       }

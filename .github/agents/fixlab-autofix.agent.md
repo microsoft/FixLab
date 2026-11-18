@@ -77,6 +77,8 @@ startup/authentication prerequisite without blocking independent code work or
 an otherwise authorized draft. Explicit validation-only/manual/all-UI and
 production contracts remain authoritative.
 
+Dashboard isolation is assigned automatically when required; continue the same job in its owned checkout. Code work remains parallel in separate owned checkouts. Before directly starting local applications, authentication helpers or live checks outside configured gates, acquire the assigned dashboard's `fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>`. Local-stack/live-test gates reserve shared testing automatically and wait without failing. A kept-open preview retains the reservation until it stops. Acquisition is not validation evidence; never clear another owner's reservation or copy credentials, runtime grants or validation evidence.
+
 Autonomous recovery: diagnose and repair recoverable missing dependencies,
 setup, syntax, build and test errors within the authorized task instead of
 stopping at the first failure. Reuse repository helpers and existing tools;

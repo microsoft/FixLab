@@ -50,9 +50,9 @@ export function createSessionRegistry(repositoryIdentity) {
     return validateOwner(JSON.parse(readFileSync(ownerPath, "utf8")), ownerId);
   }
 
-  async function inspectOwner(record, scopeId = key) {
+  async function inspectOwner(record, scopeId = key, timeoutMs = 1500) {
     const response = await fetch(`${record.url}/api/session`, {
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(timeoutMs),
       redirect: "error"
     });
     if (!response.ok) {
@@ -98,9 +98,27 @@ export function createSessionRegistry(repositoryIdentity) {
         }
       }));
     },
-    async repositories({ scopeIds } = {}) {
+    async repositories({ scopeIds, timeoutMs = 1500 } = {}) {
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000) {
+        throw new Error("Repository ownership inspection requires a timeout between 1 and 10000 ms.");
+      }
       const root = join(tmpdir(), "fixlab-dashboard-sessions");
-      const scopes = readdirSync(root, { withFileTypes: true }).filter((entry) =>
+      let candidates;
+      if (scopeIds) {
+        if (!Array.isArray(scopeIds) || scopeIds.length > 20 ||
+            scopeIds.some(id => typeof id !== "string" || !/^[0-9a-f]{64}$/u.test(id))) {
+          throw new Error("Repository discovery needs at most 20 exact scope IDs.");
+        }
+        candidates = [...new Set(scopeIds)].flatMap(name => {
+          try {
+            const info = lstatSync(join(root, name));
+            return [{ name, isDirectory: () => info.isDirectory(), isSymbolicLink: () => info.isSymbolicLink() }];
+          } catch (error) { if (error.code === "ENOENT") { return []; } throw error; }
+        });
+      } else {
+        candidates = readdirSync(root, { withFileTypes: true });
+      }
+      const scopes = candidates.filter((entry) =>
         entry.isDirectory() && !entry.isSymbolicLink() && /^[0-9a-f]{64}$/u.test(entry.name)
       );
       if (scopes.length > 10000) {
@@ -119,7 +137,7 @@ export function createSessionRegistry(repositoryIdentity) {
       }
       const results = await Promise.all(records.map(async ({ ownerDirectory, scopeId, ownerId }) => {
         try {
-          const session = await inspectOwner(readOwner(ownerId, ownerDirectory), scopeId);
+          const session = await inspectOwner(readOwner(ownerId, ownerDirectory), scopeId, timeoutMs);
           if (typeof session.repository !== "string" || !isAbsolute(session.repository) ||
               session.repository.length > 2048) {
             throw new Error("invalid repository identity");

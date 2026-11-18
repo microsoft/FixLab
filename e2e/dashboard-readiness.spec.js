@@ -156,6 +156,56 @@ test.afterAll(async () => {
   rmSync(repository, { recursive: true, force: true });
 });
 
+test("editing from an isolated checkout follows the same job into its automatically prepared workspace", async ({ page }) => {
+  test.setTimeout(60000);
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-owned-workspace-ui-"));
+  const profile = {
+    ...JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8")),
+    worktreeSetup: { mode: "isolated" }
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  for (const args of [
+    ["init", directory], ["-C", directory, "add", "."],
+    ["-C", directory, "-c", "user.name=FixLab Test", "-c", "user.email=fixlab@example.invalid", "commit", "-qm", "Synthetic checkout fixture"]
+  ]) {
+    expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
+  }
+  const workspaces = new Map();
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {}, workspaceServers: workspaces,
+    workspaceSetup: async () => ({ ready: true, message: "Synthetic restore completed." }),
+    executor() {
+      let finish;
+      let stopped = false;
+      return {
+        completion: new Promise(resolve => { finish = resolve; }),
+        terminate() { stopped = true; finish({ code: null, signal: "SIGTERM" }); },
+        hasStopped: () => stopped
+      };
+    }
+  });
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await openWorkflowControls(page, address.url);
+    await page.getByLabel("Bug or required enhancement").fill("Fix this synthetic workflow in its owned checkout.");
+    await page.getByRole("button", { name: "Start job", exact: true }).click();
+    await page.waitForURL(url => url.origin !== new URL(address.url).origin, { timeout: 30000 });
+    expect(workspaces.size).toBe(1);
+    const owned = await [...workspaces.values()][0].ready;
+    await expect(page).toHaveURL(`${owned.url}/`);
+    const source = await (await page.request.get(`${address.url}/api/status`)).json();
+    const assigned = await (await page.request.get(`${owned.url}/api/status`)).json();
+    expect(assigned.job.id).toBe(source.job.id);
+    expect(source.job.workspace.repository).not.toBe(directory);
+    await expect(page.locator("#job-status")).toContainText("running");
+  } finally {
+    await instance.close();
+    rmSync(`${directory}.fixlab-worktrees`, { recursive: true, force: true });
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("watcher jobs retain detailed evidence and prepare reviewed local handoffs without automatic execution", async ({ page }) => {
   const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-ui-"));
   const profile = {
@@ -2595,6 +2645,7 @@ test("repository memory shows saved outcomes safely and selecting one never resu
   page.on("request", (request) => { if (request.method() === "POST") { posts++; } });
   const saved = {
     id: "saved-chat", request: "<img src=x onerror=alert(1)> Synthetic remembered work",
+    workspace: { jobId: "saved-chat", repository: join(repository, "previous-checkout"), url: "http://127.0.0.1:1" },
     status: "blocked", requestType: "bug-fix", targetEnvironment: "dev",
     stages: { diagnosis: { status: "passed", message: "Synthetic diagnosis complete" } },
     bugs: [], logs: [], activity: [], canResume: false, canComment: false

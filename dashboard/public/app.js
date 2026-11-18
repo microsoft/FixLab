@@ -1612,6 +1612,14 @@ function inferActiveStageFromLogs(logs = []) {
 }
 
 function renderJob(job, currentActiveJob = job) {
+  if (job && job.id === currentActiveJob?.id && job.workspace?.jobId === job.id && job.workspace.url) {
+    const workspace = new URL(job.workspace.url);
+    if (workspace.protocol === "http:" && workspace.hostname === "127.0.0.1" &&
+        workspace.origin !== window.location.origin) {
+      window.location.assign(workspace.origin);
+      return;
+    }
+  }
   summaryButton.disabled = !job;
   if (summaryDialog.open) {renderSummary();}
   currentJobFullscreen.disabled = !currentActiveJob;

@@ -427,6 +427,18 @@ Validation-only jobs do not switch branches or refresh the base.
 
 ### Preparing another worktree
 
+Dashboard editing jobs with `worktreeSetup.mode: "isolated"` automatically
+create or recover a receipt-bound checkout and keep the same job ID. Detached
+source checkouts also get this recovery unless shared mode is explicit.
+Declared configuration, dependency restore and Playwright setup run before
+execution; no routine request to create a checkout is needed. A failed restore
+is reported and dependent validation stays unverified while independent code
+work can continue. Stop cancels that job's owned setup. Existing edits,
+branches and unrelated worktrees are never reset, deleted or adopted by name.
+Different isolated jobs can implement concurrently; shared local testing
+queues and resumes automatically. Browser identity, runtime grants and prior
+passing validation do not transfer. Manual preparation remains available:
+
 A Git worktree does not inherit ignored profiles, untracked browser
 configuration, restored dependencies, or authenticated browser state. Declare
 only the non-sensitive configuration files needed by another checkout:

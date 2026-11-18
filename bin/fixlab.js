@@ -100,6 +100,7 @@ Usage:
   fixlab portal-api-proof [repository] [--authenticate|--proof] --yes
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
+  fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>
   fixlab run [repository] [--runtime <agency|copilot>] [--model <model>] [--environment <name>] [--] [request...]
   fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]
   fixlab watch-review [repository] --ticket <id>
@@ -1122,6 +1123,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
       : "Use strict delivery: all applicable local gates and required approvals remain mandatory before readiness. Honor the saved draft/ready publication choice. Read-only runs never create or update a PR.",
     "Do not delete or edit transient test artifacts while validation is discovering or executing them; wait for owned validation to finish before cleanup.",
     "Before validation in a new isolated worktree, plan `fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME`. After scoped setup approval, add `--yes`. The source profile declares non-sensitive configuration in `worktreeSetup.files`. Never copy credentials or browser state. Missing configuration, authentication or denied runtime access is a blocker for the dependent check; do not retry unchanged approvals or grant blanket path access. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration; report missing prerequisites as blocked.",
+    "Dashboard isolation is assigned automatically when required; continue the same job in its owned checkout. Code work remains parallel in separate owned checkouts. Before directly starting local applications, authentication helpers or live checks outside configured gates, acquire the assigned dashboard's `fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>`. Local-stack/live-test gates reserve shared testing automatically and wait without failing. A kept-open preview retains the reservation until it stops. Acquisition is not validation evidence; never clear another owner's reservation or copy credentials, runtime grants or validation evidence.",
     "Prefix FixLab-created pull-request titles with `FLAB:` followed by a concise coding-change description. Use the repository's PR template with clear Markdown sections for the problem, changes, validation and risks, and accurate validation checkboxes.",
     readOnly
       ? "Do not publish a pull request or change its draft status in read-only mode."
@@ -1874,6 +1876,7 @@ async function main(args) {
     }
     let repositoryArgument;
     let environment;
+    let resumeWorkItemId;
     const flags = new Set();
     for (let index = 0; index < parsed.args.length; index += 1) {
       const value = parsed.args[index];
@@ -1882,6 +1885,12 @@ async function main(args) {
         if (!environment || environment.startsWith("-")) {
           throw new Error("watch requires a value after --environment.");
         }
+      } else if (value === "--resume-ticket") {
+        const id = parsed.args[++index];
+        if (resumeWorkItemId !== undefined || !/^[1-9]\d*$/u.test(id ?? "") || !Number.isSafeInteger(Number(id))) {
+          throw new Error("watch --resume-ticket requires one positive safe work-item ID.");
+        }
+        resumeWorkItemId = Number(id);
       } else if (["--yes", "--once", "--allow-all-tools", "--resolve-on-completion"].includes(value)) {
         flags.add(value);
       } else if (!value.startsWith("-") && !repositoryArgument) {
@@ -1922,13 +1931,15 @@ async function main(args) {
     try {
       await watchTickets({
         repository, plan, once: flags.has("--once"), confirmed: true,
+        resumeWorkItemId,
         allowAllTools: flags.has("--allow-all-tools"), signal: controller.signal,
-        execute: async ({ request, onActivity }) => {
+        execute: async ({ request, onActivity, sessionId, resume, onSession }) => {
           const result = await launch(repository, request, parsed.runtime, environment, parsed.model, false, "", {
             ticketAutomation: true,
             execute: ({ repository: checkout, prompt }) => executeTicketAgent({
               executor: createRuntimeExecutor({ packageRoot, runtime: parsed.runtime, model: parsed.model, native: false }),
               repository: checkout, prompt,
+              ...(sessionId ? { sessionId } : {}), resume: resume === true, onSession,
               runtimeDirectories: [packageRoot], signal: controller.signal,
               onActivity,
               idleTimeoutMs: (profile.validation?.agentIdleTimeoutMinutes ?? 20) * 60000
