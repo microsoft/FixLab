@@ -888,10 +888,57 @@ source/correlation findings, not raw records.
 Host Copilot MCP connections are not automatically inherited. Existing MCP
 tools must separately be available and authorized in the executing runtime.
 No Cosmos credentials, connection strings or production scope are configured
-by this feature. Direct production helpers are not supported here; the existing
-separately approved local-API production-read-only exception is unchanged.
+by this feature. Direct production helpers are not supported by
+`analysis.evidenceSources`; the existing separately approved local-API
+production-read-only exception is unchanged.
 Missing access or row-level evidence remains a blocker, not proof that SAP
 rejected an item or a reason to invent a code fix.
+
+For an explicitly approved production incident, the watcher has a separate
+opt-in configuration:
+
+```json
+{
+  "analysis": {
+    "productionReadOnlyEvidence": [{
+      "id": "incident-records",
+      "kind": "cosmos",
+      "environment": "production",
+      "readOnly": true,
+      "workItemId": 42,
+      "correlationId": "CR-123",
+      "helper": "tools/read-production-incident.mjs",
+      "helperSha256": "<64 lowercase hexadecimal characters from reviewed source>"
+    }]
+  }
+}
+```
+
+Supply a real reviewed helper, not the illustrative path/hash. Review its
+identity, fixed query/field/container scope, read-only transport, redirect and
+response limits, and sanitized failures. The helper must accept and validate
+`--source`, `--ticket`, `--correlation` and `--revision`, rejecting unknown
+arguments, other IDs and source changes before authentication or networking.
+It must not accept arbitrary SQL/KQL, endpoints or mutation operations. At most
+ten unique Cosmos/trace readers are supported. Each entry binds one exact
+ticket and correlation; no wildcard production grant is supported.
+
+Review the disclosed plan, then explicitly start the watcher with
+`--allow-production-evidence --yes --allow-all-tools` in addition to its normal
+repository, runtime and non-production `--environment`. Without the separate
+flag no production reader is exposed. Matching readers are provided only to
+their bound ticket; other tickets and direct CLI/dashboard jobs inherit nothing.
+Try independently approved trace readers when a Cosmos container denies access,
+retaining both actual outcomes. Normal runtime permissions and human sign-in
+still apply; never change roles or identity automatically.
+
+The helper hash is checked during discovery and session revalidation. Changed
+source requires review and an updated approved hash, then a watcher restart.
+Newly approved reader revisions cause one re-investigation of their bound
+ticket, preserving completed attempts and comments. Removing/revoking approval
+does not reuse historical permission or automatically launch another attempt.
+This does not change DEV write policy, permit production application testing,
+or grant production through ticket comments or a parent Copilot conversation.
 
 #### Review an interrupted attempt
 

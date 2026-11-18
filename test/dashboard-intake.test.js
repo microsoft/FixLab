@@ -10,7 +10,7 @@ import {
   rmSync
 } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -145,6 +145,111 @@ test("incident evidence discovers environment-bound source helpers without execu
       assert.ok(readFileSync(new URL(`../${path}`, import.meta.url), "utf8")
         .replace(/\s+/gu, " ").includes(ANALYSIS_EVIDENCE_GUIDANCE), path);
     }
+  } finally { fixture.cleanup(); }
+});
+
+function productionEvidence(fixture) {
+  const helper = "read-production-evidence.mjs";
+  const source = 'throw new Error("Discovery must not execute production readers.");';
+  writeFileSync(join(fixture.repository, helper), source);
+  return {
+    id: "incident-records", kind: "cosmos", environment: "production",
+    workItemId: 42, correlationId: "CR-123", readOnly: true, helper,
+    helperSha256: createHash("sha256").update(source).digest("hex")
+  };
+}
+
+test("production watcher evidence requires reviewed source hashes and bounded explicit scope", () => {
+  const fixture = ticketFixture();
+  try {
+    const source = productionEvidence(fixture);
+    const planFor = sources => ticketAutomationPlan(fixture.repository, {
+      ...fixture.profile, analysis: { productionReadOnlyEvidence: sources }
+    }, { environment: "dev" });
+    const plan = planFor([source]);
+    assert.equal(plan.allowProductionEvidence, false);
+    assert.equal(plan.productionEvidence.length, 1);
+    assert.equal(plan.productionEvidence[0].revision, source.helperSha256);
+    assert.equal(plan.environment, "dev");
+    for (const invalid of [
+      { ...source, readOnly: false }, { ...source, workItemId: 0 },
+      { ...source, correlationId: "*" }, { ...source, correlationId: "https://example.test" },
+      { ...source, environment: "dev" }, { ...source, kind: "configuration" },
+      { ...source, helperSha256: "0".repeat(64) }, { ...source, helper: "..\\outside.mjs" },
+      { ...source, helper: ".env" }
+    ]) {
+      assert.throws(() => planFor([invalid]));
+    }
+    assert.throws(() => planFor([source, source]), /unique/);
+    assert.throws(() => planFor(null), /reviewed readers/);
+    writeFileSync(join(fixture.repository, source.helper), "export const changed = true;");
+    assert.throws(() => planFor([source]), /revision|hash/i);
+  } finally { fixture.cleanup(); }
+});
+
+test("watcher production approval re-evaluates only its bound ticket once without inheriting or retaining access", async () => {
+  for (const runtime of ["agency", "copilot"]) {
+    const fixture = ticketFixture();
+    try {
+      const source = productionEvidence(fixture);
+      fixture.profile.analysis = { productionReadOnlyEvidence: [source] };
+      writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+      const planFor = approved => ticketAutomationPlan(fixture.repository, fixture.profile, {
+        environment: "dev", runtime, allowProductionEvidence: approved
+      });
+      const noProduction = async ({ request }) => {
+        assert.doesNotMatch(request, /Reviewed production incident readers/);
+        assert.doesNotMatch(request, /CR-123/);
+        return { outcome: "analysis", summary: "Source analysis only; incident evidence is unavailable." };
+      };
+      await fixture.run({ plan: planFor(false), execute: noProduction });
+      const history = () => readTicketAutomationHistory(fixture.repository).attempts;
+      assert.equal(history().length, 1);
+      await fixture.run({ plan: planFor(true), execute: async ({ request }) => {
+        assert.match(request, /Reviewed production incident readers/);
+        assert.match(request, /CR-123/);
+        assert.match(request, /read-production-evidence.mjs/);
+        assert.match(request, /No production application testing or business-data writes/);
+        assert.match(request, /continue.*other.*reader/i);
+        return { outcome: "analysis", summary: "Bounded incident reads completed; interaction remains unconfirmed." };
+      } });
+      assert.equal(history().length, 2);
+      await fixture.run({ plan: planFor(true), execute() { assert.fail("Unchanged approved work must stay deduplicated."); } });
+      writeFileSync(join(fixture.repository, source.helper), "export const revised = true;");
+      source.helperSha256 = createHash("sha256").update(readFileSync(join(fixture.repository, source.helper))).digest("hex");
+      writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+      await fixture.run({ plan: planFor(true), execute: async ({ request }) => {
+        assert.ok(request.includes(source.helperSha256));
+        return { outcome: "analysis", summary: "The changed reader was separately reviewed." };
+      } });
+      assert.equal(history().length, 3);
+      fixture.item.comments.unshift({ id: 1000, text: "Review the same incident evidence." });
+      await fixture.run({ plan: planFor(false), execute: noProduction });
+      assert.equal(history().length, 4);
+      fixture.item.id = 43;
+      fixture.item.comments = [{ id: 2000, text: "An unrelated incident." }];
+      await fixture.run({ plan: planFor(true), execute: noProduction });
+      assert.equal(history().length, 5);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("changing a reviewed production reader during execution retains findings and blocks feedback", async () => {
+  const fixture = ticketFixture();
+  try {
+    const source = productionEvidence(fixture);
+    fixture.profile.analysis = { productionReadOnlyEvidence: [source] };
+    writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+    const plan = ticketAutomationPlan(fixture.repository, fixture.profile, {
+      environment: "dev", allowProductionEvidence: true
+    });
+    await assert.rejects(fixture.run({ plan, execute: async () => {
+      writeFileSync(join(fixture.repository, source.helper), "export const changed = true;");
+      return { outcome: "analysis", summary: "Retain the completed findings for review." };
+    } }), /revision|hash|configuration/i);
+    assert.equal(fixture.posted.length, 0);
+    const state = JSON.parse(readFileSync(join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json")));
+    assert.equal(state.entries[0].result.summary, "Retain the completed findings for review.");
   } finally { fixture.cleanup(); }
 });
 

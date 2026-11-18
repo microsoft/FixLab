@@ -117,6 +117,12 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     assert.equal(resolutionPlan.status, 0, resolutionPlan.stderr);
     assert.match(resolutionPlan.stdout, /Resolved after a verified draft PR or a confirmed cause/);
     assert.match(resolutionPlan.stdout, /Plan only/);
+    const evidencePlan = run([...args, "--allow-production-evidence"], repository);
+    assert.equal(evidencePlan.status, 0, evidencePlan.stderr);
+    assert.match(evidencePlan.stdout, /"allowProductionEvidence": true/);
+    assert.match(evidencePlan.stdout, /"productionEvidence": \[\]/);
+    assert.match(evidencePlan.stdout, /ticket\/correlation-bound production diagnostic readers/);
+    assert.match(evidencePlan.stdout, /Plan only/);
     assert.equal(existsSync(join(repository, ".git", "fixlab", "ticket-automation")), false);
     const unapproved = run([...args, "--yes", "--once"], repository);
     assert.equal(unapproved.status, 1);

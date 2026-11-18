@@ -93,6 +93,17 @@ operations. Treat every runner as privileged engineering infrastructure.
   authentication and independently established read-only enforcement; privileged
   tool execution is not sandboxed. Production helpers, credential files and
   automatic host-session MCP inheritance are not supported by this configuration.
+- The separate watcher-only `analysis.productionReadOnlyEvidence` exception
+  requires `readOnly: true`, exact work-item/correlation bindings, contained
+  reviewed JavaScript readers and matching helper SHA256 hashes. The explicit
+  `--allow-production-evidence` session flag grants only those matching
+  diagnostic reads, not production application testing, business-data writes,
+  role changes or host-session MCP access. Review actual helper transport and
+  output sanitization; a metadata flag/hash does not prove a read-only identity.
+  Each reader must reject other IDs and arbitrary queries, bound responses and
+  timeouts, block redirects, and keep tokens/raw records out of retained output.
+  Profile/helper changes require a newly reviewed session. Revoked/historical
+  approval fingerprints retain deduplication provenance, never access authority.
 - Dashboard watcher monitoring is read-only and bound to the checkout's
   reviewed journal scope. It retains bounded sanitized structured progress,
   not raw output, credentials or browser state. Check messages remain

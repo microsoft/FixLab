@@ -102,7 +102,7 @@ Usage:
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
   fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>
   fixlab run [repository] [--runtime <agency|copilot>] [--model <model>] [--environment <name>] [--] [request...]
-  fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]
+  fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--allow-production-evidence] [--yes --allow-all-tools]
   fixlab watch-review [repository] --ticket <id>
   fixlab watch-recover [repository] --ticket <id> --decision <accept|retry|leave> --review-token <value> --yes
   fixlab validate [repository] --pr <number> [--runtime <agency|copilot>] [--model <model>]
@@ -1894,12 +1894,12 @@ async function main(args) {
           throw new Error("watch --resume-ticket requires one positive safe work-item ID.");
         }
         resumeWorkItemId = Number(id);
-      } else if (["--yes", "--once", "--allow-all-tools", "--resolve-on-completion"].includes(value)) {
+      } else if (["--yes", "--once", "--allow-all-tools", "--resolve-on-completion", "--allow-production-evidence"].includes(value)) {
         flags.add(value);
       } else if (!value.startsWith("-") && !repositoryArgument) {
         repositoryArgument = value;
       } else {
-        throw new Error("Usage: fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]");
+        throw new Error("Usage: fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--allow-production-evidence] [--yes --allow-all-tools]");
       }
     }
     const repository = resolveRepository(repositoryArgument);
@@ -1909,6 +1909,7 @@ async function main(args) {
     }
     const plan = ticketAutomationPlan(repository, profile, {
       environment, runtime: parsed.runtime,
+      allowProductionEvidence: flags.has("--allow-production-evidence"),
       resolveOnCompletion: flags.has("--resolve-on-completion") || profile.ticketAutomation?.resolveOnCompletion === true
     });
     console.log(JSON.stringify({
@@ -1916,12 +1917,14 @@ async function main(args) {
       tag: plan.tag, assignee: plan.assignee, areaPaths: plan.areaPaths, targetBranch: plan.targetBranch, environment: plan.environment,
       runtime: parsed.runtime, model: parsed.model || null,
       migrations: plan.migrations,
+      productionEvidence: plan.productionEvidence,
+      allowProductionEvidence: plan.allowProductionEvidence,
       pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,
       resolution: plan.resolveOnCompletion
         ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
         : "No work-item state changes.",
       requiresConfirmation: true,
-      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. No business-data writes, production, merges or deployments.`
+      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. ${plan.allowProductionEvidence ? "Only the displayed ticket/correlation-bound production diagnostic readers are approved; no production application testing, business-data writes, merges or deployments." : "No business-data writes, production, merges or deployments."}`
     }, null, 2));
     if (!flags.has("--yes")) {
       console.log("Plan only. Review this scope, then add --yes --allow-all-tools to start. Installing or onboarding alone never starts a watcher.");

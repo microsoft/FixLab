@@ -49,6 +49,16 @@ including continuations. The helper's reviewed authentication/read-only
 enforcement and normal runtime permissions remain necessary; no host MCP
 configuration or production access is inherited.
 
+The watcher-only `analysis.productionReadOnlyEvidence` exception binds reviewed
+readers to an exact work-item ID, correlation ID and helper SHA256. A separate
+`--allow-production-evidence` session opt-in discloses those scopes before launch;
+only the matching ticket receives them. It never changes the non-production
+application environment or ordinary CLI/dashboard grants. Reader or profile
+changes invalidate the session. A newly approved reader revision re-evaluates
+that ticket once without deleting history; historical approval hashes never
+authorize reads after revocation. Helpers must implement and prove bounded,
+read-only transport themselves; discovery is not a sandbox or database role.
+
 Interrupted-attempt review is shared by the dashboard and `watch-review` CLI.
 It reads the bound ticket, linked provider PRs, matching local branches and
 ownership reservations. Separately confirmed reconciliation acquires the watcher

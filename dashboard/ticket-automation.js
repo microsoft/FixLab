@@ -13,7 +13,7 @@ import { sanitizeCommandOutput } from "../bin/structured-command.js";
 import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-policy.js";
 import { apiSessionHelper } from "./api-authentication.js";
 import { setupPath } from "./repository-setup.js";
-import { analysisEvidenceContext, configuredAnalysisEvidence } from "./analysis-evidence.js";
+import { analysisEvidenceContext, configuredAnalysisEvidence, configuredProductionEvidence, productionEvidenceContext, productionEvidenceFor } from "./analysis-evidence.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
@@ -46,7 +46,8 @@ function migrationApprovals(repository, policy) {
 }
 
 export function ticketAutomationPlan(repository, profile, {
-  environment, runtime = "agency", resolveOnCompletion = profile.ticketAutomation?.resolveOnCompletion ?? false
+  environment, runtime = "agency", resolveOnCompletion = profile.ticketAutomation?.resolveOnCompletion ?? false,
+  allowProductionEvidence = false
 } = {}) {
   if (!["agency", "copilot"].includes(runtime)) {
     throw new Error("Unattended ticket automation requires --runtime agency or copilot.");
@@ -91,7 +92,7 @@ export function ticketAutomationPlan(repository, profile, {
   const tag = policy.tag ?? "FixLab";
   const areaPaths = policy.areaPaths;
   const pollSeconds = policy.pollSeconds ?? 300;
-  if (typeof resolveOnCompletion !== "boolean" ||
+  if (typeof allowProductionEvidence !== "boolean" || typeof resolveOnCompletion !== "boolean" ||
       (policy.resolveOnCompletion !== undefined && typeof policy.resolveOnCompletion !== "boolean") ||
       typeof tag !== "string" || !tag.trim() || tag.length > 100 || /[\r\n;]/u.test(tag) ||
       !Number.isInteger(pollSeconds) || pollSeconds < 60 || pollSeconds > 3600 ||
@@ -109,6 +110,8 @@ export function ticketAutomationPlan(repository, profile, {
     assignee: "@Me",
     migrations: migrationApprovals(repository, policy),
     analysisEvidence: configuredAnalysisEvidence(repository, profile, environment),
+    productionEvidence: configuredProductionEvidence(repository, profile),
+    allowProductionEvidence,
     outcome: "draft-pr-or-discussion",
     profile: { ...profile, azureDevOps: identity }
   };
@@ -186,11 +189,13 @@ export function ticketRevision(item, previous, fingerprints = []) {
     fingerprint: hash(JSON.stringify({
       title: item.title, description: item.description, reproduction: item.reproduction,
       acceptanceCriteria: item.acceptanceCriteria, state: item.state, type: item.workItemType, comment,
-      reopenedRevision: previous?.reopenedRevision, migrationApproval: previous?.migrationApproval
+      reopenedRevision: previous?.reopenedRevision, migrationApproval: previous?.migrationApproval,
+      productionEvidenceApproval: previous?.productionEvidenceApproval
     })),
     comment,
     ...(previous?.reopenedRevision ? { reopenedRevision: previous.reopenedRevision } : {}),
-    ...(previous?.migrationApproval ? { migrationApproval: previous.migrationApproval } : {})
+    ...(previous?.migrationApproval ? { migrationApproval: previous.migrationApproval } : {}),
+    ...(previous?.productionEvidenceApproval ? { productionEvidenceApproval: previous.productionEvidenceApproval } : {})
   };
 }
 
@@ -478,6 +483,7 @@ function ticketRequest(item, plan, fingerprints = []) {
     "When no PR is appropriate (already fixed, configuration/access issue, insufficient information, or analysis-only outcome), provide diagnosis, evidence, validation actually performed and concrete next steps. Never claim blocked or skipped checks passed.",
     "Keep all application business-data access read-only under the existing API guards. Do not edit profiles, guards, credentials or browser state. Never approve your own tools or folder permissions. Human SSO/MFA and organization policy remain authoritative.",
     analysisEvidenceContext(plan.analysisEvidence ?? []),
+    productionEvidenceContext(productionEvidenceFor(plan, item.id)),
     "Do not post ADO work-item Discussion comments yourself: the watcher writes feedback only to this bound ticket. Authorized PR review comments are separate. Do not start or control dashboard jobs. Retain normal runtime approval boundaries.",
     ...(reviewTeams.length ? [PR_TEAM_REVIEW_GUIDANCE,
       `Reviewed team identities: ${JSON.stringify(reviewTeams)}. Profile changes require a fresh review.`] : []),
@@ -506,6 +512,7 @@ function validateJournal(state, scope) {
   if (state.scope !== scope || !Array.isArray(state.entries) || state.entries.length > 1000 ||
       state.entries.some(entry => !Number.isSafeInteger(entry.id) || entry.id < 1 || !/^[a-f0-9]{64}$/u.test(entry.fingerprint) ||
         (entry.migrationApproval !== undefined && (typeof entry.migrationApproval !== "string" || !/^[a-f0-9]{64}$/u.test(entry.migrationApproval))) ||
+        (entry.productionEvidenceApproval !== undefined && (typeof entry.productionEvidenceApproval !== "string" || !/^[a-f0-9]{64}$/u.test(entry.productionEvidenceApproval))) ||
         (entry.reopenedRevision !== undefined && (!Number.isSafeInteger(entry.reopenedRevision) || entry.reopenedRevision < 1)) ||
         (entry.comment && (!Number.isSafeInteger(entry.comment.id) || entry.comment.id < 1 || !/^[a-f0-9]{64}$/u.test(entry.comment.hash))) ||
         (entry.sessionId !== undefined && (typeof entry.sessionId !== "string" ||
@@ -843,7 +850,7 @@ export async function watchTickets({
   execute, signal, onEvent = message => console.log(message)
 }) {
   if (!confirmed || !allowAllTools || typeof execute !== "function") {
-    throw new Error("Review the plan, then explicitly pass --yes --allow-all-tools for this watcher session. This permits its selected ticket jobs, not production, business-data writes, merges or deployments.");
+    throw new Error("Review the plan, then explicitly pass --yes --allow-all-tools for this watcher session. This permits its selected ticket jobs, not unconfigured production access, business-data writes, merges or deployments.");
   }
   if (resumeWorkItemId !== undefined && (!Number.isSafeInteger(resumeWorkItemId) || resumeWorkItemId < 1)) {
     throw new Error("Resume requires a positive work-item ID.");
@@ -1155,11 +1162,13 @@ export async function watchTickets({
             Number.isSafeInteger(item.revision) && Number.isSafeInteger(previous.resolution.revision) &&
             item.revision > previous.resolution.revision;
           const migration = plan.migrations.find(approval => approval.workItemId === id);
+          const productionEvidence = productionEvidenceFor(plan, id);
           // A revoked grant is historical fingerprint context, never current execution authority.
           const context = {
             ...previous,
             ...(reopened ? { reopenedRevision: item.revision } : {}),
-            ...(migration ? { migrationApproval: hash(JSON.stringify(migration)) } : {})
+            ...(migration ? { migrationApproval: hash(JSON.stringify(migration)) } : {}),
+            ...(productionEvidence.length ? { productionEvidenceApproval: hash(JSON.stringify(productionEvidence)) } : {})
           };
           const revision = revisionFor(item, context);
           if (state.entries.some(entry => entry.id === id && entry.fingerprint === revision.fingerprint &&

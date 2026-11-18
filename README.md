@@ -71,6 +71,9 @@ and a next action; expandable reports retain the technical detail.
 Optional [incident evidence helpers](docs/commands.md#incident-evidence-helpers)
 make approved, environment-bound Cosmos/trace tooling discoverable without
 automatically connecting, copying credentials or granting production access.
+Separately reviewed production incident readers require exact ticket/correlation
+bindings, approved helper hashes and `watch --allow-production-evidence`.
+They do not enable production application testing or business-data writes.
 
 ## Architecture and benefits
 
