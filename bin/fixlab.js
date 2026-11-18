@@ -53,7 +53,7 @@ import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
 import { ticketAutomationPlan, watchTickets, executeTicketAgent, reviewInterruptedTicket, reconcileInterruptedTicket } from "../dashboard/ticket-automation.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, PERSISTENT_DEV_API_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1094,7 +1094,8 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     ...(request ? [RUNTIME_RECOVERY_GUIDANCE] : []),
     // Interactive sessions use packaged guidance; request prompts go through stdin.
     ...(request && profile.validation?.liveTestsRequired !== false &&
-      profile.browserAutomation?.mode !== "api" ? [READ_ONLY_POST_GUIDANCE] : []),
+      profile.browserAutomation?.mode !== "api" && !testEvidence.persistentDevApi ? [READ_ONLY_POST_GUIDANCE] : []),
+    ...(request && testEvidence.persistentDevApi ? [PERSISTENT_DEV_API_GUIDANCE] : []),
     ...(request ? [componentRetrievalGuidance(profile, request)] : []),
     ...(profile.validation?.liveTestsRequired === false ? [UNIT_TEST_ONLY_GUIDANCE] : []),
     ...(readOnly ? [TRANSIENT_PLAYWRIGHT_GUIDANCE] : []),

@@ -4865,6 +4865,14 @@ test("job prompts omit irrelevant publication guidance and keep one output contr
       request: "Validate the reported behavior.", mode, targetEnvironment: "dev"
     });
     assert.ok(prompt.length < limit, `${mode}: ${prompt.length} must be below ${limit}`);
+    const persistent = buildJobPrompt({
+      request: "Validate the reported behavior.", mode, targetEnvironment: "dev",
+      testEvidence: { enabled: true, source: "non-production-approved", mutationMode: "approved-write",
+        requireScenarioEvidence: true, persistentDevApi: true }
+    });
+    assert.ok(persistent.length < limit, `${mode}: configured DEV must remain below ${limit}`);
+    assert.match(persistent, /without per-job permission prompts/u);
+    assert.doesNotMatch(persistent, /Verified read-only POST searches:|writes require separate native approval/u);
     for (const marker of [
       "FixLab output protocol", "FIXLAB_TEST|source|mutation-mode|scenario",
       "FIXLAB_BUG|id|outcome|owner|summary"

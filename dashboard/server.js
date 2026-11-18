@@ -42,7 +42,7 @@ import { assignedJobWorktree, needsJobWorktree, prepareJobWorktree, restoreJobWo
 import { spawnWindowsExecutor } from "./windows-executor.js";
 import { createRuntimeRequestBridge, MAX_RUNTIME_FRAME_BYTES, recordedSourceEditReview, safeRuntimeText, sourceEditAuthorization, validateRuntimeUsage, validateToolApprovalMode } from "./runtime-requests.js";
 import { validateJobFileAccess } from "./runtime-permission-policy.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, allowsUnverifiedDraft, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-policy.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, allowsUnverifiedDraft, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, PERSISTENT_DEV_API_GUIDANCE, READ_ONLY_POST_GUIDANCE, EXISTING_APPLICATION_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-policy.js";
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "./analysis-evidence.js";
@@ -496,6 +496,7 @@ export function configuredTestSynthesis(profile, selectedMutationMode = "", allo
   const configuredMutationMode = mutationModes.has(configuration?.mutationMode)
     ? configuration.mutationMode : "profile-defined";
   const result = {
+    ...(persistentDevWrites && !selectedMutationMode ? { persistentDevApi: true } : {}),
     ...(devReadOnly ? { devReadOnly: true } : {}),
     ...(ppeReadOnly ? { ppeReadOnly: true } : {}),
     ...(profile?.browserAutomation?.mode === "api" ? { apiOnly: true } : {}),
@@ -1170,6 +1171,11 @@ export function buildJobPrompt({
   const playwrightOnly = mode === "playwright-only";
   const readOnly = validateOnly || playwrightOnly;
   const apiOnly = testEvidence.apiOnly === true;
+  const persistentDevApi = testEvidence.persistentDevApi === true && testEvidence.mutationMode === "approved-write";
+  let browserDataGuidance = "";
+  if (!apiOnly && !testEvidence.unitTestsOnly) {
+    browserDataGuidance = persistentDevApi ? PERSISTENT_DEV_API_GUIDANCE : READ_ONLY_POST_GUIDANCE;
+  }
   const efficient = !readOnly && workflow?.mode === "efficient";
   const postPrLiveReview = allowsPostPrLiveReview({
     mode, workflow, manualLocalhostTest, runAllUiScenarios, testEvidence, skipLiveTests, deferValidation
@@ -1301,7 +1307,7 @@ Repository requirements:
 - Read .github/fixlab/repository-profile.json and all applicable repository instructions; preserve safety, authentication, environment and process ownership.
 ${COPILOT_EXECUTION_GUIDANCE}
 ${RUNTIME_RECOVERY_GUIDANCE}
-${!apiOnly && !testEvidence.unitTestsOnly ? READ_ONLY_POST_GUIDANCE : ""}
+${browserDataGuidance}
 ${apiOnly ? API_ONLY_PLAYWRIGHT_GUIDANCE : EXISTING_APPLICATION_GUIDANCE}
 ${apiOnly && useDeployedBackend ? "useDeployedBackend=true: use the configured deployed API; never start local .NET/Key Vault." : ""}
 - Skip source diagnosis, separate reproduction, implementation, diff review and unrelated non-browser gates. The diagnosis, reproduce, fix, review, and pr stages must be explicitly skipped unless their own required prerequisite fails.
@@ -1315,7 +1321,7 @@ ${apiOnly && useDeployedBackend ? "useDeployedBackend=true: use the configured d
 ${uiScenarioGuidance}
 ${environmentGuidance}
 ${testDataGuidance}
-- No Save, Submit, Approve, autosave or external write is authorized by this request or interception selector. Profile safety remains authoritative; writes require separate native approval.
+${persistentDevApi ? "- Repository-configured DEV access permits real Save, Submit and other writes through the guarded context, without authorizing product source edits." : "- No Save, Submit, Approve, autosave or external write is authorized by this request or interception selector. Profile safety remains authoritative; writes require separate native approval."}
 ${videoGuidance}
 ${manualLocalhostGuidance}
 - Browser journeys require a non-sensitive screenshot in repository-owned test-results; API-only runs retain sanitized assertions instead. Preserve exact assertions, counts, errors, traces and paths. Never fabricate results or claim intercepted payloads prove backend writes.
@@ -1359,7 +1365,7 @@ Repository requirements:
 - Read .github/fixlab/repository-profile.json and all repository-owned instructions before acting.
 ${COPILOT_EXECUTION_GUIDANCE}
 ${RUNTIME_RECOVERY_GUIDANCE}
-${!apiOnly && !testEvidence.unitTestsOnly ? READ_ONLY_POST_GUIDANCE : ""}
+${browserDataGuidance}
 ${apiOnly ? API_ONLY_PLAYWRIGHT_GUIDANCE : ""}
 ${!unverifiedDraft && allowsDraftIntegrationDeferral({ mode, workflow, manualLocalhostTest, runAllUiScenarios, testEvidence }) ? DRAFT_INTEGRATION_GUIDANCE : ""}
 ${skipLiveTests || useDeployedBackend ? `${OPTIONAL_INTEGRATION_GUIDANCE}\nSelected job choices: skipLiveTests=${skipLiveTests}; useDeployedBackend=${useDeployedBackend}; deferValidation=${deferValidation}.` : ""}
@@ -4228,7 +4234,7 @@ export function createDashboardServer({
     if (persistentDevApi) {
       job.postWriteApproval = createDevWriteApproval(resolvedRepository, "dev", job.id);
       job.testEvidence.allowPostRequests = true;
-      prompt += `\nRepository-configured DEV API access permits real GET/HEAD/OPTIONS/POST/PUT/PATCH/DELETE on dataSafety.devWrite.origins without job permission prompts. Do not select read-only/intercepted mode or mock DEV requests. Use createDevBrowserContext from "${join(packageRoot, "dashboard", "dev-browser.js")}" for real React UI flows, with existing normal authentication. FIXLAB_HELPER_ROOT, FIXLAB_REPOSITORY and FIXLAB_DEV_API_ENVIRONMENT are available to tests. The guard blocks service workers, other API origins, redirects and automatic transport retries. Assert actual UI state and real API results, then call assertHealthy and close the context. API success alone is not scenario success. Native fixlab_dev_write is also available for API assertions. Profile/helper changes require restarting validation, not another job permission prompt. Never bypass these guards or expose credentials.`;
+      prompt += "\nRepository-configured DEV access is active without job permission prompts. Follow createDevBrowserContext and native fixlab_dev_write guidance; normal application authentication and real scenario assertions remain required.";
     } else if (isOriginWriteApproval(job.postWriteApproval)) {
       configuredTestSynthesis(currentProfile, job.testEvidence.selectedMutationMode ?? "", true, job.targetEnvironment);
       const environment = job.postWriteApproval.environment;
