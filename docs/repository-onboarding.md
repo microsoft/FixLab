@@ -60,10 +60,52 @@ operation policy cannot be enabled here. An executor lease or active owned
 frontend/sign-in session prevents saving, without stopping those resources.
 Only the selected repository's ownership scopes are checked for setup writes
 and workspace opening. An unreachable or identity-mismatched registered owner
-in those scopes blocks the operation; it is not evidence that its resources
-stopped. Unrelated unavailable dashboard registrations do not block setup.
+in those scopes blocks the operation unless safe automatic registration recovery
+is possible. An unreachable port alone is not evidence that resources stopped.
+Unrelated unavailable dashboard registrations do not block setup.
 Plans expire after ten minutes and are invalidated by concurrent profile edits.
 Setup paths reject traversal and symbolic links.
+
+### Obsolete dashboard registrations
+
+New dashboards persist their process ID and a resource checkpoint before
+starting work. An idle checkpoint is written only when no owned job, frontend,
+sign-in helper, setup, pending operation or execution/testing reservation remains.
+Scoped owner discovery automatically archives a registration only when that
+checkpoint is quiescent, the recorded process definitively no longer exists, and
+the endpoint refuses connections or belongs to a different session. Process
+permission errors, timeouts, HTTP errors, active/unknown resources and legacy
+records do not qualify. A reused PID is treated conservatively as a live process.
+Global repository discovery does not recover other repositories' records.
+
+For old records or an interrupted busy dashboard, review:
+
+```powershell
+fixlab recover-sessions C:\source\application
+```
+
+The preview identifies live owners, obsolete candidates, ambiguous owners and
+remaining repository/worktree reservations, with a snapshot-bound review token.
+It does not archive files. Verify that every listed old dashboard and its child
+executors, tests, frontends and sign-in helpers has stopped. Then explicitly
+confirm that reviewed snapshot:
+
+```powershell
+fixlab recover-sessions C:\source\application --review-token <value> --confirm-quiescent --yes
+```
+
+Confirmation reinspects the owners and refuses changed snapshots, live or
+ambiguous owners, linked paths and remaining execution/testing reservations,
+including reservations in linked worktrees. It never uses age or a closed port
+as permission to stop a process or clear a reservation. Original registration
+bytes and a receipt are retained under a unique `.recovered-*` directory in the
+same private ownership scope. A partial filesystem failure reports how many
+registrations were archived; inspect again rather than replaying an old token.
+
+Recovery changes only obsolete registration files. Job history, configuration,
+authentication, runtime grants and actual stage/test outcomes stay unchanged.
+Retry or continue the stopped job separately through its normal controls.
+Missing stage markers or bug outcomes are not repaired by declaring success.
 
 ## Linked local applications in separate repositories
 

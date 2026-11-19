@@ -3674,6 +3674,7 @@ export function createDashboardServer({
   const testingShutdown = new AbortController();
   const setupShutdown = new AbortController();
   const pendingSetups = new Set();
+  let pendingSessionOperations = 0;
   let testingReservation = null;
   let testingWait = null;
   let dashboardUrl = "";
@@ -3682,6 +3683,19 @@ export function createDashboardServer({
   let watcherTitleLoad;
   const setupPlans = new Map();
   const isForwardedJob = job => Boolean(job?.workspace && job.workspace.url !== dashboardUrl);
+
+  function checkpointSessionResources() {
+    const reservationAbsent = path => {
+      try { lstatSync(path); return false; }
+      catch (error) { if (error.code === "ENOENT") { return true; } throw error; }
+    };
+    const quiescent = pendingSessionOperations === 0 && !closing &&
+      !activeHandle && !activeTermination && !frontendConnection.handle && !frontendConnection.starting &&
+      !playwrightConnection.handle && !testingReservation && !testingWait && pendingSetups.size === 0 &&
+      currentJob?.status !== "running" && !currentJob?.postValidation && !currentJob?.validationSession?.active &&
+      reservationAbsent(executorLease.scope.directory) && reservationAbsent(testingOwner.scope.directory);
+    sessions.checkpoint(quiescent);
+  }
 
   async function reserveLocalTesting(job = currentJob?.status === "running" ? currentJob : null, { signal } = {}) {
     if (job) { job.localTestingAbort ??= new AbortController(); }
@@ -3760,7 +3774,7 @@ export function createDashboardServer({
       createSessionRegistry(hash(common)).scopeId
     ] });
     if (catalog.unavailableCount) {
-      throw new Error("Cannot verify every registered owner of this repository. Reconnect to its owner and verify its resources are idle before changing settings or opening another workspace.");
+      throw new Error("Cannot verify every registered owner of this repository. Reconnect to its owner and verify its resources are idle before changing settings or opening another workspace. Run fixlab recover-sessions for this repository to review obsolete registrations; execution/testing reservations remain protected.");
     }
     return catalog.repositories.filter((entry) => sameExistingRepository(entry.repository, root));
   }
@@ -4104,6 +4118,7 @@ export function createDashboardServer({
   }
 
   async function startJob(job, prompt, resume = false) {
+    sessions.checkpoint(false);
     if (!assignedWorkspace) {
       assignedWorkspace = assignedJobWorktree({ repository: resolvedRepository, jobId: job.id,
         branchPrefix: job.branchNaming?.prefix ?? "fixlab" });
@@ -4894,6 +4909,15 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
       sendJson(response, 503, { error: "the dashboard is shutting down" });
       return;
     }
+    if (request.method === "POST") {
+      try { sessions.checkpoint(false); }
+      catch (error) {
+        sendJson(response, 409, { error: error.message });
+        return;
+      }
+      pendingSessionOperations += 1;
+      response.once("close", () => { pendingSessionOperations -= 1; });
+    }
     if (currentJob?.postValidation && request.method === "POST" &&
         !["/api/job/checks", "/api/jobs"].includes(requestUrl.pathname)) {
       sendJson(response, 409, { error: "This job owns optional validation. Complete/cancel those checks and wait for settlement before changing or resuming work." });
@@ -4910,6 +4934,11 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/api/session") {
+      try { checkpointSessionResources(); }
+      catch (error) {
+        sendJson(response, 409, { error: error.message });
+        return;
+      }
       sendJson(response, 200, {
         id: sessions.id,
         scopeId: sessions.scopeId,
@@ -5132,6 +5161,11 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
     }
 
     if (request.method === "GET" && requestUrl.pathname === "/api/status") {
+      try { checkpointSessionResources(); }
+      catch (error) {
+        sendJson(response, 409, { error: error.message });
+        return;
+      }
       persistDashboardState();
       sendJson(response, 200, {
         instanceId: sessions.id,
@@ -7805,6 +7839,7 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
   return {
     server,
     async adoptJob(job, prompt) {
+      sessions.checkpoint(false);
       if (!assignedWorkspace || assignedWorkspace.jobId !== job.id ||
           (currentJob && currentJob.id !== job.id) || activeHandle || closing) {
         throw new Error("The destination checkout is not idle and owned by this same job.");

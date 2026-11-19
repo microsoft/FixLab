@@ -56,6 +56,7 @@ import { ticketAutomationPlan, watchTickets, executeTicketAgent, reviewInterrupt
 import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, PERSISTENT_DEV_API_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
 import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand } from "../dashboard/issue-plans.js";
+import { runSessionRecoveryCommand } from "../dashboard/session-recovery.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -100,6 +101,7 @@ Usage:
   fixlab linked-api-proof [repository] [--authenticate|--proof] [--yes]
   fixlab portal-api-proof [repository] [--authenticate|--proof] --yes
   fixlab issue-plan [repository] --environment <name> [--plan <file|->] [--execute] [--allow-production-evidence] [--allow-dev-writes]
+  fixlab recover-sessions [repository] [--review-token <value> --confirm-quiescent --yes]
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
   fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>
@@ -133,6 +135,7 @@ Commands:
             Run the portal-owned in-memory APIRequestContext authentication helper.
   exec      Run a command with compact structured output and private evidence.
   issue-plan Describe, compile or explicitly execute bounded trace/browser issue plans.
+  recover-sessions Review obsolete dashboard registrations and confirm stopped-owner recovery.
   gate      Run a profile-defined validation gate owned by a dashboard job.
   run       Launch the FixLab agent for a request.
   validate  Launch validation-only mode for a pull request.
@@ -1813,6 +1816,9 @@ async function startDashboardForChat({
 }
 
 async function main(args) {
+  if (args[0] === "recover-sessions") {
+    return runSessionRecoveryCommand(args.slice(1));
+  }
   if (args[0] === "issue-plan") {
     return runIssuePlanCommand(args.slice(1));
   }

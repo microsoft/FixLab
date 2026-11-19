@@ -1,5 +1,18 @@
 # FixLab commands
 
+## Dashboard ownership recovery
+
+`fixlab recover-sessions [repository]` previews obsolete dashboard registrations.
+After verifying that the listed old dashboards and all their child resources
+stopped, use the returned `--review-token <value> --confirm-quiescent --yes` to
+archive that exact reviewed snapshot. Live/ambiguous owners and remaining
+execution/testing reservations block confirmation. Jobs and validation results
+are not changed or resumed. New provably quiescent, exited owners are recovered
+automatically during scoped discovery; legacy records require review.
+See [ownership recovery](repository-onboarding.md#obsolete-dashboard-registrations).
+
+## Delivery defaults
+
 New editing jobs use efficient delivery automatically: focused regression
 checks and reviewed diff, then an authorized draft PR. Broader local unit tests
 and optional builds are not automatically requested. Repository Settings saves
