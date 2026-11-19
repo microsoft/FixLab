@@ -276,7 +276,7 @@ test("persistent DEV setup hides job permissions and forwards authenticated real
   }
 });
 
-test("editing from an isolated checkout follows the same job into its automatically prepared workspace", async ({ page }) => {
+test("editing from an isolated checkout follows the same job and recovers watcher-only profile changes", async ({ page }) => {
   test.setTimeout(60000);
   const directory = mkdtempSync(join(tmpdir(), "fixlab-owned-workspace-ui-"));
   const profile = {
@@ -292,14 +292,21 @@ test("editing from an isolated checkout follows the same job into its automatica
     expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
   }
   const workspaces = new Map();
+  let launches = 0;
+  let failFirstRun;
   const instance = createDashboardServer({
     repository: directory, packageRoot, browserOpener() {}, workspaceServers: workspaces,
     workspaceSetup: async () => ({ ready: true, message: "Synthetic restore completed." }),
     executor() {
+      launches += 1;
       let finish;
       let stopped = false;
+      const completion = new Promise(resolve => { finish = resolve; });
+      if (launches === 1) {
+        failFirstRun = () => { stopped = true; finish({ code: 1 }); };
+      }
       return {
-        completion: new Promise(resolve => { finish = resolve; }),
+        completion,
         terminate() { stopped = true; finish({ code: null, signal: "SIGTERM" }); },
         hasStopped: () => stopped
       };
@@ -319,6 +326,21 @@ test("editing from an isolated checkout follows the same job into its automatica
     expect(assigned.job.id).toBe(source.job.id);
     expect(source.job.workspace.repository).not.toBe(directory);
     await expect(page.locator("#job-status")).toContainText("running");
+    writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      ...profile, analysis: { ...profile.analysis, productionReadOnlyEvidence: [] }
+    }));
+    failFirstRun();
+    await expect(page.locator("#job-status")).toContainText("failed");
+    await page.getByRole("button", { name: "Review and respond", exact: true }).click();
+    await page.getByLabel("Action", { exact: true }).selectOption("retry");
+    await page.getByLabel("Additional details or manual result").fill("Retry with this job's verified saved configuration; do not inherit watcher diagnostic access.");
+    await page.getByRole("button", { name: "Resume FixLab", exact: true }).click();
+    await expect.poll(() => launches).toBe(2);
+    await expect(page.locator("#job-status")).toContainText("running");
+    const recovered = await (await page.request.get(`${owned.url}/api/status`)).json();
+    expect(recovered.job.id).toBe(assigned.job.id);
+    expect(workspaces.size).toBe(1);
+    expect(JSON.parse(readFileSync(join(source.job.workspace.repository, ".github", "fixlab", "repository-profile.json"), "utf8"))).toEqual(profile);
   } finally {
     await instance.close();
     rmSync(`${directory}.fixlab-worktrees`, { recursive: true, force: true });

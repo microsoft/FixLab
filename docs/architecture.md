@@ -526,6 +526,13 @@ client can explicitly set job `permissionPreflight` to pause before executor
 admission and use the existing exact-folder review/approval flow. It grants nothing by
 itself, and the first approved invocation starts a new runtime session rather
 than resuming one that never ran. No grants persist across dashboard restart.
+An existing job can retain its receipt-verified checkout profile when the source
+profile changes only formatting or watcher-only production diagnostic metadata.
+Recovery verifies the same worktree, branch, base commit and exact saved profile
+hash, and still checks every declared setup file. It neither rewrites the ownership
+receipt nor inherits the new diagnostic configuration. Onboarding uses the saved
+profile instead of recopying the source. Changes to execution settings or edits to
+the saved configuration remain blocking; this does not waive owner verification.
 Completed preflight lifecycle state does persist so a recovered session is not
 misclassified as an unstarted one; restarting as a new job resets that state.
 A pre-executor workspace blocker retains the approved job-local folder grant
