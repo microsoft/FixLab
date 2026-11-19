@@ -45,6 +45,10 @@ Local-fix and PR claims still require the matching checkout and application.
 
 ## Interactive repository shell
 
+Issue-specific trace lookups and transient browser reproductions use
+[`fixlab issue-plan`](issue-plans.md). Plans are compiled for preview by default;
+live execution and approved DEV writes require explicit flags.
+
 ```text
 fixlab <repository> [--runtime <agency|copilot>]
 ```

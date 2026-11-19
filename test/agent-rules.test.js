@@ -237,6 +237,22 @@ test("cross-runtime validation guidance stays aligned", () => {
   assert.match(browserRule, /event registration/);
 });
 
+test("issue-driven execution keeps runtime and packaged-agent contracts aligned", () => {
+  const root = join(testDirectory, "..");
+  for (const entry of ["dashboard/server.js", "bin/fixlab.js", "dashboard/ticket-automation.js"]) {
+    assert.match(readFileSync(join(root, entry), "utf8"), /issuePlanContext/u, entry);
+  }
+  for (const entry of ["agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"]) {
+    const text = readFileSync(join(root, entry), "utf8").replace(/\s+/gu, " ");
+    for (const contract of [/fixlab issue-plan/u, /No arbitrary KQL\/JavaScript/u,
+      /--allow-production-evidence/u, /DEV writes require explicit job approval/u,
+      /--allow-dev-writes/u, /Generated journeys stay transient/u, /actual executed assertions/u]) {
+      assert.match(text, contract, entry);
+    }
+  }
+});
+
 test("transient journey exceptions stay bounded across all execution surfaces", () => {
   const root = join(testDirectory, "..");
   for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {

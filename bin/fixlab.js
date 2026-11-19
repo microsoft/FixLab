@@ -55,6 +55,7 @@ import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
 import { ticketAutomationPlan, watchTickets, executeTicketAgent, reviewInterruptedTicket, reconcileInterruptedTicket } from "../dashboard/ticket-automation.js";
 import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, PERSISTENT_DEV_API_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
+import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand } from "../dashboard/issue-plans.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -98,6 +99,7 @@ Usage:
   fixlab authenticate [repository] [--yes]
   fixlab linked-api-proof [repository] [--authenticate|--proof] [--yes]
   fixlab portal-api-proof [repository] [--authenticate|--proof] --yes
+  fixlab issue-plan [repository] --environment <name> [--plan <file|->] [--execute] [--allow-production-evidence] [--allow-dev-writes]
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
   fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>
@@ -130,6 +132,7 @@ Commands:
   portal-api-proof
             Run the portal-owned in-memory APIRequestContext authentication helper.
   exec      Run a command with compact structured output and private evidence.
+  issue-plan Describe, compile or explicitly execute bounded trace/browser issue plans.
   gate      Run a profile-defined validation gate owned by a dashboard job.
   run       Launch the FixLab agent for a request.
   validate  Launch validation-only mode for a pull request.
@@ -1061,6 +1064,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   let workflow;
   let testEvidence;
   let analysisEvidence;
+  let issuePlans;
   try {
     workflow = configuredWorkflow(profile);
     selectedEnvironment = validateTargetEnvironment(
@@ -1069,6 +1073,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     );
     testEvidence = configuredTestSynthesis(profile, "", undefined, selectedEnvironment);
     analysisEvidence = configuredAnalysisEvidence(repository, profile, selectedEnvironment);
+    issuePlans = issuePlanConfiguration(repository, profile, selectedEnvironment);
     if (choices.useDeployedBackend && (!/^(dev|development|ppe|sit|uat)$/iu.test(selectedEnvironment) ||
         testEvidence.unitTestsOnly)) {
       throw new Error("--deployed-backend requires an explicitly selected, profile-approved DEV/SIT/UAT/PPE environment permitting live access.");
@@ -1090,6 +1095,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
 
   const guidance = [
     ...(analysisEvidence.length ? [analysisEvidenceContext(analysisEvidence)] : []),
+    issuePlanContext(issuePlans),
     COPILOT_EXECUTION_GUIDANCE,
     ...(request ? [RUNTIME_RECOVERY_GUIDANCE] : []),
     // Interactive sessions use packaged guidance; request prompts go through stdin.
@@ -1807,6 +1813,9 @@ async function startDashboardForChat({
 }
 
 async function main(args) {
+  if (args[0] === "issue-plan") {
+    return runIssuePlanCommand(args.slice(1));
+  }
   const [command, ...rest] = args;
   if (!command || command === "--help" || command === "-h") {
     printUsage();

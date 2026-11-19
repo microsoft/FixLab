@@ -46,6 +46,7 @@ import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDe
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "./analysis-evidence.js";
+import { issuePlanConfiguration, issuePlanContext } from "./issue-plans.js";
 import { createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval, inspectDevApiConfiguration, inspectPpeWriteConfiguration, isOriginWriteApproval, persistentDevApiConfiguration } from "./dev-post.js";
 import { browserConfigurationErrors } from "./repository-setup.js";
 import { applyRepositorySettings, inspectRepositorySettings, localRepository, planRepositorySettings } from "./repository-settings.js";
@@ -4158,6 +4159,8 @@ export function createDashboardServer({
       configuredAnalysisEvidence(resolvedRepository, currentProfile, job.targetEnvironment)
     );
     if (evidenceContext) { prompt += `\n\n${evidenceContext}`; }
+    const issuePlans = issuePlanContext(issuePlanConfiguration(resolvedRepository, currentProfile, job.targetEnvironment));
+    if (issuePlans) { prompt += `\n\n${issuePlans}`; }
     if ((job.testEvidence.unitTestsOnly === true) !==
         (currentProfile.validation?.liveTestsRequired === false)) {
       throw new Error("The repository live-test policy changed; start a newly reviewed job.");

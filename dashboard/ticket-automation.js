@@ -14,6 +14,7 @@ import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-polic
 import { apiSessionHelper } from "./api-authentication.js";
 import { setupPath } from "./repository-setup.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence, configuredProductionEvidence, productionEvidenceContext, productionEvidenceFor } from "./analysis-evidence.js";
+import { issuePlanConfiguration, issuePlanContext } from "./issue-plans.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
@@ -111,6 +112,7 @@ export function ticketAutomationPlan(repository, profile, {
     migrations: migrationApprovals(repository, policy),
     analysisEvidence: configuredAnalysisEvidence(repository, profile, environment),
     productionEvidence: configuredProductionEvidence(repository, profile),
+    issuePlans: issuePlanConfiguration(repository, profile, environment, allowProductionEvidence),
     allowProductionEvidence,
     outcome: "draft-pr-or-discussion",
     profile: { ...profile, azureDevOps: identity }
@@ -484,6 +486,7 @@ function ticketRequest(item, plan, fingerprints = []) {
     "Keep all application business-data access read-only under the existing API guards. Do not edit profiles, guards, credentials or browser state. Never approve your own tools or folder permissions. Human SSO/MFA and organization policy remain authoritative.",
     analysisEvidenceContext(plan.analysisEvidence ?? []),
     productionEvidenceContext(productionEvidenceFor(plan, item.id)),
+    ...(plan.issuePlans ? [issuePlanContext(plan.issuePlans)] : []),
     "Do not post ADO work-item Discussion comments yourself: the watcher writes feedback only to this bound ticket. Authorized PR review comments are separate. Do not start or control dashboard jobs. Retain normal runtime approval boundaries.",
     ...(reviewTeams.length ? [PR_TEAM_REVIEW_GUIDANCE,
       `Reviewed team identities: ${JSON.stringify(reviewTeams)}. Profile changes require a fresh review.`] : []),
@@ -669,6 +672,7 @@ export async function reviewTicketHandoff(repository, { attemptId, client } = {}
   const currentAttempt = readTicketAutomationHistory(repository).attempts.find(value => value.id === attemptId);
   if (fresh.profileRevision !== profileRevision ||
       JSON.stringify(fresh.plan.analysisEvidence) !== JSON.stringify(plan.analysisEvidence) ||
+      JSON.stringify(fresh.plan.issuePlans) !== JSON.stringify(plan.issuePlans) ||
       JSON.stringify(currentAttempt) !== JSON.stringify(attempt)) {
     throw new Error("The watcher findings or profile changed during review. Review the attempt again.");
   }
@@ -700,7 +704,7 @@ export async function reviewTicketHandoff(repository, { attemptId, client } = {}
   }
   const reviewToken = hash(JSON.stringify({
     attempt, revision: item.revision, current: ticketRevision(item), profileRevision,
-    analysisEvidence: plan.analysisEvidence, pullRequests
+    analysisEvidence: plan.analysisEvidence, issuePlans: plan.issuePlans, pullRequests
   }));
   return {
     attemptId, workItemId: item.id, title: recordedText(item.title, 200),
