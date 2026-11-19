@@ -10,15 +10,6 @@ export function localRepository(value) {
   if (typeof value !== "string" || value.length > 2048 || !isAbsolute(value)) {
     throw new Error("Choose an existing local Git repository using its absolute folder path.");
   }
-  if (preserveProfileRevision !== undefined) {
-    const savedProfile = existingFile(setupPath(targetRoot, SETUP_PROFILE_PATH));
-    if (typeof preserveProfileRevision !== "string" ||
-        !/^[a-f0-9]{64}$/u.test(preserveProfileRevision) || !savedProfile ||
-        createHash("sha256").update(savedProfile).digest("hex") !== preserveProfileRevision) {
-      throw new Error("The saved worktree profile changed; review its configuration before setup.");
-    }
-    rawProfile = savedProfile;
-  }
   const root = realpathSync.native(value);
   if (!lstatSync(root).isDirectory() || root === parse(root).root) {
     throw new Error("A filesystem root is not a repository workspace.");
@@ -83,6 +74,15 @@ export function planWorktreeSetup({ source, repository, templatePath, preservePr
   const sourceProfile = rawProfile;
   if (!rawProfile) {
     throw new Error("The --from checkout has no repository profile; configure it before worktree onboarding");
+  }
+  if (preserveProfileRevision !== undefined) {
+    const savedProfile = existingFile(setupPath(targetRoot, SETUP_PROFILE_PATH));
+    if (typeof preserveProfileRevision !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(preserveProfileRevision) || !savedProfile ||
+        createHash("sha256").update(savedProfile).digest("hex") !== preserveProfileRevision) {
+      throw new Error("The saved worktree profile changed; review its configuration before setup.");
+    }
+    rawProfile = savedProfile;
   }
   let profile;
   try {

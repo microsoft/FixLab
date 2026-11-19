@@ -80,8 +80,11 @@ test("owned checkout recovery retains verified configuration when only watcher d
     assert.deepEqual(JSON.parse(readFileSync(join(workspace.repository, SETUP_PROFILE_PATH))), f.profile);
     assert.equal(readFileSync(join(workspace.repository, "tracked.txt"), "utf8"), "preserve this job's changes");
     assert.deepEqual(assignedJobWorktree({ repository: workspace.repository, jobId }), recovered);
+    assert.throws(() => planWorktreeSetup({ source: f.source, repository: workspace.repository,
+      preserveProfileRevision: "0".repeat(64) }), /saved worktree profile changed/);
     const setup = planWorktreeSetup({ source: f.source, repository: workspace.repository,
       preserveProfileRevision: workspace.profileRevision });
+    assert.deepEqual(setup.profile, f.profile);
     writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify({ ...changed, changed: true }));
     assert.throws(() => applyWorktreeSetup(setup), /changed after planning/);
     writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(changed));
