@@ -530,6 +530,44 @@ a fresh reviewed decision with `fixlab watch-recover`. Never edit private JSON
 or delete a retained lock/lease. See [watcher commands and recovery](commands.md#tagged-ticket-watcher)
 for the exact controls and limits.
 
+## Optional Cosmos and trace evidence (separate approval)
+
+Installing FixLab adds evidence-helper support, not another developer's local
+configuration, helper scripts, credentials, or Azure data-access permissions.
+Only configure this optional integration when requested. After installation,
+the user can paste:
+
+```text
+Configure Cosmos DB and trace evidence for FixLab in this repository.
+
+Ask me for the approved environment, Cosmos account/database/container,
+trace workspace, work-item ID, correlation ID and query time window.
+
+Reuse team-approved repository-owned helper scripts. If missing, ask
+for them; do not invent endpoints or copy another user's credentials.
+Authenticate using my own authorized Azure identity and existing permissions;
+do not change roles or copy tokens, connection strings or browser state.
+
+Configure .github\fixlab\repository-profile.json:
+- analysis.evidenceSources for non-production.
+- analysis.productionReadOnlyEvidence for explicitly approved production
+  readers, bound to the exact ticket, correlation and helperSha256.
+
+Review the helper, bounded query/field scope, read-only enforcement and
+configuration with me before applying changes or performing reads.
+Verify only approved bounded reads. Report actual results and access blockers
+without exposing raw records or credentials; do not infer a cause from no data.
+For production, review the watcher plan with --allow-production-evidence.
+Ask separately before starting the watcher; do not start a job or publish.
+```
+
+The user must already have the approved data-plane permissions. Azure login,
+MCP registration and browser SSO alone do not prove Cosmos or trace access.
+Production readers also require a reviewed helper whose SHA256 matches the
+profile; they are watcher-only and do not enable production application tests.
+See [incident evidence helper requirements](commands.md#incident-evidence-helpers)
+for the configuration schema and helper contract.
+
 ## Troubleshooting summary
 
 | Symptom | Focused recovery |

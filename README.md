@@ -207,6 +207,9 @@ Previously reviewed production Cosmos/trace readers additionally require
 `--allow-production-evidence` on the watcher command. Ordinary DEV watching
 does not require that flag. See the [watcher command reference](docs/commands.md#tagged-ticket-watcher)
 and [production reader requirements](docs/commands.md#incident-evidence-helpers).
+For another developer's setup, use the
+[optional Cosmos and trace setup instructions](docs/FIXLAB-SETUP.md#optional-cosmos-and-trace-evidence-separate-approval);
+installation does not copy local helpers, configuration, credentials or access.
 
 ## Documentation
 
