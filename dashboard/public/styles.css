@@ -1222,6 +1222,10 @@ pre {
   background: rgba(255, 255, 255, .72);
 }
 
+#watcher-group[open] {
+  grid-column: 1 / -1;
+}
+
 .inspector-group > summary,
 .run-options > summary {
   padding: 1rem;

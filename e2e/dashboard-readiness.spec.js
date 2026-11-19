@@ -327,6 +327,7 @@ test("editing from an isolated checkout follows the same job into its automatica
 });
 
 test("watcher grid shows work-item titles and text statuses while preserving reviewed handoffs", async ({ page }) => {
+  await page.setViewportSize({ width: 1470, height: 900 });
   const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-ui-"));
   const profile = {
     ...JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8")),
@@ -387,6 +388,10 @@ test("watcher grid shows work-item titles and text statuses while preserving rev
     await expect(page.locator("#watcher-status")).toContainText("investigating");
     const grid = page.getByRole("table", { name: "Watcher jobs" });
     await expect(grid.getByRole("columnheader")).toHaveText(["Work item", "Title", "Status"]);
+    const workspaceWidth = await page.locator("#workspace-tools").evaluate(element => element.getBoundingClientRect().width);
+    const watcherWidth = await page.locator("#watcher-group").evaluate(element => element.getBoundingClientRect().width);
+    expect(watcherWidth).toBeCloseTo(workspaceWidth, 0);
+    expect(await page.locator("#watcher-grid").evaluate(element => element.scrollWidth - element.clientWidth)).toBe(0);
     const row = grid.locator("tbody > tr").first();
     await expect(row.getByRole("cell").nth(0).getByRole("link", { name: "42", exact: true })).toHaveAttribute(
       "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
