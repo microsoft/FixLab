@@ -176,6 +176,38 @@ Closing a browser tab or exiting Copilot does not stop a detached dashboard.
 No reinstall or file deletion is needed. Restarting preserves saved jobs;
 submit a new request for a fresh job.
 
+## Run the watcher worker
+
+Use an onboarded clone with reviewed Azure DevOps area paths and target branch.
+Preview the scope first; this command prints a plan without starting work:
+
+```powershell
+fixlab watch "C:\source\application-watcher" --runtime copilot --environment dev
+```
+
+After reviewing the plan, explicitly start the worker:
+
+```powershell
+fixlab watch "C:\source\application-watcher" --runtime copilot --environment dev --yes --allow-all-tools
+```
+
+Keep the terminal open. Press **Ctrl+C in that terminal** to stop the worker.
+Run only one watcher for the same ticket scope, including across separate clones.
+Before moving to another clone, stop the old watcher and verify its history
+migration; a fresh clone has a separate journal and can reprocess old tickets.
+
+To monitor a dedicated watcher clone, open another terminal and start a dashboard
+against that same clone on a free port:
+
+```powershell
+fixlab dashboard "C:\source\application-watcher" --runtime copilot --port 4318
+```
+
+Previously reviewed production Cosmos/trace readers additionally require
+`--allow-production-evidence` on the watcher command. Ordinary DEV watching
+does not require that flag. See the [watcher command reference](docs/commands.md#tagged-ticket-watcher)
+and [production reader requirements](docs/commands.md#incident-evidence-helpers).
+
 ## Documentation
 
 | Start here | Read next |
