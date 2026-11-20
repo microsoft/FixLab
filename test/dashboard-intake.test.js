@@ -159,6 +159,66 @@ function productionEvidence(fixture) {
   };
 }
 
+test("repository-scoped Cosmos evidence follows the current ticket only after explicit production approval", async () => {
+  const fixture = ticketFixture();
+  try {
+    const fixed = productionEvidence(fixture);
+    const policy = "cosmos-policy.json";
+    const bytes = JSON.stringify({ version: 1, sources: [{ id: "reviewed-requests" }] });
+    writeFileSync(join(fixture.repository, policy), bytes);
+    const source = {
+      id: fixed.id, kind: "cosmos", environment: "production", readOnly: true,
+      scope: "repository", helper: fixed.helper, helperSha256: fixed.helperSha256,
+      policy, policySha256: createHash("sha256").update(bytes).digest("hex")
+    };
+    fixture.profile.analysis = { productionReadOnlyEvidence: [source] };
+    const saveProfile = () => writeFileSync(join(fixture.repository, ".github", "fixlab",
+      "repository-profile.json"), JSON.stringify(fixture.profile));
+    const planFor = approved => ticketAutomationPlan(fixture.repository, fixture.profile, {
+      environment: "dev", allowProductionEvidence: approved
+    });
+    saveProfile();
+    await fixture.run({ plan: planFor(false), execute: async ({ request }) => {
+      assert.doesNotMatch(request, /cosmos-policy.json/);
+      return { outcome: "analysis", summary: "Production evidence was not approved." };
+    } });
+    for (const id of [42, 43]) {
+      fixture.item.id = id;
+      await fixture.run({ plan: planFor(true), execute: async ({ request }) => {
+        assert.match(request, /cosmos-policy.json/);
+        assert.match(request, new RegExp(`"workItemId":${id}`));
+        assert.match(request, /--policy <policy> --plan <plan>/);
+        assert.doesNotMatch(request, /CR-123/);
+        return { outcome: "analysis", summary: "Only reviewed read-only policy sources were exposed." };
+      } });
+    }
+    await fixture.run({ plan: planFor(true), execute() {
+      assert.fail("Unchanged approved incidents must not be replayed.");
+    } });
+    for (const invalid of [
+      { ...source, scope: "all" }, { ...source, workItemId: 42 },
+      { ...source, correlationId: "CR-123" }, { ...source, kind: "traces" },
+      { ...source, policy: "..\\outside.json" }, { ...source, policy: ".auth\\state.json" },
+      { ...source, policySha256: "0".repeat(64) }
+    ]) {
+      assert.throws(() => ticketAutomationPlan(fixture.repository, {
+        ...fixture.profile, analysis: { productionReadOnlyEvidence: [invalid] }
+      }, { environment: "dev", allowProductionEvidence: true }));
+    }
+    writeFileSync(join(fixture.repository, policy), '{"version":2}');
+    assert.throws(() => planFor(true), /policy.*changed/i);
+    source.policySha256 = createHash("sha256").update('{"version":2}').digest("hex");
+    saveProfile();
+    await fixture.run({ plan: planFor(true), execute: async ({ request }) => {
+      assert.ok(request.includes(source.policySha256));
+      return { outcome: "analysis", summary: "The updated policy was reviewed explicitly." };
+    } });
+    writeFileSync(join(fixture.repository, policy), "{invalid}");
+    source.policySha256 = createHash("sha256").update("{invalid}").digest("hex");
+    assert.throws(() => planFor(true), /not valid JSON/);
+  } finally { fixture.cleanup(); }
+});
+
 test("production watcher evidence requires reviewed source hashes and bounded explicit scope", () => {
   const fixture = ticketFixture();
   try {

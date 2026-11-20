@@ -56,7 +56,16 @@ enforcement and normal runtime permissions remain necessary; no host MCP
 configuration or production access is inherited.
 
 The watcher-only `analysis.productionReadOnlyEvidence` exception binds reviewed
-readers to an exact work-item ID, correlation ID and helper SHA256. A separate
+readers to an exact work-item ID, correlation ID and helper SHA256. A Cosmos
+reader may instead use `scope: "repository"` with a contained JSON `policy`,
+`policySha256`, and `helperSha256`, omitting fixed incident identifiers. The
+watcher supplies the current work-item ID; the reviewed helper must enforce
+policy resources, scalar projections, filters, bounded read-only execution and
+its own production opt-in. Discovery uses `--policy`; issue-specific plans are
+previewed before `--execute --allow-production-evidence`. Policy changes require
+fresh review and invalidate the running session, just like helper changes.
+This source registration never executes a helper or proves data-plane access.
+A separate
 `--allow-production-evidence` session opt-in discloses those scopes before launch;
 only the matching ticket receives them. It never changes the non-production
 application environment or ordinary CLI/dashboard grants. Reader or profile
