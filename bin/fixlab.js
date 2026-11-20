@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   statSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { componentRetrievalGuidance } from "../dashboard/affected-surface.js";
 import { createInterface } from "node:readline/promises";
@@ -102,7 +105,7 @@ Usage:
   fixlab run [repository] [--runtime <agency|copilot>] [--model <model>] [--environment <name>] [--] [request...]
   fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]
   fixlab validate [repository] --pr <number> [--runtime <agency|copilot>] [--model <model>]
-  fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--runtime <agency|copilot>] [--model <model>]
+  fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--stop] [--runtime <agency|copilot>] [--model <model>]
   fixlab chat [repository] [--port <number>] [--runtime <agency|copilot>] [--model <model>]
   fixlab keep-awake --minutes <minutes>
   fixlab --help
@@ -129,7 +132,7 @@ Commands:
   gate      Run a profile-defined validation gate owned by a dashboard job.
   run       Launch the FixLab agent for a request.
   validate  Launch validation-only mode for a pull request.
-  dashboard Start the local FixLab dashboard (127.0.0.1:${DEFAULT_DASHBOARD_PORT}).
+  dashboard Start or stop the local FixLab dashboard (127.0.0.1:${DEFAULT_DASHBOARD_PORT}).
   chat      Chat with the active dashboard job, starting it when necessary.
   keep-awake
             Temporarily prevent system sleep for a bounded number of minutes.
@@ -1251,8 +1254,13 @@ function parseDashboardArguments(args) {
   let port = DEFAULT_DASHBOARD_PORT;
   let open = false;
   let keepAwakeMinutes = 0;
+  let stop = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
+    if (argument === "--stop") {
+      stop = true;
+      continue;
+    }
     if (argument === "--open") {
       open = true;
       continue;
@@ -1302,7 +1310,8 @@ function parseDashboardArguments(args) {
     repository: resolveRepository(repositoryArgument),
     port,
     open,
-    keepAwakeMinutes
+    keepAwakeMinutes,
+    stop
   };
 }
 
@@ -1332,6 +1341,160 @@ function parseChatArguments(args) {
     repositoryArgument = argument;
   }
   return { port, repositoryArgument };
+}
+
+function dashboardControlPath(repository) {
+  const identity = createHash("sha256")
+    .update(resolve(repository))
+    .digest("hex")
+    .slice(0, 20);
+  return join(
+    tmpdir(),
+    "fixlab-dashboard-control",
+    identity,
+    "dashboard.json"
+  );
+}
+
+function dashboardControlDirectory(repository, create) {
+  const controlPath = dashboardControlPath(repository);
+  const root = dirname(dirname(controlPath));
+  const directory = dirname(controlPath);
+  for (const candidate of [root, directory]) {
+    if (!existsSync(candidate)) {
+      if (!create) {
+        return { controlPath, directoryExists: false };
+      }
+      try {
+        mkdirSync(candidate, { mode: 0o700 });
+      } catch (error) {
+        if (error.code !== "EEXIST") {
+          throw error;
+        }
+      }
+    }
+    const status = lstatSync(candidate);
+    if (status.isSymbolicLink() || !status.isDirectory()) {
+      throw new Error(
+        `dashboard control directory is not a trusted local directory: ${candidate}`
+      );
+    }
+  }
+  return { controlPath, directoryExists: true };
+}
+
+function assertDashboardControlFile(controlPath) {
+  const status = lstatSync(controlPath);
+  if (status.isSymbolicLink() || !status.isFile()) {
+    throw new Error(
+      `dashboard control record is not a trusted local file: ${controlPath}`
+    );
+  }
+}
+
+function writeDashboardControl(repository, port, token) {
+  const { controlPath } = dashboardControlDirectory(repository, true);
+  writeFileSync(
+    controlPath,
+    JSON.stringify({
+      version: 1,
+      repository: resolve(repository),
+      host: "127.0.0.1",
+      port,
+      pid: process.pid,
+      token
+    }),
+    { flag: "wx", mode: 0o600 }
+  );
+  assertDashboardControlFile(controlPath);
+  return controlPath;
+}
+
+function removeDashboardControl(controlPath, token) {
+  try {
+    assertDashboardControlFile(controlPath);
+    const record = JSON.parse(readFileSync(controlPath, "utf8"));
+    if (record.token === token) {
+      unlinkSync(controlPath);
+      return true;
+    }
+  } catch {
+    // A missing or replaced record does not belong to this dashboard instance.
+  }
+  return false;
+}
+
+async function stopDashboard(repository) {
+  let controlPath;
+  let directoryExists;
+  try {
+    ({ controlPath, directoryExists } = dashboardControlDirectory(
+      repository,
+      false
+    ));
+  } catch (error) {
+    console.error(`Cannot use FixLab dashboard stop control: ${error.message}`);
+    return 1;
+  }
+  if (!directoryExists || !existsSync(controlPath)) {
+    console.log(`No running FixLab dashboard is registered for ${repository}.`);
+    return 0;
+  }
+
+  let record;
+  try {
+    assertDashboardControlFile(controlPath);
+    record = JSON.parse(readFileSync(controlPath, "utf8"));
+  } catch (error) {
+    console.error(
+      `FixLab dashboard control record is invalid: ${controlPath} (${error.message})`
+    );
+    return 1;
+  }
+  if (
+    record.version !== 1 ||
+    record.repository !== resolve(repository) ||
+    record.host !== "127.0.0.1" ||
+    !Number.isSafeInteger(record.port) ||
+    record.port < 1 ||
+    record.port > 65535 ||
+    typeof record.token !== "string" ||
+    !/^[0-9a-f-]{36}$/iu.test(record.token)
+  ) {
+    console.error(`FixLab dashboard control record is invalid: ${controlPath}`);
+    return 1;
+  }
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${record.port}/api/control/stop`,
+      {
+        method: "POST",
+        headers: { "X-FixLab-Shutdown-Token": record.token },
+        signal: AbortSignal.timeout(5000)
+      }
+    );
+    if (response.status !== 202) {
+      console.error(
+        `FixLab dashboard refused the stop request (HTTP ${response.status}).`
+      );
+      return 1;
+    }
+  } catch {
+    if (removeDashboardControl(controlPath, record.token)) {
+      console.log(
+        `No running FixLab dashboard was found; removed stale control record for ${repository}.`
+      );
+      return 0;
+    }
+    console.error(
+      `No running FixLab dashboard was found, but its control record could not be removed: ${controlPath}`
+    );
+    return 1;
+  }
+
+  console.log(`Stopping FixLab dashboard for ${repository}.`);
+  return 0;
 }
 
 function parseOnboardArguments(args) {
@@ -1564,12 +1727,16 @@ async function dashboard(
     console.error(`Cannot start FixLab dashboard: ${readiness.error}`);
     return 1;
   }
+  const shutdownToken = randomUUID();
+  let close;
   const dashboardServer = createDashboardServer({
     repository,
     packageRoot,
     runtime,
     model,
-    preflight: runJobPreflight
+    preflight: runJobPreflight,
+    shutdownToken,
+    onShutdown: () => close?.()
   });
   let address;
   try {
@@ -1603,22 +1770,39 @@ async function dashboard(
       return 1;
     }
   }
-  console.log("Press Ctrl+C to stop the local dashboard.");
+  console.log(
+    'Press Ctrl+C or run "fixlab dashboard --stop" from the repository directory to stop the local dashboard.'
+  );
+  let controlPath;
+  try {
+    controlPath = writeDashboardControl(repository, address.port, shutdownToken);
+  } catch (error) {
+    stopKeepAwake(keepAwakeHandle);
+    await dashboardServer.close();
+    console.error(
+      `Cannot register FixLab dashboard stop control: ${error.message}`
+    );
+    return 1;
+  }
   if (shouldOpen) {
     openBrowser(address.url);
   }
 
   let closing = false;
-  const close = async () => {
+  close = async () => {
     if (closing) {
       return;
     }
     closing = true;
     stopKeepAwake(keepAwakeHandle);
-    await dashboardServer.close();
+    try {
+      await dashboardServer.close();
+    } finally {
+      removeDashboardControl(controlPath, shutdownToken);
+    }
   };
-  process.once("SIGINT", close);
-  process.once("SIGTERM", close);
+  process.once("SIGINT", () => void close());
+  process.once("SIGTERM", () => void close());
   return 0;
 }
 
@@ -2037,6 +2221,9 @@ async function main(args) {
     if (parsed.error) {
       console.error(parsed.error);
       return 1;
+    }
+    if (parsed.stop) {
+      return stopDashboard(parsed.repository);
     }
     return dashboard(
       parsed.repository,

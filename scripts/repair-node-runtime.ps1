@@ -22,6 +22,81 @@ function Get-ExactVersion {
     return ""
 }
 
+function Assert-NoReparsePoints {
+    param(
+        [string]$Path,
+        [switch]$InspectDescendants
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $current = [System.IO.Path]::GetPathRoot($fullPath)
+    $relative = $fullPath.Substring($current.Length)
+    foreach ($segment in $relative.Split(
+        [char[]]@(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ),
+        [System.StringSplitOptions]::RemoveEmptyEntries
+    )) {
+        $current = Join-Path $current $segment
+        $item = Get-Item `
+            -LiteralPath $current `
+            -Force `
+            -ErrorAction SilentlyContinue
+        if (-not $item) {
+            continue
+        }
+        if (
+            $item.Attributes -band
+            [System.IO.FileAttributes]::ReparsePoint
+        ) {
+            throw "Refusing to use a path containing a reparse point: $current"
+        }
+    }
+
+    if (
+        $InspectDescendants -and
+        (Test-Path -LiteralPath $fullPath -PathType Container)
+    ) {
+        $reparsePoint = Get-ChildItem `
+            -LiteralPath $fullPath `
+            -Force `
+            -Recurse `
+            -Attributes ReparsePoint `
+            -ErrorAction Stop |
+                Select-Object -First 1
+        if ($reparsePoint) {
+            throw "Refusing to use a directory containing a reparse point: $($reparsePoint.FullName)"
+        }
+    }
+
+    return $fullPath
+}
+
+function Test-FixLabOwnershipMarker {
+    param([string]$Path)
+
+    $item = Get-Item `
+        -LiteralPath $Path `
+        -Force `
+        -ErrorAction SilentlyContinue
+    if (-not $item) {
+        return $false
+    }
+    if (
+        $item.Attributes -band
+        [System.IO.FileAttributes]::ReparsePoint
+    ) {
+        throw "Refusing to trust a reparse-point ownership marker: $Path"
+    }
+    if ($item.PSIsContainer) {
+        throw "Refusing to trust a non-file ownership marker: $Path"
+    }
+    return (Get-Content -LiteralPath $Path -Raw).Trim() -eq (
+        "FixLab portable runtime root"
+    )
+}
+
 function Get-RepositoryNodeVersion {
     param([string]$Root)
 
@@ -110,9 +185,11 @@ function Test-PortableRuntime {
     )
 
     $nodePath = Join-Path $Directory "node.exe"
+    $npmPath = Join-Path $Directory "npm.cmd"
     $npmCliPath = Join-Path $Directory "node_modules\npm\bin\npm-cli.js"
     if (
         -not (Test-Path -LiteralPath $nodePath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $npmPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $npmCliPath -PathType Leaf)
     ) {
         return $null
@@ -126,13 +203,48 @@ function Test-PortableRuntime {
         return $null
     }
 
-    $npmOutput = (& $nodePath $npmCliPath --version 2>&1 | Out-String).Trim()
+    $npmOutput = (& $npmPath --version 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $npmOutput) {
         return $null
     }
 
+    $probeDirectory = Join-Path (
+        [System.IO.Path]::GetTempPath()
+    ) "fixlab-portable-npm-probe-$([guid]::NewGuid())"
+    New-Item -ItemType Directory -Path $probeDirectory | Out-Null
+    try {
+        Set-Content `
+            -LiteralPath (Join-Path $probeDirectory "package.json") `
+            -Value '{"name":"fixlab-portable-npm-probe","version":"1.0.0"}'
+        Push-Location $probeDirectory
+        try {
+            $probeOutput = (
+                & $npmPath pack --dry-run --ignore-scripts --json 2>&1 |
+                    Out-String
+            )
+            $probeStatus = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+        if (
+            $probeStatus -ne 0 -or
+            $probeOutput -match 'Class extends value undefined|(?:TypeError|ReferenceError|SyntaxError):'
+        ) {
+            return $null
+        }
+    }
+    finally {
+        Remove-Item `
+            -LiteralPath $probeDirectory `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+    }
+
     return [pscustomobject]@{
         Node = $nodePath
+        Npm = $npmPath
         NpmCli = $npmCliPath
         NodeVersion = $RequiredVersion
         NpmVersion = $npmOutput
@@ -162,6 +274,7 @@ if (-not $requestedVersion) {
 }
 
 $destinationRootFull = [System.IO.Path]::GetFullPath($DestinationRoot)
+$destinationRootFull = Assert-NoReparsePoints -Path $destinationRootFull
 $ownershipMarker = Join-Path $destinationRootFull ".fixlab-runtime-root"
 $runtimeName = "node-v$requestedVersion-win-$Architecture"
 $runtimePath = [System.IO.Path]::GetFullPath(
@@ -179,6 +292,7 @@ if (
 ) {
     throw "Runtime destination must remain inside DestinationRoot."
 }
+$runtimePath = Assert-NoReparsePoints -Path $runtimePath
 
 $archiveName = "$runtimeName.zip"
 $downloadBase = "https://nodejs.org/dist/v$requestedVersion"
@@ -194,13 +308,22 @@ Write-Output "  checksum manifest: $checksumsUrl"
 Write-Output "  system PATH changes: none"
 Write-Output "  NVM changes: none"
 
-$current = Test-PortableRuntime `
-    -Directory $runtimePath `
-    -RequiredVersion $requestedVersion
+$current = $null
+if (Test-Path -LiteralPath $runtimePath) {
+    if (-not (Test-FixLabOwnershipMarker -Path $ownershipMarker)) {
+        throw "Refusing to inspect an existing runtime because DestinationRoot is not marked as FixLab-owned: $destinationRootFull"
+    }
+    Assert-NoReparsePoints `
+        -Path $runtimePath `
+        -InspectDescendants | Out-Null
+    $current = Test-PortableRuntime `
+        -Directory $runtimePath `
+        -RequiredVersion $requestedVersion
+}
 if ($current) {
     Write-Output "Portable runtime is already ready:"
     Write-Output "  Node.js: $($current.NodeVersion) ($($current.Node))"
-    Write-Output "  npm: $($current.NpmVersion) ($($current.NpmCli))"
+    Write-Output "  npm: $($current.NpmVersion) ($($current.Npm))"
     exit 0
 }
 
@@ -210,19 +333,27 @@ if (-not $Yes) {
 }
 
 New-Item -ItemType Directory -Path $destinationRootFull -Force | Out-Null
+$destinationRootFull = Assert-NoReparsePoints -Path $destinationRootFull
 if (
     (Test-Path -LiteralPath $runtimePath) -and
-    -not (Test-Path -LiteralPath $ownershipMarker -PathType Leaf)
+    -not (Test-FixLabOwnershipMarker -Path $ownershipMarker)
 ) {
     throw "Refusing to replace an existing runtime because DestinationRoot is not marked as FixLab-owned: $destinationRootFull"
 }
-if (-not (Test-Path -LiteralPath $ownershipMarker -PathType Leaf)) {
+if (-not (Test-FixLabOwnershipMarker -Path $ownershipMarker)) {
     Set-Content `
         -LiteralPath $ownershipMarker `
         -Value "FixLab portable runtime root"
 }
-$downloadRoot = Join-Path $destinationRootFull (
-    ".downloads\repair-$([guid]::NewGuid())"
+$downloadsContainer = Join-Path $destinationRootFull ".downloads"
+$downloadsContainer = Assert-NoReparsePoints -Path $downloadsContainer
+New-Item `
+    -ItemType Directory `
+    -Path $downloadsContainer `
+    -Force | Out-Null
+$downloadsContainer = Assert-NoReparsePoints -Path $downloadsContainer
+$downloadRoot = Join-Path $downloadsContainer (
+    "repair-$([guid]::NewGuid())"
 )
 $archivePath = Join-Path $downloadRoot $archiveName
 $checksumsPath = Join-Path $downloadRoot "SHASUMS256.txt"
@@ -254,6 +385,9 @@ try {
     New-Item -ItemType Directory -Path $extractPath | Out-Null
     Expand-Archive -LiteralPath $archivePath -DestinationPath $extractPath
     $extractedRuntime = Join-Path $extractPath $runtimeName
+    Assert-NoReparsePoints `
+        -Path $extractedRuntime `
+        -InspectDescendants | Out-Null
     $verified = Test-PortableRuntime `
         -Directory $extractedRuntime `
         -RequiredVersion $requestedVersion
@@ -263,8 +397,11 @@ try {
 
     if (
         (Test-Path -LiteralPath $runtimePath) -and
-        (Test-Path -LiteralPath $ownershipMarker -PathType Leaf)
+        (Test-FixLabOwnershipMarker -Path $ownershipMarker)
     ) {
+        Assert-NoReparsePoints `
+            -Path $runtimePath `
+            -InspectDescendants | Out-Null
         Remove-Item -LiteralPath $runtimePath -Recurse -Force
     }
     Move-Item -LiteralPath $extractedRuntime -Destination $runtimePath
@@ -275,6 +412,9 @@ finally {
     }
 }
 
+$runtimePath = Assert-NoReparsePoints `
+    -Path $runtimePath `
+    -InspectDescendants
 $runtime = Test-PortableRuntime `
     -Directory $runtimePath `
     -RequiredVersion $requestedVersion
@@ -284,6 +424,6 @@ if (-not $runtime) {
 
 Write-Output "Portable runtime repaired and verified:"
 Write-Output "  Node.js: $($runtime.NodeVersion) ($($runtime.Node))"
-Write-Output "  npm: $($runtime.NpmVersion) ($($runtime.NpmCli))"
+Write-Output "  npm: $($runtime.NpmVersion) ($($runtime.Npm))"
 Write-Output "Use it in the current PowerShell session without changing the permanent PATH:"
 Write-Output "  `$env:PATH = `"$runtimePath;`$env:PATH`""

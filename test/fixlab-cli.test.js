@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -10,9 +11,10 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import test from "node:test";
@@ -75,6 +77,7 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /--keep-awake-minutes <minutes>/);
   assert.match(result.stdout, /chat \[repository\]/);
   assert.match(result.stdout, /fixlab <repository>/);
+  assert.match(result.stdout, /--stop/);
   assert.match(result.stdout, /--runtime <agency\|copilot>/);
   assert.match(result.stdout, /--environment <name>/);
   assert.match(result.stdout, /FIXLAB_RUNTIME/);
@@ -374,6 +377,13 @@ test("Windows bootstrap keeps NVM and Node changes explicit", () => {
   assert.match(installer, /npm\.cmd/);
   assert.match(installer, /pack --dry-run --ignore-scripts --json/);
   assert.match(installer, /NVM reported success but did not create a coherent/);
+  assert.match(installer, /Get-PortableRepairCommand/);
+  assert.match(installer, /Portable alternative: \$repairCommand/);
+  assert.match(installer, /if \(\$Version\)/);
+  assert.match(installer, /\$repairScript\.Replace\("'", "''"\)/);
+  assert.match(installer, /\$Root\.Replace\("'", "''"\)/);
+  assert.match(installer, /repository has no exact Node\.js pin/);
+  assert.match(installer, /pass an exact major\.minor\.patch value/);
   assert.match(installer, /Get-SafeSourceDisplay/);
   assert.match(installer, /\[REDACTED\]/);
   assert.doesNotMatch(installer, /Write-Output "FixLab source: \$Source"/);
@@ -414,8 +424,23 @@ test("portable Node repair is plan-first and checksum verified", () => {
   assert.match(repair, /NVM changes: none/);
   assert.match(repair, /\.fixlab-runtime-root/);
   assert.match(repair, /not marked as FixLab-owned/);
+  assert.match(repair, /Assert-NoReparsePoints/);
+  assert.match(repair, /FileAttributes\]::ReparsePoint/);
+  assert.match(repair, /Get-Item[\s\S]*-ErrorAction SilentlyContinue/);
+  assert.match(repair, /InspectDescendants/);
+  assert.match(repair, /Test-FixLabOwnershipMarker/);
+  assert.match(repair, /npm\.cmd/);
+  assert.match(repair, /pack --dry-run --ignore-scripts --json/);
   assert.match(repair, /if \(-not \$Yes\)/);
   assert.match(repair, /No changes made/);
+  const ownershipCheck = repair.indexOf(
+    "if (-not (Test-FixLabOwnershipMarker -Path $ownershipMarker))"
+  );
+  const existingRuntimeProbe = repair.indexOf(
+    "$current = Test-PortableRuntime"
+  );
+  assert.ok(ownershipCheck >= 0);
+  assert.ok(existingRuntimeProbe > ownershipCheck);
   assert.doesNotMatch(repair, /nvm\s+(?:install|uninstall)|setx\s+PATH/i);
 });
 
@@ -1242,6 +1267,50 @@ test("dashboard rejects a missing repository before starting", () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /repository does not exist/);
+});
+
+test("dashboard stop succeeds when no owned dashboard is registered", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-"));
+
+  try {
+    const result = run(["dashboard", repository, "--stop"], repository);
+
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /No running FixLab dashboard is registered/);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("dashboard stop rejects a substituted control directory", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-"));
+  const target = mkdtempSync(join(tmpdir(), "fixlab-control-target-"));
+  const identity = createHash("sha256")
+    .update(resolve(repository))
+    .digest("hex")
+    .slice(0, 20);
+  const controlRoot = join(tmpdir(), "fixlab-dashboard-control");
+  const controlDirectory = join(controlRoot, identity);
+
+  try {
+    mkdirSync(controlRoot, { recursive: true });
+    symlinkSync(
+      target,
+      controlDirectory,
+      process.platform === "win32" ? "junction" : "dir"
+    );
+
+    const result = run(["dashboard", repository, "--stop"], repository);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /not a trusted local directory/);
+  } finally {
+    if (existsSync(controlDirectory)) {
+      unlinkSync(controlDirectory);
+    }
+    rmSync(target, { recursive: true, force: true });
+    rmSync(repository, { recursive: true, force: true });
+  }
 });
 
 test("chat validates a repository before starting a missing dashboard", () => {

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   createReadStream,
   existsSync,
@@ -3614,7 +3614,9 @@ export function createDashboardServer({
   executionHeartbeatMs = DEFAULT_EXECUTION_HEARTBEAT_MS,
   workspaceServers = new Map(),
   ownsWorkspaceServers = true,
-  workspaceHostState = { closing: false }
+  workspaceHostState = { closing: false },
+  shutdownToken = "",
+  onShutdown
 }) {
   const resolvedRepository = resolve(repository);
   const defaultModel = validateCopilotModel(model, runtime);
@@ -4926,6 +4928,30 @@ export function createDashboardServer({
           error: "Watcher history could not be read. Review the private journal and repository scope. Nothing was started or changed."
         });
       }
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      requestUrl.pathname === "/api/control/stop" &&
+      shutdownToken
+    ) {
+      const suppliedToken = String(
+        request.headers["x-fixlab-shutdown-token"] ?? ""
+      );
+      const expected = Buffer.from(shutdownToken);
+      const supplied = Buffer.from(suppliedToken);
+      if (
+        supplied.length !== expected.length ||
+        !timingSafeEqual(supplied, expected)
+      ) {
+        sendJson(response, 403, { error: "dashboard stop was not authorized" });
+        return;
+      }
+      sendJson(response, 202, { stopping: true });
+      response.once("finish", () => {
+        setImmediate(() => onShutdown?.());
+      });
       return;
     }
 

@@ -407,7 +407,7 @@ approves an action or passes a validation gate. See
 ## Local dashboard command
 
 ```text
-fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>]
+fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--stop]
 ```
 
 The command starts the packaged local UI on `127.0.0.1:4317` by default without
@@ -657,6 +657,13 @@ The timer releases automatically when its duration ends or its FixLab process
 stops. It does not change permanent power-plan settings or unlock the desktop;
 interactive browser and authentication steps may still require an unlocked
 screen.
+
+Use `fixlab dashboard [repository] --stop` from another terminal to request a
+graceful shutdown. FixLab stores an instance-specific local control token and
+will stop only the dashboard that created that record; it does not terminate
+unrelated Node.js processes. Control directories and records must be regular
+local filesystem entries; FixLab rejects symbolic-link or junction
+substitution instead of following it.
 
 The user supplies only the bug or required enhancement. The agent loads
 validation context from the repository profile and autonomously owns contract

@@ -35,6 +35,22 @@ function Get-SafeSourceDisplay {
     )
 }
 
+function Get-PortableRepairCommand {
+    param(
+        [string]$Root,
+        [string]$Version
+    )
+
+    $repairScript = Join-Path $PSScriptRoot "repair-node-runtime.ps1"
+    $scriptLiteral = "'" + $repairScript.Replace("'", "''") + "'"
+    $rootLiteral = "'" + $Root.Replace("'", "''") + "'"
+    $command = "pwsh -File $scriptLiteral -Repository $rootLiteral"
+    if ($Version) {
+        $command += " -NodeVersion $Version"
+    }
+    return "$command -Yes"
+}
+
 function Get-RepositoryNodeVersion {
     param([string]$Root)
 
@@ -283,17 +299,21 @@ $nvmRoots | ForEach-Object { Write-Output "  $_" }
 
 $runtime = Find-NodeRuntime -Roots $nvmRoots -RequiredVersion $requestedVersion
 if (-not $runtime -and $requestedVersion) {
+    $repairCommand = Get-PortableRepairCommand `
+        -Root $repositoryRoot `
+        -Version $requestedVersion
     $nvmExecutable = $nvmRoots |
         ForEach-Object { Join-Path $_ "nvm.exe" } |
         Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
         Select-Object -First 1
     if (-not $nvmExecutable) {
-        throw "Node.js $requestedVersion is not installed coherently, and nvm.exe was not found under the discovered roots."
+        throw "Node.js $requestedVersion is not installed coherently, and nvm.exe was not found under the discovered roots. Portable alternative: $repairCommand"
     }
     if (-not $InstallNode) {
         Write-Output "Node.js $requestedVersion is not installed coherently."
         Write-Output "Next action: `"$nvmExecutable`" install $requestedVersion"
         Write-Output "Rerun this installer with -InstallNode to approve that installation."
+        Write-Output "Portable alternative: $repairCommand"
         exit 2
     }
     if (-not $Yes) {
@@ -309,13 +329,18 @@ if (-not $runtime -and $requestedVersion) {
     }
     $runtime = Find-NodeRuntime -Roots $nvmRoots -RequiredVersion $requestedVersion
     if (-not $runtime) {
-        throw "NVM reported success but did not create a coherent Node.js $requestedVersion runtime. Repair or reinstall NVM for Windows, then retry."
+        Write-Warning "NVM reported success but did not create a coherent Node.js $requestedVersion runtime."
     }
 }
 
 if (-not $runtime) {
-    $repairScript = Join-Path $PSScriptRoot "repair-node-runtime.ps1"
-    throw "No coherent NVM Node.js/npm installation was found. Repair NVM or run: pwsh -File `"$repairScript`" -Repository `"$repositoryRoot`" -NodeVersion $requestedVersion -Yes"
+    if ($requestedVersion) {
+        $repairCommand = Get-PortableRepairCommand `
+            -Root $repositoryRoot `
+            -Version $requestedVersion
+        throw "No coherent NVM Node.js/npm installation was found. Repair NVM or run: $repairCommand"
+    }
+    throw "No coherent NVM Node.js/npm installation was found, and the repository has no exact Node.js pin. Set toolchain.nodeVersion, .nvmrc, .node-version, or an exact package.json engines.node value, then retry; alternatively pass an exact major.minor.patch value to repair-node-runtime.ps1 with -NodeVersion."
 }
 
 Write-Output "Selected runtime:"
