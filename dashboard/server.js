@@ -669,7 +669,7 @@ export function normalizeEngineeringSummary(value) {
 }
 
 const ENGINEERING_SUMMARY_GUIDANCE =
-  '- At the reviewed fix checkpoint and before finishing emit FIXLAB_SUMMARY|one-line JSON: problem, expectedBehavior, actualBehavior, rootCause, codeFix (change/why), changedFiles[], regression[], risks[], workarounds[], commit (hex/empty). Require problem/rootCause/codeFix; bounded strings, relative paths, no secrets/private URLs. Preserve bug-to-fix explanation across retries; update only for new evidence. Distinguish historical/skipped/unverified tests from passes; report no-change honestly.';
+  '- At reviewed fix checkpoint and finish emit FIXLAB_SUMMARY|one-line JSON: problem, expectedBehavior, actualBehavior, rootCause, codeFix (change/why), changedFiles[], regression[], risks[], workarounds[], commit (hex/empty). Require problem/rootCause/codeFix; bounded strings, relative paths, no secrets/private URLs. Preserve the original bug-to-fix explanation across retries; update only for new evidence. Separate historical/skipped/unverified from passed checks; report no-change honestly.';
 
 function dashboardSnapshot(job) {
   return {
@@ -1405,7 +1405,7 @@ ${!unverifiedDraft && allowsDraftIntegrationDeferral({ mode, workflow, manualLoc
 ${skipLiveTests || useDeployedBackend ? `${OPTIONAL_INTEGRATION_GUIDANCE}\nSelected job choices: skipLiveTests=${skipLiveTests}; useDeployedBackend=${useDeployedBackend}; deferValidation=${deferValidation}.` : ""}
 ${!readOnly && !unverifiedDraft ? AUTONOMOUS_RECOVERY_GUIDANCE : ""}
 ${setupRecovery.length ? `Offline setup diagnostics to repair when needed for this task:\n${JSON.stringify(setupRecovery)}` : ""}
-- Reproduce on an approved app; start a stack only for changed code. Deployed baselines never prove unpublished fixes.
+- Reproduce on approved apps; start stacks only for changed code. Deployed baselines never prove unpublished fixes.
 - New worktree: review \`fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME\`; add \`--yes\` after scoped setup approval. Copy only non-sensitive \`worktreeSetup.files\`. Never copy credentials or browser state. Missing setup/auth/access blocks dependents; do not retry unchanged approvals or grant blanket path access. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration.
 - Inspect git status and effective diff; search task-relevant symbols and files only.
 - Reuse this job/session context. Do not reread unchanged files, repeat diagnosis, reinstall available dependencies or repeat broad checks without new evidence.
