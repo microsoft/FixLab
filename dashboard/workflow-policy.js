@@ -126,7 +126,8 @@ export function workItemValidationEvidenceGuidance(job) {
 }
 
 export function efficientWorkflowGuidance(workflow, {
-  dashboard = true, postPrLiveReview = workflow.askBeforeLiveTests === true && workflow.publication === "draft"
+  dashboard = true, postPrLiveReview = workflow.askBeforeLiveTests === true && workflow.publication === "draft",
+  automaticLiveTesting = true
 } = {}) {
   return `Saved efficient delivery policy (applies without repeated job/stage questions):
 - Inspect the effective diff, make the smallest fix, run the focused regression checks that cover it, and self-review the checkpoint.
@@ -134,7 +135,7 @@ export function efficientWorkflowGuidance(workflow, {
 - After that reviewed focused checkpoint and any explicitly required pre-publication checks, create or update the authorized ${workflow.publication === "ready" ? "READY-FOR-REVIEW" : "DRAFT"} pull request now. Do not wait for optional broad local tests or builds. Never create an empty PR or stage unrelated files.
 - Verify provider isDraft is ${workflow.publication !== "ready"} before reporting the PR stage passed. Publication is not proof of completed validation or permission to mark ready, merge, deploy or force-push.
 ${postPrLiveReview ? `- ${POST_PR_LIVE_REVIEW_GUIDANCE}
-${dashboard ? "- After verified draft publication and any explicitly requested post-PR local checks, emit local-stack skipped only for unstarted applications, preserve completed startup outcomes, and emit live-test blocked while awaiting the user's live-test choice. Preserve pr passed and exit for same-job input. This is a planned handoff, not a failed browser run. Retry may run the focused live gate; Skip records missing live evidence and keeps the PR draft. Do not repeat completed checks or create another PR.\n" : ""}` : workflow.askBeforeLiveTests !== true ? `- ${AUTOMATIC_LIVE_TEST_GUIDANCE}\n` : ""}
+${dashboard ? "- After verified draft publication and any explicitly requested post-PR local checks, emit local-stack skipped only for unstarted applications, preserve completed startup outcomes, and emit live-test blocked while awaiting the user's live-test choice. Preserve pr passed and exit for same-job input. This is a planned handoff, not a failed browser run. Retry may run the focused live gate; Skip records missing live evidence and keeps the PR draft. Do not repeat completed checks or create another PR.\n" : ""}` : automaticLiveTesting && workflow.askBeforeLiveTests !== true ? `- ${AUTOMATIC_LIVE_TEST_GUIDANCE}\n` : ""}
 - ${workflow.unitTestsAfterPr ? `After creating the PR, run the broader local unit-test gates against the same checkout through ${dashboard ? "dashboard-owned execution" : "fixlab exec with compact structured evidence"}. Update the same PR with actual results; do not delay PR creation while those tests run.` : "Broader local unit tests are optional and are not automatically requested. Leave their status not run/pending and report required remote CI separately."}
 - ${workflow.optionalBuilds ? "The saved repository preference requests optional builds after PR creation; run them and report their actual outcomes." : "Optional builds are not automatically requested. Offer the saved repository Settings preference once when needed, not a question for every job or stage. Never run a full build merely to decide whether a PR may be created."}
 - Keep every pending, failed, stale, skipped or not-run check explicit in the PR and dashboard. Never convert an optional check into passed, reuse stale evidence, bypass an explicitly required gate, or disable a CI/merge policy.

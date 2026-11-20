@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, PPE_POST_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, allowsPostPrLiveReview, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, POST_PR_LIVE_REVIEW_GUIDANCE, WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE, USER_FRIENDLY_UPDATE_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
+import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, PPE_POST_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, allowsPostPrLiveReview, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, POST_PR_LIVE_REVIEW_GUIDANCE, AUTOMATIC_LIVE_TEST_GUIDANCE, WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE, USER_FRIENDLY_UPDATE_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
 import { ValidationSession, selectedValidationGates, validationGates } from "../dashboard/validation-gates.js";
 import { buildJobPrompt, FIXLAB_STAGES } from "../dashboard/server.js";
 import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
@@ -179,7 +179,8 @@ test("PR learning stays aligned across CLI, packaged agents, initialized agents 
     const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8")
       .replace(/`/gu, "").replace(/\s+/gu, " ");
     assert.ok(source.includes(PR_LEARNING_GUIDANCE), `${path} must preserve the complete PR learning contract`);
-    assert.ok(source.includes(POST_PR_LIVE_REVIEW_GUIDANCE), `${path} must preserve the default draft/live-test handoff`);
+    assert.ok(source.includes(POST_PR_LIVE_REVIEW_GUIDANCE), `${path} must preserve the optional draft/live-test handoff`);
+    assert.ok(source.includes(AUTOMATIC_LIVE_TEST_GUIDANCE), `${path} must preserve automatic scoped live validation`);
     assert.ok(source.includes(WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE), `${path} must preserve conditional, best-effort work-item evidence`);
     assert.ok(source.includes(USER_FRIENDLY_UPDATE_GUIDANCE), `${path} must preserve understandable updates and verified fix links`);
   }
@@ -308,6 +309,9 @@ test("automatic live testing is the default without authorizing new DEV writes",
   assert.match(prompt, /execute its repository-defined live test in the approved environment/);
   assert.match(prompt, /Verified read-only POST searches/);
   assert.match(prompt, /Never infer write access from automatic live testing/);
+  assert.doesNotMatch(efficientWorkflowGuidance(workflow, {
+    automaticLiveTesting: false, postPrLiveReview: false
+  }), /Automatic live validation/);
   const writable = buildJobPrompt({ ...job, targetEnvironment: "dev",
     testEvidence: { persistentDevApi: true, mutationMode: "approved-write" } });
   assert.match(writable, /Persistent DEV API access/);
