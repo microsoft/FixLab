@@ -1,12 +1,79 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { repositoryState } from "../bin/structured-command.js";
 import { createRuntimePermissionPolicy } from "./runtime-permission-policy.js";
 import { safeRuntimeText } from "./runtime-requests.js";
+import { setupPath, SETUP_PROFILE_PATH } from "./repository-setup.js";
 
 const jobIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const commitPattern = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+
+function sharedProfileFile(repository) {
+  const path = setupPath(repository, SETUP_PROFILE_PATH);
+  const info = lstatSync(path);
+  if (!info.isFile() || info.size > 1024 * 1024) {
+    throw new Error("Shared setup requires a regular repository profile no larger than 1 MiB");
+  }
+  const previous = readFileSync(path);
+  const profile = JSON.parse(previous.toString("utf8"));
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
+    throw new Error("Shared setup requires an existing repository profile object");
+  }
+  return { path, previous, profile };
+}
+
+function requireIgnoredCommitProfile(repository) {
+  const ignored = spawnSync("git", ["check-ignore", "--quiet", "--", SETUP_PROFILE_PATH], {
+    cwd: repository, windowsHide: true, timeout: 10000
+  });
+  if (ignored.status !== 0 || ignored.error) {
+    throw new Error("Automatic commit binding requires a Git-ignored local repository profile; keep the reusable template separately. Tracked profiles are never rewritten.");
+  }
+}
+
+export function planSharedSetup(repository) {
+  const file = sharedProfileFile(repository);
+  const profile = structuredClone(file.profile);
+  profile.worktreeSetup = { ...profile.worktreeSetup, mode: "shared" };
+  const head = git(repository, ["rev-parse", "--verify", "HEAD"], "Shared setup commit verification");
+  if (profile.validation?.expectedCommit !== undefined) {
+    if (!commitPattern.test(profile.validation.expectedCommit)) {
+      throw new Error("validation.expectedCommit must be a full Git commit before reusing setup");
+    }
+    requireIgnoredCommitProfile(repository);
+    profile.worktreeSetup.bindExpectedCommit = true;
+    profile.validation.expectedCommit = head;
+  }
+  const configuration = sharedWorktreeConfig(profile, repository);
+  return { ...file, repository, profile, configuration, head };
+}
+
+export function applySharedSetup(plan) {
+  const current = sharedProfileFile(plan.repository);
+  if (!current.previous.equals(plan.previous) ||
+      git(plan.repository, ["rev-parse", "--verify", "HEAD"], "Shared setup commit verification") !== plan.head) {
+    throw new Error("The shared setup or checkout changed after planning; review a new plan");
+  }
+  sharedWorktreeConfig(plan.profile, plan.repository);
+  if (plan.profile.worktreeSetup.bindExpectedCommit) {requireIgnoredCommitProfile(plan.repository);}
+  writeFileSync(current.path, `${JSON.stringify(plan.profile, null, 2)}\n`);
+}
+
+function refreshSharedCommit(repository, profile) {
+  if (!profile.worktreeSetup.bindExpectedCommit) {return;}
+  requireIgnoredCommitProfile(repository);
+  const current = sharedProfileFile(repository);
+  if (JSON.stringify(current.profile) !== JSON.stringify(profile)) {
+    throw new Error("Shared configuration changed during branch acquisition; review it before continuing");
+  }
+  const head = git(repository, ["rev-parse", "--verify", "HEAD"], "Shared commit binding");
+  if (current.profile.validation.expectedCommit !== head) {
+    current.profile.validation.expectedCommit = head;
+    writeFileSync(current.path, `${JSON.stringify(current.profile, null, 2)}\n`);
+  }
+}
 
 function verifyIdleGit(repository) {
   for (const name of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer"]) {
@@ -77,6 +144,16 @@ export function sharedWorktreeConfig(profile, repository) {
   const prefix = branchRef(root, naming.prefixTemplate.replaceAll("{userId}", naming.userId), "Shared branch prefix");
   if (profile.worktreeSetup.autoStash !== undefined && typeof profile.worktreeSetup.autoStash !== "boolean") {
     throw new Error("worktreeSetup.autoStash must be a boolean");
+  }
+  if (profile.worktreeSetup.bindExpectedCommit !== undefined &&
+      typeof profile.worktreeSetup.bindExpectedCommit !== "boolean") {
+    throw new Error("worktreeSetup.bindExpectedCommit must be a boolean");
+  }
+  if (profile.worktreeSetup.bindExpectedCommit) {
+    if (!commitPattern.test(profile.validation?.expectedCommit ?? "")) {
+      throw new Error("Commit-bound shared setup requires validation.expectedCommit");
+    }
+    requireIgnoredCommitProfile(root);
   }
   return { remote, baseBranch, prefix, autoStash: profile.worktreeSetup.autoStash === true };
 }
@@ -220,6 +297,7 @@ export function prepareSharedWorktree({ repository, profile, jobId, saved = null
     const baseCommit = git(repository, [
       "merge-base", "HEAD", `refs/remotes/${config.remote}/${config.baseBranch}`
     ], "Existing branch base verification");
+    refreshSharedCommit(repository, profile);
     return {
       mode: "shared", branch: current.branch, baseCommit,
       remote: config.remote, baseBranch: config.baseBranch,
@@ -251,6 +329,7 @@ export function prepareSharedWorktree({ repository, profile, jobId, saved = null
       }
       git(repository, ["switch", "--no-guess", "--no-overwrite-ignore", branch], "Saved branch reacquisition");
     }
+    refreshSharedCommit(repository, profile);
     return saved;
   }
   if (resume) {
@@ -277,6 +356,7 @@ export function prepareSharedWorktree({ repository, profile, jobId, saved = null
     "rev-parse", "--verify", `refs/remotes/${config.remote}/${config.baseBranch}^{commit}`
   ], "Fetched base verification");
   git(repository, ["switch", "--no-guess", "--no-overwrite-ignore", "-c", branch, baseCommit], "New job branch creation");
+  refreshSharedCommit(repository, profile);
   return { mode: "shared", branch, baseCommit, remote: config.remote, baseBranch: config.baseBranch,
     ...(workspaceStash ? { workspaceStash } : {}) };
 }

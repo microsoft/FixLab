@@ -41,7 +41,7 @@ const resultKeys = new Set([
   "completed", "bugs", "averageDurationMs", "usageJobs", "totalInputTokens",
   "totalCachedInputTokens", "totalCacheWriteTokens", "totalOutputTokens",
   "averageCacheHitPercent", "inputTokenLimit", "budgetExceeded", "inputTokens", "fileAccess",
-  "workflow", "publication", "unitTestsAfterPr", "optionalBuilds", "fullValidationPassed"
+  "workflow", "publication", "unitTestsAfterPr", "optionalBuilds", "fullValidationPassed", "executionState"
 ]);
 
 export function compactControlResult(value, depth = 0) {

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { createDevPostTool, createDevWriteApproval, createPpeWriteApproval, createPostWriteApproval } from "../dashboard/dev-post.js";
+import { createDevPostTool, createDevWriteApproval, createPpeWriteApproval, createPostBaseApproval, createPostWriteApproval, createNonProductionPostAccess } from "../dashboard/dev-post.js";
+import { forwardApprovedBrowserPost, forwardApprovedBrowserRequest, startBrowserPostBridge } from "../dashboard/browser-post.js";
 import { runCopilotSession } from "../dashboard/copilot-session.js";
 import { createRuntimeRequestBridge, runtimeRequestId } from "../dashboard/runtime-requests.js";
 
@@ -53,6 +55,504 @@ function approveOrigins(state, environment = "DEV") {
     state.repository, environment, state.settings.jobId);
   return state.tool();
 }
+
+function approvePostBase(state, environment = "PPE") {
+  const key = environment.toLowerCase();
+  if (!state.profile.environments.includes(environment)) { state.profile.environments.push(environment); }
+  state.postBase = `https://api.shared.example.test/api/${key}/v1`;
+  state.profile.browserAutomation.dataSafety.post ??= {};
+  state.profile.browserAutomation.dataSafety.post[key] = {
+    scope: "api://example-service/access", sessionHelper: "session.mjs", baseUrls: [state.postBase]
+  };
+  state.save();
+  Object.assign(state.settings, {
+    jobId: "11111111-1111-4111-8111-111111111111", allowPostRequests: true, targetEnvironment: environment
+  });
+  state.settings.postWriteApproval = createPostBaseApproval(state.repository, environment, state.settings.jobId);
+  return state.tool();
+}
+
+function browserRoute(state, overrides = {}) {
+  const fulfilled = [];
+  const aborted = [];
+  return {
+    fulfilled, aborted,
+    request: () => ({
+      method: () => "POST", url: () => state.args.url,
+      headers: () => ({ "content-type": "application/json" }),
+      postData: () => JSON.stringify(state.args.payload),
+      ...overrides
+    }),
+    async fulfill(reply) { fulfilled.push(reply); },
+    async abort(reason) { aborted.push(reason); }
+  };
+}
+
+async function browserAccess(t, state) {
+  const access = createNonProductionPostAccess(state.settings);
+  const bridge = await startBrowserPostBridge({
+    send: access.browserRequest ?? access.browserPost, serializeRequests: Boolean(access.browserRequest),
+    revoke: access.revoke, jobId: state.settings.jobId,
+    environment: state.settings.targetEnvironment.toLowerCase(), request: state.settings.request
+  });
+  t.after(() => bridge.close());
+  return access;
+}
+
+test("browser POST relay reuses exact endpoint/test-record consent and existing authentication without exposing bodies to the tool", async (t) => {
+  const state = fixture(t);
+  Object.assign(state.settings, {
+    allowPostRequests: true, jobId: "11111111-1111-4111-8111-111111111111"
+  });
+  state.settings.postWriteApproval = createPostWriteApproval(state.repository, "DEV", state.settings.jobId);
+  const received = [];
+  state.settings.request = async (target, options) => {
+    received.push({ target, options });
+    return new Response('{"id":"synthetic-record","enabled":true}', {
+      status: 201, headers: { "content-type": "application/json", "set-cookie": "must-not-be-relayed" }
+    });
+  };
+  await browserAccess(t, state);
+  const route = browserRoute(state);
+  const result = await forwardApprovedBrowserPost(route, { environment: "DEV", purpose: state.args.purpose });
+  assert.equal(received.length, 1);
+  assert.equal(received[0].options.headers.Authorization, "Bearer synthetic-value");
+  assert.equal(received[0].options.redirect, "manual");
+  assert.equal(route.fulfilled[0].body.toString(), '{"id":"synthetic-record","enabled":true}');
+  assert.equal(result.validationPassed, false);
+  assert.equal(result.responseBodyReturned, false);
+  assert.equal(JSON.stringify(result).includes("synthetic-record"), false);
+  assert.equal(JSON.stringify(route.fulfilled).includes("must-not-be-relayed"), false);
+  assert.equal(state.prompts.length, 0);
+  const invalid = browserRoute(state, { postData: () => '{"name":"ordinary-record"}' });
+  await assert.rejects(forwardApprovedBrowserPost(invalid, { environment: "DEV", purpose: state.args.purpose }),
+    /Browser POST failed: POST endpoint or test record/u);
+  assert.deepEqual(invalid.aborted, ["blockedbyclient"]);
+  assert.equal(received.length, 1);
+});
+
+test("PPE browser scenarios load, save and verify real response data with serialized GET and POST under one grant", async (t) => {
+  const state = fixture(t);
+  approveOrigins(state, "PPE");
+  state.args.url = "https://api.ppe.example.test/records";
+  let name = "original";
+  let active = 0;
+  let maximumActive = 0;
+  state.settings.request = async (target, options) => {
+    state.requests.push({ target, options });
+    active++;
+    maximumActive = Math.max(maximumActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    if (options.method === "POST") { name = JSON.parse(options.body).name; }
+    active--;
+    return new Response(JSON.stringify({ name }), {
+      status: options.method === "POST" ? 201 : 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  const access = await browserAccess(t, state);
+  const readRoute = () => browserRoute(state, {
+    method: () => "GET", headers: () => ({}), postData: () => null
+  });
+  const reads = [readRoute(), readRoute(), readRoute()];
+  await Promise.all(reads.map((route) => forwardApprovedBrowserRequest(route, {
+    environment: "PPE", purpose: "Load approved PPE records."
+  })));
+  assert.equal(maximumActive, 1);
+  assert.equal(JSON.parse(reads[0].fulfilled[0].body).name, "original");
+  const write = browserRoute(state);
+  await forwardApprovedBrowserRequest(write, { environment: "PPE", purpose: state.args.purpose });
+  const verify = readRoute();
+  const result = await forwardApprovedBrowserRequest(verify, {
+    environment: "PPE", purpose: "Verify the approved saved PPE record."
+  });
+  assert.equal(JSON.parse(verify.fulfilled[0].body).name, state.args.payload.name);
+  assert.deepEqual(state.requests.map(({ options }) => options.method), ["GET", "GET", "GET", "POST", "GET"]);
+  assert.equal(state.requests[0].options.body, undefined);
+  assert.equal(state.requests[0].options.headers.Authorization, "Bearer synthetic-value");
+  assert.equal(result.source, "non-production-read-only");
+  assert.equal(result.mutationMode, "none");
+  assert.equal(result.validationPassed, false);
+  assert.equal(result.responseBodyReturned, false);
+  for (const change of [
+    { method: () => "GET" },
+    { method: () => "HEAD", postData: () => null },
+    { url: () => "https://api.dev.example.test/records" },
+    { url: () => "https://api.ppe.example.test.evil.invalid/records" }
+  ]) {
+    const invalid = browserRoute(state, change);
+    await assert.rejects(forwardApprovedBrowserRequest(invalid, { environment: "PPE", purpose: state.args.purpose }));
+    assert.deepEqual(invalid.aborted, ["blockedbyclient"]);
+  }
+  await assert.rejects(access.browserRequest({ ...state.args, method: "GET" }, state.settings.request), /requires/);
+  assert.equal(state.requests.length, 5);
+  assert.equal(state.prompts.length, 0);
+});
+
+test("slow serialized PPE requests retain their grant when queue time exceeds the dispatch timeout", { timeout: 35000 }, async (t) => {
+  const state = fixture(t);
+  approveOrigins(state, "PPE");
+  state.args.url = "https://api.ppe.example.test/records";
+  let active = 0;
+  let maximumActive = 0;
+  state.settings.request = async (target, options) => {
+    state.requests.push({ target, options });
+    active++;
+    maximumActive = Math.max(maximumActive, active);
+    try {
+      if (state.requests.length <= 2) {
+        await delay(12000, undefined, { signal: options.signal });
+      }
+      return new Response(null, { status: 201 });
+    } finally {
+      active--;
+    }
+  };
+  const access = await browserAccess(t, state);
+  const routes = [browserRoute(state), browserRoute(state)];
+  await Promise.all(routes.map(route => forwardApprovedBrowserRequest(route, {
+    environment: "PPE", purpose: state.args.purpose
+  })));
+  assert.equal(maximumActive, 1);
+  assert.ok(routes.every(route => route.fulfilled.length === 1 && route.aborted.length === 0));
+  await access.tool.handler({ ...state.args, method: "POST" });
+  assert.equal(state.requests.length, 3);
+});
+
+test("an unsuccessful PPE browser read revokes queued writes without retry or broadening POST-only grants", async (t) => {
+  const state = fixture(t);
+  approveOrigins(state, "PPE");
+  state.args.url = "https://api.ppe.example.test/records";
+  state.settings.request = async (target, options) => {
+    state.requests.push({ target, options });
+    return new Response(null, { status: 500 });
+  };
+  const access = await browserAccess(t, state);
+  const results = await Promise.allSettled([
+    forwardApprovedBrowserRequest(browserRoute(state, {
+      method: () => "GET", headers: () => ({}), postData: () => null
+    }), { environment: "PPE", purpose: "Read approved PPE records." }),
+    forwardApprovedBrowserRequest(browserRoute(state), { environment: "PPE", purpose: state.args.purpose })
+  ]);
+  assert.deepEqual(results.map(({ status }) => status), ["rejected", "rejected"]);
+  assert.deepEqual(state.requests.map(({ options }) => options.method), ["GET"]);
+  await assert.rejects(access.tool.handler({ ...state.args, method: "POST" }), /approval has stopped/);
+});
+
+for (const environment of ["DEV", "PPE"]) {
+test(`PPE journey helpers cannot expand ${environment} POST-only grants to GET or PUT`, async (t) => {
+  const state = fixture(t);
+  approvePostBase(state, environment);
+  state.args.url = `${state.postBase}/records`;
+  const access = await browserAccess(t, state);
+  assert.equal(access.browserRequest, null);
+  for (const method of ["GET", "PUT"]) {
+    await assert.rejects(forwardApprovedBrowserRequest(browserRoute(state, {
+      method: () => method, headers: () => ({}), postData: () => null
+    }), { environment, purpose: state.args.purpose }));
+  }
+  assert.equal(state.requests.length, 0);
+});
+}
+
+for (const environment of ["DEV", "SIT", "UAT", "PPE"]) {
+test(`browser POST relay enforces ${environment} API bases and rejects mismatched jobs, methods and environments`, async (t) => {
+  const state = fixture(t);
+  approvePostBase(state, environment);
+  state.args.url = `${state.postBase}/items`;
+  await browserAccess(t, state);
+  await forwardApprovedBrowserPost(browserRoute(state), { environment, purpose: state.args.purpose });
+  assert.equal(state.requests.length, 1);
+  for (const change of ["method", "destination", "environment", "job", "key", "debug"]) {
+    const previousKey = process.env.FIXLAB_BROWSER_POST_KEY;
+    const previousJob = process.env.FIXLAB_BROWSER_POST_JOB;
+    const route = browserRoute(state, change === "method" ? { method: () => "PUT" } :
+      change === "destination" ? { url: () => `${state.postBase}-other/items` } : {});
+    try {
+      if (change === "job") { process.env.FIXLAB_BROWSER_POST_JOB = "22222222-2222-4222-8222-222222222222"; }
+      if (change === "key") { process.env.FIXLAB_BROWSER_POST_KEY = "0".repeat(64); }
+      if (change === "debug") { process.env.NODE_DEBUG = "http"; }
+      await assert.rejects(forwardApprovedBrowserPost(route, {
+        environment: change === "environment" ? "PROD" : environment, purpose: state.args.purpose
+      }));
+      assert.deepEqual(route.aborted, ["blockedbyclient"], change);
+    } finally {
+      process.env.FIXLAB_BROWSER_POST_KEY = previousKey;
+      process.env.FIXLAB_BROWSER_POST_JOB = previousJob;
+      delete process.env.NODE_DEBUG;
+    }
+  }
+  assert.equal(state.requests.length, 1);
+});
+}
+
+test("browser and native POST share failure revocation and changed helper/profile rejection", async (t) => {
+  for (const failure of ["http", "ambiguous", "oversized-response", "helper", "profile", "stopped"]) {
+    const state = fixture(t);
+    approvePostBase(state, "DEV");
+    state.args.url = `${state.postBase}/items`;
+    let attempts = 0;
+    let ready = true;
+    state.settings.isReady = () => ready;
+    state.settings.request = async () => {
+      attempts++;
+      if (failure === "ambiguous") { throw new Error("private-upstream-error"); }
+      return new Response(failure === "oversized-response" ? "x".repeat(1024 * 1024 + 1) : null,
+        { status: 302 });
+    };
+    const access = createNonProductionPostAccess(state.settings);
+    const bridge = await startBrowserPostBridge({
+      send: access.browserPost, revoke: access.revoke, jobId: state.settings.jobId, environment: "dev",
+      request: state.settings.request
+    });
+    try {
+      if (failure === "helper") { writeFileSync(state.helper, `${readFileSync(state.helper, "utf8")}\n`); }
+      if (failure === "profile") { state.profile.name = "Changed"; state.save(); }
+      if (failure === "stopped") { ready = false; }
+      const route = browserRoute(state);
+      await assert.rejects(forwardApprovedBrowserPost(route, { environment: "DEV", purpose: state.args.purpose }),
+        /Browser POST failed:/u);
+      await assert.rejects(access.tool.handler(state.args), /stopped|changed|shutdown/u);
+      assert.equal(attempts, ["http", "ambiguous", "oversized-response"].includes(failure) ? 1 : 0, failure);
+      assert.equal(route.fulfilled.length, 0);
+    } finally {
+      await bridge.close();
+    }
+  }
+});
+
+test("native and browser POST cannot race one approved attempt and closing the relay revokes both", async (t) => {
+  const state = fixture(t);
+  approvePostBase(state, "DEV");
+  state.args.url = `${state.postBase}/items`;
+  let release;
+  let started;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const entered = new Promise((resolve) => { started = resolve; });
+  let attempts = 0;
+  state.settings.request = async () => {
+    attempts++;
+    started();
+    await pending;
+    return new Response(null, { status: 201 });
+  };
+  const access = createNonProductionPostAccess(state.settings);
+  const bridge = await startBrowserPostBridge({
+    send: access.browserPost, revoke: access.revoke, jobId: state.settings.jobId,
+    environment: "dev", request: state.settings.request
+  });
+  try {
+    const operation = forwardApprovedBrowserPost(browserRoute(state), {
+      environment: "DEV", purpose: state.args.purpose
+    });
+    await entered;
+    await assert.rejects(access.tool.handler(state.args), /in-flight/u);
+    release();
+    await operation;
+    assert.equal(attempts, 1);
+  } finally {
+    release();
+    await bridge.close();
+  }
+  await assert.rejects(access.tool.handler(state.args), /approval has stopped/u);
+  await assert.rejects(forwardApprovedBrowserPost(browserRoute(state), {
+    environment: "DEV", purpose: state.args.purpose
+  }));
+  assert.equal(attempts, 1);
+});
+
+test("browser POST channel exists only with fresh configured job consent and never after session shutdown", async (t) => {
+  const state = fixture(t);
+  assert.equal(createNonProductionPostAccess(state.settings).browserPost, null);
+  const before = process.env.FIXLAB_BROWSER_POST_URL;
+  approvePostBase(state, "DEV");
+  state.args.url = `${state.postBase}/items`;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = state.settings.request;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let inherited;
+  await runCopilotSession({
+    repository: state.repository, sessionId: state.settings.jobId, targetEnvironment: "DEV",
+    allowPostRequests: true, postWriteApproval: state.settings.postWriteApproval,
+    testMutationMode: "approved-write", prompt: "Verify the synthetic browser POST."
+  }, {
+    output() {}, async ask() { assert.fail("Current job consent must not prompt again"); },
+    client: {
+      async start() { inherited = process.env.FIXLAB_BROWSER_POST_URL; },
+      async createSession() {
+        return {
+          rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
+          async sendAndWait({ prompt }) {
+            assert.match(prompt, /forwardApprovedBrowserPost/u);
+            assert.equal(prompt.includes(process.env.FIXLAB_BROWSER_POST_KEY), false);
+            await forwardApprovedBrowserPost(browserRoute(state), { environment: "DEV", purpose: state.args.purpose });
+          }
+        };
+      },
+      async stop() { return []; }
+    }
+  });
+  assert.match(inherited, /^http:\/\/127\.0\.0\.1:\d+\/post$/u);
+  assert.equal(process.env.FIXLAB_BROWSER_POST_URL, before);
+  assert.equal(state.requests.length, 1);
+  await assert.rejects(forwardApprovedBrowserPost(browserRoute(state), { environment: "DEV", purpose: state.args.purpose }));
+});
+
+test("a replacement unchecked executor cannot inherit another job's browser POST channel", async (t) => {
+  const state = fixture(t);
+  approvePostBase(state, "DEV");
+  state.args.url = `${state.postBase}/items`;
+  await browserAccess(t, state);
+  assert.ok(process.env.FIXLAB_BROWSER_POST_URL);
+  await runCopilotSession({
+    repository: state.repository, sessionId: "22222222-2222-4222-8222-222222222222",
+    targetEnvironment: "DEV", allowPostRequests: false, prompt: "No write consent."
+  }, {
+    output() {}, async ask() { assert.fail("No action is requested"); },
+    client: {
+      async start() { assert.equal(process.env.FIXLAB_BROWSER_POST_URL, undefined); },
+      async createSession() {
+        return {
+          rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
+          async sendAndWait({ prompt }) {
+            assert.equal(prompt.includes("private job-bound relay"), false);
+            await assert.rejects(forwardApprovedBrowserPost(browserRoute(state), {
+              environment: "DEV", purpose: state.args.purpose
+            }));
+          }
+        };
+      },
+      async stop() { return []; }
+    }
+  });
+  assert.equal(state.requests.length, 0);
+});
+
+for (const environment of ["DEV", "SIT", "UAT", "PPE"]) {
+test(`${environment} POST-only approval accepts all scoped paths without granting other methods or shared-host environments`, async (t) => {
+  const state = fixture(t);
+  writeFileSync(state.helper, `export async function withApiToken(options, run) {
+    if (options.environment !== "${environment.toLowerCase()}") { throw new Error("Wrong authentication environment"); }
+    await run("synthetic-value");
+  }\n`);
+  delete state.profile.browserAutomation.dataSafety.devPost;
+  const tool = approvePostBase(state, environment);
+  assert.equal(tool.name, "fixlab_nonproduction_post");
+  assert.equal(tool.parameters.properties.method, undefined);
+  for (const [path, payload] of [
+    ["queries/search", { filters: [] }], ["items/create", { name: "ANY_PPE_RECORD" }],
+    ["items/submit", [{ id: "ordinary-record" }]], ["actions/refresh", undefined]
+  ]) {
+    const result = await tool.handler({ url: `${state.postBase}/${path}`,
+      purpose: "Verify explicitly approved POST.", ...(payload === undefined ? {} : { payload }) });
+    assert.equal(result.method, "POST");
+    assert.equal(result.validationPassed, false);
+    assert.equal(result.responseBodyReturned, false);
+  }
+  assert.equal(state.prompts.length, 0);
+  for (const method of ["GET", "PUT", "PATCH", "DELETE"]) {
+    await assert.rejects(tool.handler({ ...state.args, url: `${state.postBase}/items`, method }),
+      /requires/u);
+  }
+  for (const url of ["https://api.shared.example.test/api/prod/v1/items",
+    `https://api.shared.example.test/api/${environment === "DEV" ? "sit" : "dev"}/v1/items`,
+    `${state.postBase}-other/items`, `${state.postBase}/..%2f..%2fprod/items`,
+    `${state.postBase}/%252e%252e/prod`, "https://other.api.shared.example.test/items",
+    "http://api.shared.example.test/items"]) {
+    await assert.rejects(tool.handler({ ...state.args, url }), /approved .* API bases/u);
+  }
+  assert.equal(state.requests.length, 4);
+  assert.ok(state.requests.every(({ options }) => options.method === "POST" && options.redirect === "manual"));
+});
+}
+
+test("all-POST setup rejects missing, ambiguous or production API bases before approval", (t) => {
+  const state = fixture(t);
+  approvePostBase(state, "SIT");
+  const configuration = state.profile.browserAutomation.dataSafety.post.sit;
+  for (const baseUrls of [
+    [], ["https://api.shared.example.test/api/uat/v1"],
+    ["https://api.uat.example.test/api/sit/v1"],
+    ["https://api.shared.example.test/api/prod/sit"],
+    ["http://api.shared.example.test/api/sit/v1"],
+    ["https://user@api.shared.example.test/api/sit/v1"],
+    ["https://api.shared.example.test/api/sit/v1?anything=true"],
+    ["https://api.shared.example.test/api/sit/%2fprod"],
+    ["https://api.shared.example.test/api/sit/v1/"]
+  ]) {
+    configuration.baseUrls = baseUrls;
+    state.save();
+    assert.throws(() => createPostBaseApproval(state.repository, "SIT", state.settings.jobId),
+      /base URLs|POST API bases/u);
+  }
+  delete configuration.baseUrls;
+  state.save();
+  assert.throws(() => createPostBaseApproval(state.repository, "SIT", state.settings.jobId), /Configure.*baseUrls/u);
+});
+
+test("POST API bases normalize environment labels before rejecting conflicting destinations", (t) => {
+  for (const [environment, accepted, rejected] of [
+    ["PPE", ["https://api.shared.example.test/api/PPE/v1",
+      "https://api.shared.example.test/api/PPE-v1"], [
+      "https://api.ppe.example.test/api/SIT/v1",
+      "https://api.development.example.test/api/ppe/v1",
+      "https://api.ppe.example.test/api/Development/v1",
+      "https://api.ppe.example.test/api/sit-v1",
+      "https://api.ppe.example.test/api/dev_v1",
+      "https://api.ppe.example.test/api/Development.v1"
+    ]],
+    ["DEV", ["https://api.development.example.test/api/DEV/v1",
+      "https://api.shared.example.test/api/Development/v1",
+      "https://api.shared.example.test/api/dev_v1"], [
+      "https://api.development.example.test/api/PPE/v1",
+      "https://api.dev.example.test/api/ppe-v1"
+    ]]
+  ]) {
+    const state = fixture(t);
+    approvePostBase(state, environment);
+    const configuration = state.profile.browserAutomation.dataSafety.post[environment.toLowerCase()];
+    for (const base of accepted) {
+      configuration.baseUrls = [base];
+      state.save();
+      assert.doesNotThrow(() => createPostBaseApproval(state.repository, environment, state.settings.jobId), base);
+    }
+    for (const base of rejected) {
+      configuration.baseUrls = [base];
+      state.save();
+      assert.throws(() => createPostBaseApproval(state.repository, environment, state.settings.jobId),
+        /POST API bases/u, base);
+    }
+  }
+});
+
+test("PPE POST-only approval requires fresh matching job, configuration and execution consent", async (t) => {
+  for (const change of ["job", "environment", "unchecked", "profile", "helper", "removed"]) {
+    const state = fixture(t);
+    const tool = approvePostBase(state);
+    if (change === "job") { state.settings.jobId = "22222222-2222-4222-8222-222222222222"; }
+    if (change === "environment") { state.settings.targetEnvironment = "DEV"; }
+    if (change === "unchecked") { state.settings.allowPostRequests = false; }
+    if (["job", "environment", "unchecked"].includes(change)) {
+      assert.throws(state.tool, /Invalid job-scoped/u);
+      continue;
+    }
+    if (change === "profile") { state.profile.name = "Changed"; }
+    if (change === "helper") { writeFileSync(state.helper, `${readFileSync(state.helper, "utf8")}\n`); }
+    if (change === "removed") { delete state.profile.browserAutomation.dataSafety.post.ppe; }
+    state.save();
+    await assert.rejects(tool.handler({ ...state.args, url: `${state.postBase}/items` }),
+      /changed|not configured/u);
+    assert.equal(state.requests.length, 0);
+  }
+});
+
+test("PPE POST-only approval stops after an unsuccessful request without following redirects", async (t) => {
+  const state = fixture(t, { request: async () => new Response(null, { status: 302 }) });
+  const tool = approvePostBase(state);
+  const args = { ...state.args, url: `${state.postBase}/items` };
+  await assert.rejects(tool.handler(args), /HTTP 302.*Approval is spent/u);
+  await assert.rejects(tool.handler(args), /approval has stopped/u);
+});
 
 test("broad DEV approval supports every write method and any record/path only on exact reviewed origins", async (t) => {
   const state = fixture(t);
@@ -170,13 +670,13 @@ test("broad DEV approval stops after redirects and failed or ambiguous writes", 
   }
 });
 
-test("PPE origin grants permit CRUD but never accept DEV grants, mixed hosts or another environment", async (t) => {
+test("PPE origin grants permit GET and CRUD but never accept DEV grants, mixed hosts or another environment", async (t) => {
   const state = fixture(t);
   state.args.url = "https://api.ppe.example.test/records";
   const tool = approveOrigins(state, "PPE");
   assert.equal(tool.name, "fixlab_ppe_write");
-  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
-    const result = await tool.handler({ ...state.args, method });
+  for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) {
+    const result = await tool.handler({ ...state.args, ...(method === "GET" ? { payload: undefined } : {}), method });
     assert.equal(result.environment, "PPE");
     assert.equal(result.method, method);
     assert.equal(result.validationPassed, false);
@@ -196,14 +696,20 @@ test("PPE origin grants permit CRUD but never accept DEV grants, mixed hosts or 
     state.save();
     assert.throws(() => createPpeWriteApproval(state.repository, "PPE", jobId), /PPE.*origins/u);
   }
-  assert.equal(state.requests.length, 4);
+  assert.equal(state.requests.length, 5);
 });
 
-for (const environment of ["DEV", "PPE"]) {
-test(`native SDK consumes broad ${environment} approval and expires it on executor shutdown`, async (t) => {
+for (const [environment, postOnly] of [["DEV", false], ["PPE", false], ["PPE", true]]) {
+test(`native SDK consumes ${environment} ${postOnly ? "POST-only" : "broad"} approval and expires it on executor shutdown`, async (t) => {
   const state = fixture(t);
   state.args.url = `https://api.${environment.toLowerCase()}.example.test/items`;
-  approveOrigins(state, environment);
+  if (postOnly) {
+    approvePostBase(state, environment);
+    state.args.url = `${state.postBase}/items`;
+  } else {
+    approveOrigins(state, environment);
+  }
+  const args = { ...state.args, ...(postOnly ? {} : { method: "PUT" }) };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = state.settings.request;
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -219,19 +725,27 @@ test(`native SDK consumes broad ${environment} approval and expires it on execut
       async start() {},
       async createSession(options) {
         exposedTool = options.tools[0];
-        assert.equal(exposedTool.name, `fixlab_${environment.toLowerCase()}_write`);
+        assert.equal(exposedTool.name, postOnly ? "fixlab_nonproduction_post" : `fixlab_${environment.toLowerCase()}_write`);
         return {
           rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
-          async sendAndWait() {
-            await exposedTool.handler({ ...state.args, method: "PUT" });
+          async sendAndWait({ prompt }) {
+            await exposedTool.handler(args);
+            if (environment === "PPE" && !postOnly) {
+              assert.match(prompt, /complete read\/write browser journeys through forwardApprovedBrowserRequest/);
+              const route = browserRoute(state, {
+                method: () => "GET", headers: () => ({}), postData: () => null
+              });
+              await forwardApprovedBrowserRequest(route, { environment, purpose: "Verify approved PPE data." });
+              assert.equal(route.fulfilled[0].status, 201);
+            }
           }
         };
       },
       async stop() { return []; }
     }
   });
-  await assert.rejects(exposedTool.handler({ ...state.args, method: "PUT" }), /policy.*shutdown/u);
-  assert.equal(state.requests.length, 1);
+  await assert.rejects(exposedTool.handler(args), /policy.*shutdown/u);
+  assert.equal(state.requests.length, environment === "PPE" && !postOnly ? 2 : 1);
 });
 }
 

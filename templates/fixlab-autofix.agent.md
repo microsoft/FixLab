@@ -26,6 +26,19 @@ pull-request policy. If the profile is absent or does not describe the affected
 component, stop and explain that `fixlab init` or a profile update is required.
 Do not invent repository commands or silently widen the component boundary.
 
+Scenario-first validation: execute the requested feature journey with
+expected-versus-observed assertions, not a setup check, sign-in or screenshot alone.
+Write/reuse one parameterized deterministic Playwright script as a discoverable .spec
+file in a job-owned folder under configured testDir; honor testMatch/project; repair its syntax/selectors.
+Verify --list before execution; report file path, runner command and assertion results.
+Try permitted live reads first; if unavailable or no safe records, use approved
+synthetic/intercepted data only under profile/mutation policy and label synthetic UI coverage separately.
+Preserve live blockers; no fake HTML, sign-in or guard bypass.
+Continue independent scenarios despite unrelated PR/build/setup blockers;
+never use another checkout to prove an unpublished fix.
+Finish independent scenarios before asking for dependent prerequisites.
+API-only, unit-only and explicitly deferred checks keep their contracts.
+
 Prefer reviewable repository-owned transient tests and configured runner commands
 over oversized inline scripts. Keep credentials inside existing reviewed
 authentication helpers. After a denial, never replay, encode, conceal, split or
@@ -48,6 +61,9 @@ Legacy DEV `fixlab_dev_post` and `dataSafety.devPost` remain supported.
 Native Copilot DEV/PPE: separate consent enables
 fixlab_dev_write/fixlab_ppe_write POST/PUT/PATCH/DELETE on
 dataSafety.devWrite/ppeWrite HTTPS origins, any record; job guards.
+Native Copilot POST-only consent: fixlab_nonproduction_post covers any POST
+path/record within reviewed dataSafety.post environment baseUrls; job guards,
+no repeat prompts.
 
 Explicit unverified draft: when deferValidation is true, create or update the
 authorized DRAFT PR after implementing and reviewing the nonempty diff,
@@ -94,22 +110,20 @@ environments, explicit read-only/intercepted selections, API-only read-only cont
 remain unchanged. If the tool or its prerequisites are unavailable, block that
 action; never substitute a shell/browser POST for a write or relax the profile.
 
-Verified read-only POST searches: approved DEV/PPE browser reads cover all
-verified read-only queries, not just one feature. Installation/onboarding
-configures guards from query contracts and implementation proving no
-business/workflow mutation. Match the exact approved environment, origin and
-path and supported payload, including redirects. Include GET/HEAD/OPTIONS and
-verified POST searches; method or route names alone prove nothing. Use
-existing authenticated helpers and genuine returned records, even with
-intercepted writes. Missing scope is a policy blocker, not backend
-unavailability: during authorized setup, repair the adapter for the approved
-DEV/PPE read scope and test its guards without repeated per-query approval.
-Otherwise request scoped review. Do not silently substitute synthetic data,
-remove guards or grant writes. Read-only jobs must not edit configuration;
-changed helpers require a fresh reviewed job. Keep Save, Submit, Approve and
-autosave behind write controls; identity-only proof stays query-disabled.
-Never override synthetic-only, API-only, unit-only or production policy;
-synthetic evidence is not live integration.
+Verified read-only POST searches: Cover the full verified query scope for
+approved DEV/PPE reads. Contracts/implementation must prove no business/workflow
+mutation; names/verbs do not. Match the exact approved environment, origin and
+path and supported payload, including redirects. Use existing authenticated
+helpers and genuine returned records for GET/HEAD/OPTIONS and verified POSTs,
+including intercepted-write jobs. Missing scope is a policy blocker, not
+backend unavailability. Offer fixlab setup-queries REPOSITORY --environment ENV
+--runtime RUNTIME as a separate plan-first setup operation: reviewed --yes
+permits adapter/policy repairs and offline guard tests only, not product edits
+or business calls. Read-only jobs must not edit configuration; changed helpers
+need a fresh reviewed job. Do not silently substitute synthetic data, remove
+guards or grant writes. Keep Save/Submit/Approve/autosave write-controlled;
+identity-only proof query-disabled. Never override synthetic-only, API-only,
+unit-only or production policy; synthetic evidence is not live integration.
 
 New installation profiles set `browserAutomation.testSynthesis.devReadOnly:
 true` and `ppeReadOnly: true`. Selecting DEV/development or PPE resolves the
@@ -148,6 +162,29 @@ startup, authentication, API requests or remote database access. This overrides
 live/browser instructions. Mark local-stack and live-test skipped using
 `validation.liveTestsDeferredReason`, never passed; retain required local gates,
 PR approvals and CI/merge policies. Do not claim integration coverage.
+
+Portal browser evidence must use `page.screenshot({ path, fullPage: true })` to
+capture the full page, not only the viewport or an element. Default to unmasked
+full-page screenshots of approved portal pages. Do not blanket-mask the page or
+ask again for default screenshot capture. Close-ups supplement, not replace,
+full-page evidence. If an existing journey captures only crops, add capture in a
+job-owned transient wrapper; preserve the original test, shared configuration
+and guards. Normal runtime permissions remain required.
+Explicit repository privacy rules and genuinely sensitive content still require
+protection; never capture credentials, sign-in/MFA screens or private/customer
+data. Keep evidence local; external sharing needs separate approval.
+API-only and unit-test-only runs require no browser screenshot.
+
+By default, capture a numbered journey per scenario in repository-owned
+test-results: entry/search, mode selection, input/import preview, and verified
+result (01-search.png, 02-input.png, etc.), not just a final grid. Keep static
+labels and approved test values readable; do not mask unrelated page regions
+merely because capture is full-page. For imports, compute SHA-256 from the exact
+bytes passed to the upload; retain only policy-approved inputs, filename/digest, and a labeled
+safe preview of those same bytes. Compare expected versus observed values after
+assertions. Never fabricate application screens; report incomplete evidence if
+masking hides required values. Save/Submit and persistence remain unverified
+unless separately authorized and asserted.
 
 When `browserAutomation.mode` is `api`, validate the backend with Playwright
 `APIRequestContext`, not a frontend or browser. This overrides browser-only
