@@ -235,7 +235,7 @@ export function validatePort(value) {
   return port;
 }
 
-export function validateLiveTestProfile(profile, repository) {
+function validateProfile(profile, repository, requireAuthentication) {
   const missing = [];
   let gates;
   if (repository) {
@@ -353,7 +353,7 @@ export function validateLiveTestProfile(profile, repository) {
         authentication.statusPaths.some((value) => !requiredString(value))
       ) {
         missing.push("browserAutomation.authentication.statusPaths");
-      } else if (repository) {
+      } else if (repository && requireAuthentication) {
         const authenticationRoot = resolve(
           repository,
           browserAutomation.workingDirectory
@@ -448,6 +448,14 @@ export function validateLiveTestProfile(profile, repository) {
         ? `${apiOnly ? "API-only backend" : "startup"}, health, Playwright, authentication, and data-safety settings configured`
         : `missing or invalid: ${missing.join(", ")}`
   };
+}
+
+export function validateLiveTestProfile(profile, repository) {
+  return validateProfile(profile, repository, true);
+}
+
+export function validateLiveTestConfiguration(profile, repository) {
+  return validateProfile(profile, repository, false);
 }
 
 export function configuredTestSynthesis(profile, selectedMutationMode = "", allowPostRequests, targetEnvironment = "") {
@@ -1068,6 +1076,7 @@ export function inspectRepository(repository) {
       repository: resolvedRepository,
       repositoryReady: false,
       profileReady: false,
+      configurationReady: false,
       profilePath: join(resolvedRepository, profileRelativePath),
       profileName: null,
       error: "repository does not exist or is not a directory"
@@ -1080,6 +1089,7 @@ export function inspectRepository(repository) {
       repository: resolvedRepository,
       repositoryReady: true,
       profileReady: false,
+      configurationReady: false,
       profilePath,
       profileName: null,
       error: "repository profile is missing; run fixlab init"
@@ -1092,12 +1102,16 @@ export function inspectRepository(repository) {
       throw new Error("profile root must be a JSON object");
     }
     const liveTestProfile = validateLiveTestProfile(profile, resolvedRepository);
+    const configuration = liveTestProfile.ok
+      ? liveTestProfile
+      : validateLiveTestConfiguration(profile, resolvedRepository);
     sharedWorktreeConfig(profile, resolvedRepository);
     if (!liveTestProfile.ok) {
       return {
         repository: resolvedRepository,
         repositoryReady: true,
         profileReady: false,
+        configurationReady: configuration.ok,
         draftOnlyReady: true,
         playwrightMode: profile.browserAutomation?.mode ?? "browser",
         profilePath,
@@ -1114,6 +1128,7 @@ export function inspectRepository(repository) {
       repository: resolvedRepository,
       repositoryReady: true,
       profileReady: true,
+      configurationReady: true,
       unitTestsOnly: profile.validation?.liveTestsRequired === false,
       ppeWriteConfigured: ppeWrites.configured,
       ppeWriteSetupError: ppeWrites.error,
@@ -1133,6 +1148,7 @@ export function inspectRepository(repository) {
       repository: resolvedRepository,
       repositoryReady: true,
       profileReady: false,
+      configurationReady: false,
       profilePath,
       profileName: null,
       error: `repository profile is invalid JSON: ${error.message}`
@@ -5480,7 +5496,7 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
         } else if (body.action === "preview") {
           const plan = planRepositorySettings({
             repository: body.repository, revision: body.revision, values: body.values,
-            install: body.install === true, packageRoot, validate: validateLiveTestProfile
+            install: body.install === true, packageRoot, validate: validateLiveTestConfiguration
           });
           for (const [id, previous] of setupPlans) {
             if (previous.repository === plan.repository) { setupPlans.delete(id); }

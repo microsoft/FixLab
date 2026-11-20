@@ -1772,6 +1772,34 @@ test("session controls reconnect, confirm another owner and resume its stopped j
   }
 });
 
+test("configured clones show sign-in guidance instead of asking to add a repository", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-sign-in-ui-"));
+  let server;
+  try {
+    const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+    profile.browserAutomation.authentication = {
+      required: true, command: "node authenticate.js", statusPaths: [".auth/state.json"]
+    };
+    mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    server = createDashboardServer({ repository: directory, packageRoot });
+    const url = (await server.listen({ port: await availablePort() })).url;
+    await openWorkflowControls(page, url);
+    await page.locator('input[name="mode"][value="playwright-only"]').check();
+    await expect(page.locator("#readiness")).toHaveText("Sign-in required for live validation");
+    await expect(page.locator("#welcome-add-repository")).toBeHidden();
+    await expect(page.locator("#welcome-guidance")).toContainText("Connect Playwright");
+    await expect(page.getByRole("button", { name: "Connect Playwright" })).toBeEnabled();
+    const status = await (await page.request.get(`${url}/api/status`)).json();
+    expect(status.readiness.configurationReady).toBe(true);
+    expect(status.readiness.profileReady).toBe(false);
+    expect(status.job).toBeNull();
+  } finally {
+    await server?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("dashboard exposes repository readiness through the running server", async ({
   page,
   request

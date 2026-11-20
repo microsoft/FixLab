@@ -1491,6 +1491,7 @@ function renderReadiness(readiness) {
     form.querySelector('[name="mode"]:checked')?.value === "fix-and-validate" &&
     form.querySelector('[name="deferValidation"]').checked;
   const ready = readiness.repositoryReady && (readiness.profileReady || draftOnly);
+  const authenticationPending = readiness.configurationReady === true && !readiness.profileReady;
   const apiOnly = readiness.playwrightMode === "api";
   const unitTestsOnly = readiness.unitTestsOnly === true;
   const noUi = apiOnly || unitTestsOnly;
@@ -1520,12 +1521,16 @@ function renderReadiness(readiness) {
   if (apiOnly && mutationSelect?.value === "intercepted") {
     mutationSelect.value = "";
   }
-  document.querySelector("#welcome-add-repository").hidden = ready;
-  document.querySelector("#welcome-guidance").textContent = ready
+  document.querySelector("#welcome-add-repository").hidden = ready || authenticationPending;
+  document.querySelector("#welcome-guidance").textContent = authenticationPending
+    ? "Use Connect Playwright to complete the configured sign-in before live validation."
+    : ready
     ? `Describe a bug, change, or ${unitTestsOnly ? "local unit-test" : apiOnly ? "API" : "browser"} check.`
     : "Set up a repository to get started.";
   readinessElement.className = `readiness ${ready ? "ready" : "blocked"}`;
-  readinessElement.textContent = ready
+  readinessElement.textContent = authenticationPending
+    ? ready ? "Ready for draft work; sign-in required for live validation" : "Sign-in required for live validation"
+    : ready
     ? "Ready"
     : `Not ready: ${readiness.error}`;
   startButton.disabled = !ready;

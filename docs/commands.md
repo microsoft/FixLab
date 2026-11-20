@@ -78,11 +78,33 @@ known and should execute without first entering the interactive conversation.
 fixlab onboard [repository] [--yes] [--authenticate] [--start-dashboard] [--runtime <agency|copilot>]
 ```
 
-The first run creates the repository profile and stops before using generic
-placeholder paths. After the profile is configured, a plan-only run prints the
+The first run reuses `.github/fixlab/repository-profile.example.json` when the
+repository supplies it, copying it unchanged to the local
+`repository-profile.json`. Existing local profiles are never overwritten;
+invalid repository examples fail rather than falling back to generic settings.
+Repositories without an example receive the generic profile and stop before
+using placeholder paths. With a repository-owned example or an existing
+configured profile, a plan-only run prints the
 repository-owned restore and Playwright commands. `--yes` approves those
 commands, `--authenticate` runs the repository-owned interactive browser login,
 and `--start-dashboard` starts the dashboard only after Doctor passes.
+
+Direct `fixlab dashboard <repository>` also activates a repository-owned example
+when the local profile is absent. Opening the dashboard does not restore
+dependencies, start applications or jobs, sign in, or grant data/tool access.
+It creates only the local profile, not additional repository agent/prompt files.
+
+For first-time dependency setup, run
+`fixlab dashboard <repository> --prepare` to review the restore and Playwright
+plan. Add `--yes --open` to run it and then open the dashboard. Preparation holds
+the repository's execution lease and stops on any failed command or verification;
+it never starts applications, authentication, or a job. An optional
+`validation.commands.browserRestore` runs in the configured browser directory,
+allowing repositories to restore their locked browser dependencies before the
+existing Playwright readiness check.
+Setup validates configuration without requiring an existing sign-in, so a
+fresh clone can be prepared first. The dashboard reports pending authentication
+separately; live-profile validation and execution still require authentication.
 
 `fixlab init` installs these prompt files under `.github/prompts` without
 overwriting repository-owned versions.

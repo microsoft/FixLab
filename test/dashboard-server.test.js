@@ -44,6 +44,7 @@ import {
   openLocalUrl,
   normalizeEngineeringSummary,
   validateCopilotModel,
+  validateLiveTestConfiguration,
   validateLiveTestProfile
 } from "../dashboard/server.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
@@ -911,6 +912,45 @@ function validProfile(overrides = {}) {
     ...overrides
   };
 }
+
+test("configuration readiness does not require sign-in but live validation still does", async () => {
+  const repository = createGitRepository();
+  let dashboard;
+  try {
+    const profile = validProfile();
+    profile.browserAutomation.authentication = {
+      required: true, command: "node authenticate.js", statusPaths: [".auth/state.json"]
+    };
+    writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    const pending = inspectRepository(repository);
+    assert.equal(pending.configurationReady, true);
+    assert.equal(pending.profileReady, false);
+    assert.match(pending.error, /authentication is not ready/);
+    assert.equal(validateLiveTestConfiguration(profile, repository).ok, true);
+    assert.equal(validateLiveTestProfile(profile, repository).ok, false);
+    const started = await startDashboard(repository, () => assert.fail("Setup must not start an executor"));
+    dashboard = started.dashboard;
+    const instanceId = (await jsonRequest(started.url, "/api/status")).body.instanceId;
+    const configure = (body) => jsonRequest(started.url, "/api/repository/configuration", {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: started.url },
+      body: JSON.stringify({ instanceId, ...body })
+    });
+    const settings = (await configure({ action: "inspect" })).body;
+    const preview = await configure({ action: "preview", repository, revision: settings.revision,
+      values: { ...settings.values, name: "Reviewed before sign-in" }, install: false });
+    assert.equal(preview.response.status, 200, preview.body.error);
+    assert.equal(inspectRepository(repository).profileReady, false);
+    const unsafe = structuredClone(profile);
+    unsafe.browserAutomation.dataSafety.productionAllowed = true;
+    assert.equal(validateLiveTestConfiguration(unsafe, repository).ok, false);
+    mkdirSync(join(repository, ".auth"), { recursive: true });
+    writeFileSync(join(repository, ".auth", "state.json"), "{}");
+    assert.equal(inspectRepository(repository).profileReady, true);
+  } finally {
+    await dashboard?.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
 
 test("dashboard readiness blocks a missing explicit Playwright configuration", () => {
   const repository = createRepository();

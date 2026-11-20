@@ -3,8 +3,10 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  constants,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -57,12 +59,18 @@ import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDe
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
 import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand } from "../dashboard/issue-plans.js";
 import { runSessionRecoveryCommand } from "../dashboard/session-recovery.js";
+import { createExecutorLease } from "../dashboard/executor-lease.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
   ".github",
   "fixlab",
   "repository-profile.json"
+);
+const profileExampleRelativePath = join(
+  ".github",
+  "fixlab",
+  "repository-profile.example.json"
 );
 const promptNames = REPOSITORY_PROMPT_NAMES;
 const vscodeAgentName = "fixlab-autofix.agent.md";
@@ -110,7 +118,7 @@ Usage:
   fixlab watch-review [repository] --ticket <id>
   fixlab watch-recover [repository] --ticket <id> --decision <accept|retry|leave> --review-token <value> --yes
   fixlab validate [repository] --pr <number> [--runtime <agency|copilot>] [--model <model>]
-  fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--runtime <agency|copilot>] [--model <model>]
+  fixlab dashboard [repository] [--prepare [--yes]] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--runtime <agency|copilot>] [--model <model>]
   fixlab chat [repository] [--port <number>] [--runtime <agency|copilot>] [--model <model>]
   fixlab keep-awake --minutes <minutes>
   fixlab --help
@@ -482,7 +490,7 @@ function checkPlaywright(repository, profile) {
   return { packageCheck, browserCheck };
 }
 
-function init(repository) {
+function initializeProfile(repository) {
   const destination = join(repository, profileRelativePath);
   let created = 0;
   if (existsSync(destination)) {
@@ -503,15 +511,38 @@ function init(repository) {
       );
     }
   } else {
+    const examplePath = join(repository, profileExampleRelativePath);
+    const example = lstatSync(examplePath, { throwIfNoEntry: false });
+    let templatePath = join(packageRoot, "templates", "repository-profile.json");
+    if (example) {
+      if (!example.isFile()) {
+        throw new Error(`Repository profile example must be a regular file: ${examplePath}`);
+      }
+      const contents = readFileSync(examplePath, "utf8");
+      let profile;
+      try {
+        profile = JSON.parse(contents);
+      } catch (error) {
+        throw new Error(`Repository profile example is not valid JSON: ${examplePath}`, { cause: error });
+      }
+      if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
+        throw new Error(`Repository profile example must contain a JSON object: ${examplePath}`);
+      }
+      templatePath = examplePath;
+    }
     mkdirSync(dirname(destination), { recursive: true });
-    copyFileSync(
-      join(packageRoot, "templates", "repository-profile.json"),
-      destination
-    );
+    copyFileSync(templatePath, destination, constants.COPYFILE_EXCL);
     console.log(`Created ${destination}`);
+    if (example) {
+      console.log(`Reused repository-owned profile example: ${examplePath}`);
+    }
     created += 1;
   }
+  return created;
+}
 
+function init(repository) {
+  let created = initializeProfile(repository);
   const promptDirectory = join(repository, ".github", "prompts");
   mkdirSync(promptDirectory, { recursive: true });
   for (const promptName of promptNames) {
@@ -741,7 +772,8 @@ function prepare(repository, approved) {
   const commands = profile.validation?.commands ?? {};
   const steps = [
     ["frontend", commands.frontendRestore],
-    ["backend", commands.backendRestore]
+    ["backend", commands.backendRestore],
+    ["browser", commands.browserRestore]
   ]
     .filter(([, command]) => typeof command === "string" && command.trim())
     .map(([application, command]) => ({
@@ -749,13 +781,16 @@ function prepare(repository, approved) {
       command: command.trim(),
       workingDirectory: resolve(
         repository,
-        profile.applications?.[application]?.workingDirectory ?? "."
+        application === "browser"
+          ? profile.browserAutomation?.workingDirectory ??
+            profile.applications?.frontend?.workingDirectory ?? "."
+          : profile.applications?.[application]?.workingDirectory ?? "."
       )
     }));
 
   if (steps.length === 0) {
     console.error(
-      "Repository profile has no frontendRestore or backendRestore command."
+      "Repository profile has no frontendRestore, backendRestore or browserRestore command."
     );
     printTroubleshooting();
     return 1;
@@ -1271,8 +1306,18 @@ function parseDashboardArguments(args) {
   let port = DEFAULT_DASHBOARD_PORT;
   let open = false;
   let keepAwakeMinutes = 0;
+  let prepareRequested = false;
+  let preparationApproved = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
+    if (argument === "--prepare") {
+      prepareRequested = true;
+      continue;
+    }
+    if (argument === "--yes") {
+      preparationApproved = true;
+      continue;
+    }
     if (argument === "--open") {
       open = true;
       continue;
@@ -1318,11 +1363,16 @@ function parseDashboardArguments(args) {
     }
     repositoryArgument = argument;
   }
+  if (preparationApproved && !prepareRequested) {
+    return { error: "dashboard --yes requires --prepare" };
+  }
   return {
     repository: resolveRepository(repositoryArgument),
     port,
     open,
-    keepAwakeMinutes
+    keepAwakeMinutes,
+    prepareRequested,
+    preparationApproved
   };
 }
 
@@ -1455,7 +1505,7 @@ async function onboard({
   console.log("Optional tagged-ticket defaults: review `fixlab watch` for Agency or Copilot ADO bug/story/feature investigation, draft PRs when code changes are warranted, or Discussion feedback otherwise. Onboarding never starts the watcher or grants publication/tool access.");
   console.log("");
 
-  if (!profileExisted) {
+  if (!profileExisted && !lstatSync(join(repository, profileExampleRelativePath), { throwIfNoEntry: false })) {
     console.log("FixLab created a new example profile.");
     console.log(
       "Update its frontend/backend paths, commands, ports, environments, and authentication settings."
@@ -1577,12 +1627,42 @@ async function dashboard(
   shouldOpen,
   runtime,
   keepAwakeMinutes = 0,
-  model = ""
+  model = "",
+  prepareRequested = false,
+  preparationApproved = false
 ) {
+  if (!existsSync(join(repository, profileRelativePath)) &&
+      lstatSync(join(repository, profileExampleRelativePath), { throwIfNoEntry: false })) {
+    initializeProfile(repository);
+  }
   const readiness = inspectRepository(repository);
   if (!readiness.repositoryReady) {
     console.error(`Cannot start FixLab dashboard: ${readiness.error}`);
     return 1;
+  }
+  if (prepareRequested) {
+    if (!readiness.configurationReady) {
+      console.error(`Cannot prepare FixLab dashboard: ${readiness.error}`);
+      return 1;
+    }
+    const preparationId = randomUUID();
+    const lease = preparationApproved
+      ? createExecutorLease(repository, preparationId).acquire(preparationId)
+      : null;
+    try {
+      for (const step of [prepare, setupPlaywright]) {
+        const result = step(repository, preparationApproved);
+        if (result !== 0) {
+          return result;
+        }
+      }
+    } finally {
+      lease?.release();
+    }
+    if (!preparationApproved) {
+      console.log("No dashboard started. Review the preparation plan and rerun with --prepare --yes.");
+      return 0;
+    }
   }
   const dashboardServer = createDashboardServer({
     repository,
@@ -2121,7 +2201,9 @@ async function main(args) {
       parsed.open,
       runtimeArguments.runtime,
       parsed.keepAwakeMinutes,
-      runtimeArguments.model
+      runtimeArguments.model,
+      parsed.prepareRequested,
+      parsed.preparationApproved
     );
   }
 
