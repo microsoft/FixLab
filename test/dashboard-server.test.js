@@ -4333,8 +4333,8 @@ test("Copilot dashboard retains model defaults, overrides and queue state throug
     }, undefined, { runtime: "copilot", model: "another-model" });
     const recovered = await jsonRequest(current.url, "/api/status");
     assert.equal(recovered.body.job.model, "hydrafusion");
-    assert.equal(recovered.body.history.find((job) => job.id === queued.body.queue[0].id).model, "claude-sonnet-4.5");
-    assert.equal(recovered.body.history.find((job) => job.id === unconfigured.body.queue[1].id).model, "");
+    assert.equal(recovered.body.queue.find((job) => job.id === queued.body.queue[0].id).model, "claude-sonnet-4.5");
+    assert.equal(recovered.body.queue.find((job) => job.id === unconfigured.body.queue[1].id).model, "");
     await post("/api/job/input", { action: "continue", details: "Resume the saved model." });
     assert.equal(calls.at(-1).model, "hydrafusion");
     await current.dashboard.close();

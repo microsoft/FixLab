@@ -607,7 +607,7 @@ test("oversized source edits offer a fresh review only after complete eligibilit
           },
           on() {},
           async sendAndWait() {
-            assert.deepEqual(await options.onPermissionRequest(request), { kind: "reject" });
+            assert.deepEqual(await options.permissions.onRequest(request), { kind: "reject" });
           }
         };
       },
