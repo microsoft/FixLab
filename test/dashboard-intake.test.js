@@ -33,6 +33,7 @@ import { executeTicketAgent, readTicketAutomationHistory, reviewTicketHandoff, r
 import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { ANALYSIS_EVIDENCE_GUIDANCE, analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
+import { safeRuntimeText } from "../dashboard/runtime-requests.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
@@ -762,6 +763,31 @@ test("ticket watcher persists deduplication, ignores its own feedback and respon
   }
 });
 
+test("authorization prose is valid watcher intake without relaxing runtime permission reviews", async () => {
+  const fixture = ticketFixture();
+  const original = structuredClone(fixture.item);
+  try {
+    for (const [field, value] of [
+      ["title", "Authorization fails for the expected user role"],
+      ["description", "Trace the authorization failure through repository code."],
+      ["reproduction", "Open the page and check authorization."],
+      ["acceptanceCriteria", "Correct authorization without expanding access."],
+      ["comments", [{ id: 2, text: "Review authorization and retain the existing role checks." }]]
+    ]) {
+      for (const key of Object.keys(fixture.item)) { delete fixture.item[key]; }
+      Object.assign(fixture.item, structuredClone(original), { [field]: value });
+      let executed = false;
+      await fixture.run({ execute: async ({ request }) => {
+        executed = true;
+        assert.ok(request.includes("authorization") || request.includes("Authorization"));
+        return { outcome: "analysis", summary: "The role-check path was investigated." };
+      } });
+      assert.equal(executed, true);
+    }
+    assert.equal(safeRuntimeText("Trace the authorization failure through repository code."), false);
+  } finally { fixture.cleanup(); }
+});
+
 test("credential-bearing ticket fields and comments never reach executor input or retained diagnostics", async () => {
   const fixture = ticketFixture();
   const original = structuredClone(fixture.item);
@@ -771,6 +797,10 @@ test("credential-bearing ticket fields and comments never reach executor input o
     for (const [field, value] of [
       ["title", `token=${synthetic}`],
       ["description", `Authorization: Basic ${synthetic}`],
+      ["description", `{"Authorization":"Basic ${synthetic}"}`],
+      ["description", `Authorization = ${synthetic}`],
+      ["description", `Authorization&nbsp;&#58;&nbsp;Basic ${synthetic}`],
+      ["description", `Authorization\\u003a Basic ${synthetic}`],
       ["description", `Bearer\t${synthetic}`],
       ["description", `password\n=${synthetic}`],
       ["reproduction", `https://user:${synthetic}@example.invalid/`],
@@ -780,6 +810,8 @@ test("credential-bearing ticket fields and comments never reach executor input o
       ["comments", [{ id: 2, text: `Bearer ${synthetic}` }]],
       ["comments", [{ id: 2, text: `Bearer\n${synthetic}` }]],
       ["comments", [{ id: 2, text: `password\t=\n${synthetic}` }]],
+      ["description", "x".repeat(80 * 1024 + 1)],
+      ["description", "Unsupported\u0001control character"],
       ["comments", [1, 2, 3].map(id => ({ id, text: "Safe discussion." }))
         .concat({ id: 4, text: `password=${synthetic}` })]
     ]) {

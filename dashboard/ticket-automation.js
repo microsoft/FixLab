@@ -138,7 +138,7 @@ function automationScope(plan) {
 }
 
 function safeTicketText(value, limit) {
-  return safeRuntimeText(value, limit) && sanitizeCommandOutput(value) === value &&
+  return safeRuntimeText(value, limit, { allowAuthorizationProse: true }) && sanitizeCommandOutput(value) === value &&
     !/https?:\/\/[^/\s"'<>]+@/iu.test(value);
 }
 

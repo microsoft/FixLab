@@ -30,6 +30,13 @@ acknowledgements without silently rerunning interrupted work. This explicitly
 approved local session is separate from dashboard jobs and normal per-executor
 tool consent. Setup only supplies defaults; it never starts a watcher.
 
+Watcher intake accepts ordinary authorization-related prose so access-control
+defects can be investigated from repository code. This is a ticket-text-only
+classification: authorization headers/assignments (including common encoded
+forms), bearer values, credential assignments/URLs, private keys, control
+characters and oversized input remain blocked before executor handoff.
+Runtime permission reviews retain their stricter default classification.
+
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
 journal through `GET /api/ticket-automation`; reading never starts or changes
 watcher work. Future attempts retain timestamps, safe structured activity and

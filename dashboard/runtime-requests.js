@@ -8,7 +8,9 @@ export function validateToolApprovalMode(value = "ask") {
   }
   return value;
 }
-const secret = /authorization|bearer\s|(?:password|passwd|secret|token|cookie|api[_-]?key)\s*["':=]|(?:gh[pousr]_|github_pat_|eyJ)[A-Za-z0-9_-]{16,}|https?:\/\/[^/\s]+:[^/\s]+@|[?&](?:sig|code|key|access_token|client_secret)=|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
+const credentialValue = /bearer\s|(?:password|passwd|secret|token|cookie|api[_-]?key)\s*["':=]|(?:gh[pousr]_|github_pat_|eyJ)[A-Za-z0-9_-]{16,}|https?:\/\/[^/\s]+:[^/\s]+@|[?&](?:sig|code|key|access_token|client_secret)=|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
+const secret = new RegExp(`authorization|${credentialValue.source}`, credentialValue.flags);
+const authorizationValue = /authorization(?:[\s"'\\]|&(?:nbsp|quot|apos|#(?:34|39|160)|#x(?:22|27|a0));)*(?:[:=]|\\u003[ad]|&(?:colon|equals|#(?:58|61)|#x(?:3a|3d));)|authorization\s+(?:basic|bearer)\b/i;
 const credentialQuestion = /(?:enter|provide|paste|type|share|input|tell|send|copy|what is|what's).{0,80}(?:password|verification code|one.time code|MFA code|access token|cookie|secret)/i;
 const credentialPath = /(?:^|[\\/])(?:\.auth|\.edge-profile|\.ssh|\.aws|\.azure|\.env(?:\.[^\\/]*)?|credentials(?:\.[^\\/]*)?)(?:[\\/]|$)/i;
 const permissionBlockReasons = {
@@ -27,9 +29,11 @@ export const PERMISSION_RECOVERY_GUIDANCE =
   "Human sign-in, managed policy and normal permissions remain required. This grants no new file access, " +
   "external writes or publication. If a safe prerequisite is unavailable, explain the exact blocker and stop that stage.";
 
-export function safeRuntimeText(value, limit = 8192) {
+export function safeRuntimeText(value, limit = 8192, { allowAuthorizationProse = false } = {}) {
   return typeof value === "string" && value.length <= limit &&
-    !secret.test(value) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
+    !(allowAuthorizationProse === true
+      ? credentialValue.test(value) || authorizationValue.test(value) : secret.test(value)) &&
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
 }
 
 export function validateSourceEditReview(value) {
