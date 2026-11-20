@@ -90,7 +90,12 @@ the native SDK transport and its existing interactive publication permissions.
 
 Explicit `--resolve-on-completion` (or reviewed `ticketAutomation.resolveOnCompletion`)
 permits the watcher, not the agent, to set `Resolved` after a separately verified
-draft PR or an analysis with a confirmed cause, evidence and next steps. Feedback
+draft PR, an analysis with a confirmed cause, evidence and next steps, or a logically
+completed story with a finding, evidence and completion reason. The latter applies
+only to User Stories, Features and Product Backlog Items with no ongoing or planned
+implementation; a partial investigation does not establish story completion.
+New Discussion feedback includes `[Fixlab automation]`. Existing pending feedback
+retains its original fingerprint during delivery reconciliation. Feedback
 explains that this is a human-review handoff, not merge/deployment/live-test proof.
 The client checks workflow support, tests the fresh work-item revision in JSON
 Patch and verifies the returned state/project. Unsupported workflows and changed

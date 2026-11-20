@@ -937,6 +937,7 @@ test("readable feedback reconciles uncertain delivery and ignores its truncated 
     await fixture.run({ execute() { assert.fail("Own feedback must not retrigger investigation."); } });
     assert.equal(executions, 1);
     assert.equal(fixture.posted.length, 1);
+    assert.ok(fixture.posted[0].text.startsWith("[Fixlab automation]\n"));
     assert.doesNotMatch(fixture.posted[0].text, /FixLab automation|Outcome:|[a-f0-9]{64}/u);
     assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status, "complete");
   } finally { fixture.cleanup(); }
@@ -966,6 +967,7 @@ test("authentication pauses one ticket while others proceed and explicit restart
     } });
     assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status, "authentication-pending");
     assert.match(fixture.posted[0].text, /--resume-ticket 42/);
+    assert.ok(fixture.posted[0].text.startsWith("[Fixlab automation]\n"));
     assert.doesNotMatch(fixture.posted[0].text, /FixLab automation|Outcome:|[a-f0-9]{64}/u);
     await fixture.run({ execute: async ({ item }) => {
       assert.equal(item.id, 43);
@@ -983,6 +985,32 @@ test("authentication pauses one ticket while others proceed and explicit restart
     assert.equal(history.attempts.length, 2);
     assert.equal(history.attempts.find(entry => entry.workItemId === 42).status, "complete");
     assert.equal(fixture.posted.length, 3);
+  } finally { fixture.cleanup(); }
+});
+
+test("untagged pending feedback from older builds reconciles without changing its fingerprint or reposting", async () => {
+  const fixture = ticketFixture({ readable: true });
+  const commentIds = fixture.client.commentIds;
+  let lookups = 0;
+  try {
+    fixture.client.commentIds = async (...args) => ++lookups < 3 ? commentIds(...args) : [];
+    await assert.rejects(fixture.run({ execute: async () =>
+      ({ outcome: "analysis", summary: "The earlier investigation remains provisional." })
+    }), /read-back is unconfirmed/);
+    const legacyText = fixture.posted[0].text.replace(/^\[Fixlab automation\]\n/u, "");
+    const plain = sanitizeAzureDevOpsHtml(formatAzureDevOpsComment(legacyText));
+    const fingerprint = azureDevOpsCommentFingerprint(plain);
+    fixture.item.comments[0].text = plain;
+    fixture.item.comments[0].contentFingerprint = fingerprint;
+    const path = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const journal = JSON.parse(readFileSync(path, "utf8"));
+    journal.entries[0].feedback.fingerprint = fingerprint;
+    writeFileSync(path, JSON.stringify(journal));
+    fixture.client.commentIds = commentIds;
+    await fixture.run({ execute() { assert.fail("An older pending result must not rerun the investigation."); } });
+    assert.equal(fixture.posted.length, 1);
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status, "complete");
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).entries[0].feedback.fingerprint, fingerprint);
   } finally { fixture.cleanup(); }
 });
 
@@ -1122,6 +1150,46 @@ test("automatic resolution requires an opted-in verified draft or a complete con
   }
   assert.throws(() => ticketOutcome({ outcome: "analysis", summary: "Unproven.", confirmedCause: { cause: "An assumption." } }), /valid bounded/);
   assert.throws(() => ticketOutcome({ outcome: "blocked", summary: "Blocked.", confirmedCause: cause }), /valid bounded/);
+});
+
+test("completed stories resolve only with evidenced findings and the existing opt-in", async () => {
+  const completedStory = {
+    finding: "The supported search behavior matches the documented requirement.",
+    evidence: "The reviewed implementation and successful focused check agree.",
+    reason: "The acceptance criterion is answered; no implementation work remains."
+  };
+  for (const [type, optedIn, expected] of [
+    ["User Story", true, true],
+    ["Product Backlog Item", true, true],
+    ["Feature", true, true],
+    ["User Story", false, false],
+    ["Bug", true, false]
+  ]) {
+    const fixture = ticketFixture({ readable: true });
+    fixture.item.workItemType = type;
+    fixture.plan.resolveOnCompletion = optedIn;
+    try {
+      await fixture.run({ execute: async ({ request }) => {
+        assert.match(request, /completedStory:\{finding,evidence,reason\}/);
+        return { outcome: "analysis", summary: "The requested behavior is verified.", completedStory };
+      } });
+      assert.equal(fixture.item.state === "Resolved", expected);
+      assert.ok(fixture.posted[0].text.startsWith("[Fixlab automation]\n"));
+      assert.match(fixture.posted[0].text, /Finding: The supported search behavior/);
+      assert.match(fixture.posted[0].text, /Evidence: The reviewed implementation/);
+      assert.deepEqual(readTicketAutomationHistory(fixture.repository).attempts[0].completedStory, completedStory);
+      await fixture.run({ execute() { assert.fail("Tagged feedback must not retrigger completed work."); } });
+      assert.equal(fixture.posted.length, 1);
+    } finally { fixture.cleanup(); }
+  }
+  for (const result of [
+    { outcome: "analysis", completedStory: { finding: "Unproven." } },
+    { outcome: "blocked", completedStory },
+    { outcome: "analysis", completedStory, report: { plannedWork: ["Implement the requested change."] } },
+    { outcome: "analysis", completedStory, report: { inProgress: ["Required verification is running."] } }
+  ]) {
+    assert.throws(() => ticketOutcome({ summary: "Not complete.", ...result }), /valid bounded/);
+  }
 });
 
 test("pending resolution is read back after restart even when new state changes are disabled", async () => {

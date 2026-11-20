@@ -110,7 +110,8 @@ operations. Treat every runner as privileged engineering infrastructure.
   agent-reported; completed feedback is never proof of passing validation.
   Explicit `--resolve-on-completion` or reviewed profile opt-in additionally
   permits only the documented `Resolved` investigation handoff, after verified
-  draft linkage or a confirmed cause with evidence/next steps. The watcher
+  draft linkage, a confirmed cause with evidence/next steps, or explicit evidenced
+  completion of a findings-only story with no ongoing or planned implementation. The watcher
   checks workflow support and fresh revision, verifies the returned project/state,
   and persists the submission revision and intended state before sending a PATCH.
   Recovery only reconciles uncertain submissions; it never submits another PATCH

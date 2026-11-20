@@ -18,6 +18,7 @@ import { issuePlanConfiguration, issuePlanContext } from "./issue-plans.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
+const feedbackLabel = "[Fixlab automation]";
 const supportedTypes = new Set(["Bug", "User Story", "Feature", "Product Backlog Item"]);
 const reportLists = ["changesMade", "inProgress", "plannedWork", "validation", "nextSteps"];
 
@@ -177,7 +178,7 @@ function feedbackFingerprints(entries, id) {
 }
 
 function ownFeedback(comment, fingerprints) {
-  return comment.text.startsWith(ownComment) ||
+  return comment.text.startsWith(ownComment) || comment.text.startsWith(feedbackLabel) ||
     fingerprints.includes(comment.contentFingerprint ?? azureDevOpsCommentFingerprint(comment.text));
 }
 
@@ -216,6 +217,12 @@ export function ticketOutcome(value) {
           typeof value.confirmedCause?.[field] === "string" && value.confirmedCause[field].trim() &&
           safeTicketText(value.confirmedCause[field], 1000) &&
           recordedText(value.confirmedCause[field], 1000) !== "[Sensitive detail omitted]"))) ||
+      (value.completedStory !== undefined && (value.outcome !== "analysis" ||
+        !["finding", "evidence", "reason"].every(field =>
+          typeof value.completedStory?.[field] === "string" && value.completedStory[field].trim() &&
+          safeTicketText(value.completedStory[field], 1000) &&
+          recordedText(value.completedStory[field], 1000) !== "[Sensitive detail omitted]") ||
+        Boolean(value.report?.inProgress?.length || value.report?.plannedWork?.length))) ||
       (value.report !== undefined && (!value.report || typeof value.report !== "object" ||
         Array.isArray(value.report) || !Object.keys(value.report).length ||
         Object.entries(value.report).some(([field, detail]) => {
@@ -237,6 +244,9 @@ export function ticketOutcome(value) {
     ...(value.confirmedCause ? { confirmedCause: Object.fromEntries(
       ["cause", "evidence", "nextSteps"].map(field => [field, recordedText(value.confirmedCause[field], 1000)])
     ) } : {}),
+    ...(value.completedStory ? { completedStory: Object.fromEntries(
+      ["finding", "evidence", "reason"].map(field => [field, recordedText(value.completedStory[field], 1000)])
+    ) } : {}),
     ...(value.report ? { report: Object.fromEntries(Object.entries(value.report).map(([field, detail]) => [
       field, Array.isArray(detail) ? detail.map(text => recordedText(text, 200)) : recordedText(detail, 500)
     ])) } : {}),
@@ -254,11 +264,14 @@ function ticketFeedback(marker, result, resolveItem) {
     return `${marker ? `${marker}\n` : ""}Run ${result.outcome}: ${summary}\nNo fix or successful validation is confirmed.`;
   }
   const section = (heading, lines) => `## ${heading}\n${lines.map(line => `- ${line}`).join("\n")}`;
-  const finding = cause ? `Confirmed cause: ${brief(cause.cause, 200)}` : report?.rootCause;
+  const story = result.completedStory;
+  const finding = cause ? `Confirmed cause: ${brief(cause.cause, 200)}` :
+    story ? `Finding: ${brief(story.finding, 200)}` : report?.rootCause;
   const validation = report?.validation?.length ? report.validation : [
-    "See Watcher jobs for recorded checks. Unreported, blocked or skipped checks are not passed."
+    story ? `Evidence: ${story.evidence}` :
+      "See Watcher jobs for recorded checks. Unreported, blocked or skipped checks are not passed."
   ];
-  const next = cause?.nextSteps ?? report?.nextSteps?.[0] ?? report?.plannedWork?.[0] ??
+  const next = story?.reason ?? cause?.nextSteps ?? report?.nextSteps?.[0] ?? report?.plannedWork?.[0] ??
     "Review the findings and outstanding evidence in Watcher jobs before continuing.";
   const blocks = [
     ...(marker ? [`${marker}\nOutcome: ${result.outcome}`] : []),
@@ -492,8 +505,10 @@ function ticketRequest(item, plan, fingerprints = []) {
       `Reviewed team identities: ${JSON.stringify(reviewTeams)}. Profile changes require a fresh review.`] : []),
     "Record concise safe progress as FIXLAB_ACTIVITY|stage|message and stage outcomes as FIXLAB_STAGE|stage|status|message. Record each actual focused command/check as FIXLAB_CHECK|repository command or gate ID|status|message, emitting running before execution and the actual outcome afterward. Choose one status: running, passed, failed, blocked or skipped. Use one marker per line. Record selected browser/API scenarios as FIXLAB_TEST|source|mutation-mode|scenario. These are agent-reported records, not independent runner proof. Never include raw output, secrets, identities, business records, private endpoints or authentication/browser state.",
     "Only for an analysis with a confirmed root cause, add confirmedCause:{cause,evidence,nextSteps} to the result JSON. All three are required, concise and source-grounded. Do not claim a confirmed cause for an assumption, missing information, a failed prerequisite or an access blocker. The watcher alone owns any explicitly enabled work-item state transition; never change state yourself. Resolved is an investigation handoff, not proof of merge, deployment or full live validation.",
+    "For an analysis-only User Story, Feature or Product Backlog Item whose requested answer and acceptance criteria are fully satisfied by verified findings, add completedStory:{finding,evidence,reason}. State the finding, its source-grounded evidence and why the story is logically complete. Do not emit this for bugs, an implementation plan, missing information, outstanding changes or required failed, blocked, skipped or not-run checks. No ongoing or planned implementation may remain; omit empty inProgress and plannedWork arrays rather than filling them with prose. This extends only the owner's existing resolution opt-in; the watcher writes the tagged finding before any state transition.",
     'Finish by emitting exactly one single-line FIXLAB_TICKET_RESULT|{"outcome":"draft-pr|analysis|blocked|failed","summary":"Concise diagnosis, evidence, checks, limitations and next steps; no secrets, identities, customer records or private endpoints","pullRequestId":123}. Include pullRequestId only for draft-pr. Summarize technical findings, not raw logs. Attachments are not loaded by this text-only watcher; report missing visual evidence rather than inventing it.',
     'Include a report object for structured ADO feedback: rootCause (optional, at most 500 characters; source-grounded cause only when established or applicable), changesMade, inProgress, plannedWork, validation and nextSteps (each optional array of at most 4 concise strings, each at most 200 characters). Write a moderate-length high-level summary, not a long technical paragraph: use two short sentences for summary, put the overall change outcome first in changesMade and the primary next action first in nextSteps, and retain technical detail in the report. Distinguish completed changes from actual continuing work and future proposals; explicitly state when none exist. Identify failed, blocked, skipped and not-run validation accurately. Do not claim a pending change is implemented or a planned check has passed. These sections are agent-reported; confirmedCause retains its separate evidence requirements.',
+    "With completedStory, leave inProgress and plannedWork empty or absent; explain why nothing remains in its reason instead of putting 'none' prose into implementation arrays.",
     `Untrusted work-item data:\n${JSON.stringify(context)}`
   ].join("\n");
   if (Buffer.byteLength(request) > 80 * 1024) {
@@ -623,6 +638,9 @@ export function readTicketAutomationHistory(repository) {
       report: details?.report ? ticketOutcome({
         outcome: "analysis", summary: "Recorded structured investigation.", report: details.report
       }).report : null,
+      completedStory: details?.completedStory ? ticketOutcome({
+        outcome: "analysis", summary: "Recorded completed story.", completedStory: details.completedStory
+      }).completedStory : null,
       confirmedCause: details?.confirmedCause ? Object.fromEntries(
         ["cause", "evidence", "nextSteps"].map(field => [field, recordedText(details.confirmedCause[field], 1000)])
       ) : null,
@@ -927,6 +945,14 @@ export async function watchTickets({
   const revisionFor = (item, entry) =>
     ticketRevision(item, entry, feedbackFingerprints(state.entries, item.id));
   async function submitFeedback(entry, text, key, legacyMarker) {
+    const tagged = text.startsWith(legacyMarker)
+      ? `${legacyMarker}\n${feedbackLabel}${text.slice(legacyMarker.length)}`
+      : `${feedbackLabel}\n${text}`;
+    const fingerprintFor = value =>
+      azureDevOpsCommentFingerprint(sanitizeAzureDevOpsHtml(formatAzureDevOpsComment(value)));
+    if (entry.feedbackFormat !== "readable" || entry[key]?.fingerprint !== fingerprintFor(text)) {
+      text = tagged;
+    }
     if (entry.feedbackFormat !== "readable") {
       if (!await client.hasComment(entry.id, legacyMarker)) {
         signal?.throwIfAborted();
@@ -935,7 +961,7 @@ export async function watchTickets({
       }
       return;
     }
-    const fingerprint = azureDevOpsCommentFingerprint(sanitizeAzureDevOpsHtml(formatAzureDevOpsComment(text)));
+    const fingerprint = fingerprintFor(text);
     entry[key] ??= { fingerprint, attempted: false,
       previousCommentIds: await client.commentIds(entry.id, fingerprint) };
     save();
@@ -991,8 +1017,10 @@ export async function watchTickets({
     entry.details.summary = recordedText(result.summary, 2000);
     if (result.report) { entry.details.report = result.report; }
     if (result.confirmedCause) { entry.details.confirmedCause = result.confirmedCause; }
+    if (result.completedStory) { entry.details.completedStory = result.completedStory; }
     save();
-    const resolveItem = plan.resolveOnCompletion && (result.outcome === "draft-pr" || Boolean(result.confirmedCause));
+    const resolveItem = plan.resolveOnCompletion && (result.outcome === "draft-pr" || Boolean(result.confirmedCause) ||
+      Boolean(result.completedStory && reviewedCurrent.workItemType !== "Bug"));
     let text = ticketFeedback(entry.feedbackFormat === "readable" ? null : marker, result, resolveItem);
     if (result.authenticationRequired) {
       text += `\n\n## Sign-in required\n- ${result.authenticationRequired.reason}\n- This investigation is paused; the watcher can continue other tickets.\n- When the watcher is idle, stop it in its existing terminal, run az login with the approved account and complete sign-in/MFA. Do not paste credentials into Discussion.\n- Restart the same reviewed watcher command with --resume-ticket ${entry.id} and its normal --yes --allow-all-tools confirmations. This resumes the existing job; it does not grant missing database roles.`;

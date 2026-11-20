@@ -1047,7 +1047,12 @@ fixlab watch "C:\source\application" --runtime agency --environment dev --resolv
 
 The equivalent reviewed profile setting is `ticketAutomation.resolveOnCompletion: true`.
 This sets `Resolved` only after a verified draft PR or an explicitly confirmed
-cause with evidence and next steps. It never resolves an access blocker,
+cause with evidence and next steps, or an analysis-only story whose request and
+acceptance criteria are fully answered by evidenced findings. For that story
+path, the executor must return `completedStory: { finding, evidence, reason }`
+with no ongoing or planned implementation. Bugs cannot use this story-only path;
+the existing draft-PR and confirmed-cause rules remain available.
+New watcher Discussion comments include `[Fixlab automation]`. It never resolves an access blocker,
 inconclusive analysis, unverified PR or old completed attempt. Resolved means
 investigation handed off for human review, not a merged/deployed or fully
 live-tested fix. Unsupported workflows remain unchanged and receive an explicit
