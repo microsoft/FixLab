@@ -88,7 +88,19 @@
           <section aria-label="Tagged-ticket watcher history">
             <p id="watcher-status" class="guidance" role="status">Loading watcher history.</p>
             <p class="guidance">Read-only monitoring. Opening this view does not start or retry work, approve access, or run tests. Last reported status is not a process health check.</p>
-            <ol id="watcher-attempts"></ol>
+            <p id="watcher-empty" class="guidance" hidden>No watcher jobs recorded yet.</p>
+            <div id="watcher-grid" class="table-scroll" role="region" aria-label="Watcher job history" tabindex="0" hidden>
+              <table aria-label="Watcher jobs">
+                <thead>
+                  <tr>
+                    <th scope="col">Work item</th>
+                    <th scope="col">Title</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="watcher-attempts"></tbody>
+              </table>
+            </div>
             <p class="guidance">Finished means feedback was recorded, not that tests passed. Check and scenario messages are agent-reported, not independent runner proof. Detailed history is bounded to recent attempts; older attempts may have basic status only. See each work item's Discussion for published feedback.</p>
           </section>
         </details>
@@ -209,6 +221,7 @@
         <div class="composer-heading"><h2>Message FixLab</h2><span>New job</span></div>
         <form id="job-form">
           <p id="composer-question" class="guidance" hidden></p>
+          <p id="watcher-handoff-notice" class="guidance" role="status" hidden></p>
           <label for="request" class="visually-hidden">Bug or required enhancement</label>
           <textarea id="request" name="request" rows="3" maxlength="10000" required
             aria-describedby="composer-question composer-reply-result"
@@ -239,6 +252,7 @@
             <input name="allowAllTools" type="checkbox">
             Allow all tool commands for this run
           </label>
+          <p id="dev-api-policy" class="guidance" hidden>DEV API access is configured for this repository. Real reads and writes are enabled without per-job permission prompts; normal application sign-in is still required.</p>
           <p class="guidance">Privileged opt-in: reviewable tool requests can execute commands and change files without individual prompts. Organization policy, sensitive or escalated requests, sign-in, publication consent and required checks remain separate. This choice expires when the executor stops and is not inherited by retries or new jobs.</p>
           <fieldset>
             <legend>Intake</legend>
@@ -262,6 +276,7 @@
             <legend>Request type</legend>
             <label><input type="radio" name="requestType" value="bug-fix" checked> Bug fix</label>
             <label><input type="radio" name="requestType" value="small-enhancement"> Small enhancement</label>
+            <label><input type="radio" name="requestType" value="feature"> Scoped feature / cross-team work</label>
           </fieldset>
           <fieldset>
             <legend>Mode</legend>

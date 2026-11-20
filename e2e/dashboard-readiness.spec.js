@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer as createPortProbe } from "node:net";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 
 const packageRoot = process.env.FIXLAB_TEST_PACKAGE_ROOT ??
   fileURLToPath(new URL("..", import.meta.url));
@@ -24,6 +25,9 @@ const { createNonProductionPostAccess, createPostWriteApproval, createPpeWriteAp
 );
 const { forwardApprovedBrowserPost, forwardApprovedBrowserRequest, startBrowserPostBridge } = await import(
   pathToFileURL(join(packageRoot, "dashboard", "browser-post.js")).href
+);
+const { createDevBrowserContext } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "dev-browser.js")).href
 );
 let repository;
 let dashboard;
@@ -304,10 +308,321 @@ test.afterAll(async () => {
   rmSync(repository, { recursive: true, force: true });
 });
 
-test("watcher jobs show live recorded activity, failed checks and retained history without dashboard execution", async ({ page }) => {
+test("persistent DEV setup hides job permissions and forwards authenticated real browser CRUD traffic", async ({ page, browser }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-dev-http-ui-"));
+  const calls = [];
+  let record = { name: "Initial", status: "draft" };
+  const application = createServer((request, response) => {
+    if (request.url === "/") {
+      response.setHeader("Content-Type", "text/html");
+      response.end(`<!doctype html><html><body>
+        <button id="read">Read</button><button id="search">Search</button>
+        <button id="create">Create</button><button id="update">Update</button>
+        <button id="submit">Submit</button><button id="delete">Delete</button>
+        <output aria-label="Record"></output><script>
+        const actions = {read:['GET','/api/items'],search:['POST','/api/search'],
+          create:['POST','/api/items'],update:['PATCH','/api/items/1'],
+          submit:['PUT','/api/items/1/submit'],delete:['DELETE','/api/items/1']};
+        for(const [id,[method,url]] of Object.entries(actions)) {
+          document.getElementById(id).onclick = async () => {
+            const response = await fetch(url,{method,headers:{'Content-Type':'application/json'},
+              ...(method==='GET'?{}:{body:JSON.stringify({name:id==='update'?'Updated':'Created'})})});
+            document.querySelector('output').textContent = JSON.stringify(await response.json());
+          };
+        }
+        </script></body></html>`);
+      return;
+    }
+    if (!request.url.startsWith("/api/")) { response.writeHead(404); response.end(); return; }
+    response.setHeader("Content-Type", "application/json");
+    if (request.headers.cookie !== "fixture-auth=approved") {
+      response.writeHead(401);
+      response.end('{"error":"Normal application authentication required"}');
+      return;
+    }
+    calls.push({ method: request.method, path: request.url });
+    let body = "";
+    request.on("data", chunk => { body += chunk; });
+    request.on("end", () => {
+      if (request.url === "/api/items" && request.method === "POST") { record = { ...JSON.parse(body), status: "draft" }; }
+      if (request.method === "PATCH") { record = { ...record, ...JSON.parse(body) }; }
+      if (request.method === "PUT") { record.status = "submitted"; }
+      if (request.method === "DELETE") { record = null; }
+      response.end(JSON.stringify(record));
+    });
+  });
+  await new Promise(resolve => application.listen(0, "127.0.0.1", resolve));
+  const applicationUrl = `http://127.0.0.1:${application.address().port}`;
+  const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+  profile.environments = ["dev"];
+  profile.applications.frontend.port = application.address().port;
+  profile.applications.frontend.healthUrl = applicationUrl;
+  profile.browserAutomation.dataSafety.devWrite = {
+    allowAll: true, origins: ["https://api.dev.example.test"],
+    scope: "api://example-service/access", sessionHelper: "dev-session.mjs", browserProxyPaths: ["/api"]
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  writeFileSync(join(directory, "dev-session.mjs"), "export const syntheticFixture = true;");
+  const launches = [];
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {},
+    executor(input) {
+      launches.push(input);
+      let finish;
+      let stopped = false;
+      return {
+        completion: new Promise(resolve => { finish = resolve; }),
+        terminate() { stopped = true; finish({ code: null, signal: "SIGTERM" }); },
+        hasStopped: () => stopped
+      };
+    }
+  });
+  let session;
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await openWorkflowControls(page, address.url);
+    await expect(page.locator("#dev-api-policy")).toBeVisible();
+    await expect(page.locator("#allow-dev-writes")).toBeHidden();
+    await expect(page.locator("#allow-post-requests")).toBeHidden();
+    await page.locator('[name="mode"][value="validate-only"]').check();
+    await page.getByLabel("Bug or required enhancement").fill("Exercise authenticated DEV HTTP workflows.");
+    await page.getByRole("button", { name: "Start job", exact: true }).click();
+    await expect.poll(() => launches.length).toBe(1);
+    expect(launches[0].allowPostRequests).toBe(true);
+    expect(launches[0].postWriteApproval.mode).toBe("dev-origin");
+
+    session = await createDevBrowserContext(browser, {
+      repository: directory, targetEnvironment: "dev",
+      contextOptions: { storageState: { cookies: [{
+        name: "fixture-auth", value: "approved", domain: "127.0.0.1", path: "/",
+        expires: -1, httpOnly: true, secure: false, sameSite: "Lax"
+      }], origins: [] } }
+    });
+    const applicationPage = await session.context.newPage();
+    await applicationPage.goto(applicationUrl);
+    for (const [action, expected] of [["Read", "Initial"], ["Search", "Initial"],
+      ["Create", "Created"], ["Update", "Updated"], ["Submit", "submitted"], ["Delete", "null"]]) {
+      const count = calls.length;
+      await applicationPage.getByRole("button", { name: action, exact: true }).click();
+      await expect.poll(() => calls.length).toBe(count + 1);
+      await expect(applicationPage.getByLabel("Record")).toContainText(expected);
+    }
+    expect(record).toBe(null);
+    expect(calls.map(call => call.method)).toEqual(["GET", "POST", "POST", "PATCH", "PUT", "DELETE"]);
+    const evidence = await session.assertHealthy();
+    expect(evidence.requests.map(request => request.status)).toEqual([200, 200, 200, 200, 200, 200]);
+    expect(evidence.validationPassed).toBe(false);
+    expect(JSON.stringify(evidence)).not.toContain("fixture-auth");
+    await session.close();
+    session = null;
+  } finally {
+    await session?.context.close();
+    await instance.close();
+    await new Promise((resolve, reject) => application.close(error => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("editing from an isolated checkout follows the same job and recovers watcher-only profile changes", async ({ page }) => {
+  test.setTimeout(60000);
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-owned-workspace-ui-"));
+  const profile = {
+    ...JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8")),
+    worktreeSetup: { mode: "isolated" }
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  for (const args of [
+    ["init", directory], ["-C", directory, "add", "."],
+    ["-C", directory, "-c", "user.name=FixLab Test", "-c", "user.email=fixlab@example.invalid", "commit", "-qm", "Synthetic checkout fixture"]
+  ]) {
+    expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
+  }
+  const workspaces = new Map();
+  let launches = 0;
+  let failFirstRun;
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {}, workspaceServers: workspaces,
+    workspaceSetup: async () => ({ ready: true, message: "Synthetic restore completed." }),
+    executor() {
+      launches += 1;
+      let finish;
+      let stopped = false;
+      const completion = new Promise(resolve => { finish = resolve; });
+      if (launches === 1) {
+        failFirstRun = () => { stopped = true; finish({ code: 1 }); };
+      }
+      return {
+        completion,
+        terminate() { stopped = true; finish({ code: null, signal: "SIGTERM" }); },
+        hasStopped: () => stopped
+      };
+    }
+  });
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await openWorkflowControls(page, address.url);
+    await page.getByLabel("Bug or required enhancement").fill("Fix this synthetic workflow in its owned checkout.");
+    await page.getByRole("button", { name: "Start job", exact: true }).click();
+    await page.waitForURL(url => url.origin !== new URL(address.url).origin, { timeout: 30000 });
+    expect(workspaces.size).toBe(1);
+    const owned = await [...workspaces.values()][0].ready;
+    await expect(page).toHaveURL(`${owned.url}/`);
+    const source = await (await page.request.get(`${address.url}/api/status`)).json();
+    const assigned = await (await page.request.get(`${owned.url}/api/status`)).json();
+    expect(assigned.job.id).toBe(source.job.id);
+    expect(source.job.workspace.repository).not.toBe(directory);
+    await expect(page.locator("#job-status")).toContainText("running");
+    writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      ...profile, analysis: { ...profile.analysis, productionReadOnlyEvidence: [] }
+    }));
+    failFirstRun();
+    await expect(page.locator("#job-status")).toContainText("failed");
+    await page.getByRole("button", { name: "Review and respond", exact: true }).click();
+    await page.getByLabel("Action", { exact: true }).selectOption("retry");
+    await page.getByLabel("Additional details or manual result").fill("Retry with this job's verified saved configuration; do not inherit watcher diagnostic access.");
+    await page.getByRole("button", { name: "Resume FixLab", exact: true }).click();
+    await expect.poll(() => launches).toBe(2);
+    await expect(page.locator("#job-status")).toContainText("running");
+    const recovered = await (await page.request.get(`${owned.url}/api/status`)).json();
+    expect(recovered.job.id).toBe(assigned.job.id);
+    expect(workspaces.size).toBe(1);
+    expect(JSON.parse(readFileSync(join(source.job.workspace.repository, ".github", "fixlab", "repository-profile.json"), "utf8"))).toEqual(profile);
+  } finally {
+    await instance.close();
+    rmSync(`${directory}.fixlab-worktrees`, { recursive: true, force: true });
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("watcher grid shows work-item titles and text statuses while preserving reviewed handoffs", async ({ page }) => {
+  await page.setViewportSize({ width: 1470, height: 900 });
   const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-ui-"));
   const profile = {
+    ...JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8")),
     name: "Synthetic watcher fixture", environments: ["dev"],
+    pullRequests: { defaultTargetBranch: "develop" },
+    ticketAutomation: { areaPaths: ["Example\\Application"] }
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  for (const args of [
+    ["init", directory], ["-C", directory, "remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"],
+    ["-C", directory, "add", "."],
+    ["-C", directory, "-c", "user.name=FixLab Test", "-c", "user.email=fixlab@example.invalid", "commit", "-qm", "Synthetic fixture"]
+  ]) {
+    expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
+  }
+  const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
+  const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture <img src=x onerror=alert(1)>", comments: [] };
+  let release;
+  let launches = 0;
+  const client = {
+    findTagged: async () => [42], load: async () => item, hasComment: async () => false,
+    async comment() {}, reviewPullRequests: async () => []
+  };
+  const result = new Promise(resolve => { release = resolve; });
+  const watching = watchTickets({
+    repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    client,
+    execute: async ({ onActivity }) => executeTicketAgent({
+      repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
+      executor(options) {
+        options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|Investigating the reported mapping.\n");
+        options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed; live testing did not run.\n");
+        return {
+          completion: result.then(() => {
+            options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A focused check failed; the work item stays open.","report":{"plannedWork":["Implement the reviewed scope after the prerequisite is supplied."]}}\n');
+            return { code: 0 };
+          }), hasStopped: () => true, terminate() { release(); }
+        };
+      }
+    })
+  });
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {},
+    ticketClient: client,
+    executor() {
+      launches += 1;
+      let finish;
+      const completion = new Promise(resolve => { finish = resolve; });
+      return { completion, terminate() { finish({ code: null, signal: "SIGTERM" }); } };
+    }
+  });
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await page.goto(address.url);
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await expect(page.locator("#watcher-status")).toContainText("investigating");
+    const grid = page.getByRole("table", { name: "Watcher jobs" });
+    await expect(grid.getByRole("columnheader")).toHaveText(["Work item", "Title", "Status"]);
+    const workspaceWidth = await page.locator("#workspace-tools").evaluate(element => element.getBoundingClientRect().width);
+    const watcherWidth = await page.locator("#watcher-group").evaluate(element => element.getBoundingClientRect().width);
+    expect(watcherWidth).toBeCloseTo(workspaceWidth, 0);
+    expect(await page.locator("#watcher-grid").evaluate(element => element.scrollWidth - element.clientWidth)).toBe(0);
+    const row = grid.locator("tbody > tr").first();
+    await expect(row.getByRole("cell").nth(0).getByRole("link", { name: "42", exact: true })).toHaveAttribute(
+      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
+    );
+    await expect(row.locator(".watcher-title")).toHaveText(item.title);
+    await expect(row.getByRole("img")).toHaveCount(0);
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Investigation running (last recorded)");
+    const attempt = row.locator("details").first();
+    await expect(attempt).not.toHaveAttribute("open");
+    await attempt.locator(":scope > summary").click();
+    await expect(attempt).toContainText("focused regression: failed");
+    await expect(attempt).toContainText("Investigating the reported mapping");
+    await expect(attempt.getByRole("link", { name: `ADO 42 - ${item.title} (work item and Discussion)`, exact: true })).toHaveAttribute(
+      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
+    );
+    expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
+    release();
+    await watching;
+    await expect(page.locator("#watcher-status")).toContainText("stopped");
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - blocked");
+    await expect(attempt).toHaveAttribute("open", "");
+    await page.reload();
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await expect(row.locator(".watcher-title")).toHaveText(item.title);
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - blocked");
+    await page.locator("#watcher-attempts > tr > td > details > summary").first().click();
+    await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
+    await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
+    const retained = page.locator("#watcher-attempts > tr > td > details").first();
+    await retained.getByText("Detailed investigation report", { exact: true }).click();
+    await expect(retained).toContainText("Implement the reviewed scope after the prerequisite is supplied.");
+    await retained.getByRole("button", { name: "Continue in FixLab", exact: true }).click();
+    const prepare = retained.getByRole("button", { name: "Prepare local job", exact: true });
+    await expect(prepare).toBeDisabled();
+    await retained.getByRole("checkbox", { name: "I reviewed the findings, dependencies and implementation scope." }).check();
+    await prepare.click();
+    await expect(page.locator("#watcher-handoff-notice")).toContainText("No job has started");
+    await expect(page.locator("#request")).toHaveValue(/Continue work item 42/);
+    await expect(page.locator('[name="requestType"][value="feature"]')).toBeChecked();
+    await expect(page.locator('[name="allowAllTools"]')).not.toBeChecked();
+    expect(launches).toBe(0);
+    await page.locator('#job-form button[type="submit"]').click();
+    await expect.poll(() => launches).toBe(1);
+    const started = (await (await page.request.get(`${address.url}/api/status`)).json()).job;
+    expect(started.watcherHandoff.workItemId).toBe(42);
+    expect(started.toolApprovalMode).toBe("ask");
+    expect(started.devWriteApproved).toBe(false);
+    expect(started.ppeWriteApproved).toBe(false);
+    await page.screenshot({ path: test.info().outputPath("watcher-history.png"), fullPage: true });
+  } finally {
+    release();
+    await watching;
+    await instance.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("interrupted watcher recovery requires review and confirmation and preserves the attempt without launching work", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-recovery-ui-"));
+  const profile = {
+    name: "Synthetic recovery fixture", environments: ["dev"],
     pullRequests: { defaultTargetBranch: "develop" },
     ticketAutomation: { areaPaths: ["Example\\Application"] }
   };
@@ -319,57 +634,39 @@ test("watcher jobs show live recorded activity, failed checks and retained histo
     expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
   }
   const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
-  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
-    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture", comments: [] };
-  let release;
-  const result = new Promise(resolve => { release = resolve; });
-  const watching = watchTickets({
+  const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic interrupted fixture", comments: [] };
+  await expect(watchTickets({
     repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
-    client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
-    execute: async ({ onActivity }) => executeTicketAgent({
-      repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
-      executor(options) {
-        options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|Investigating the reported mapping.\n");
-        options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed; live testing did not run.\n");
-        return {
-          completion: result.then(() => {
-            options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A focused check failed; the work item stays open."}\n');
-            return { code: 0 };
-          }), hasStopped: () => true, terminate() { release(); }
-        };
-      }
-    })
-  });
+    client: { findTagged: async () => [42], load: async () => item },
+    execute() { throw new Error("Synthetic interruption"); }
+  })).rejects.toThrow("Synthetic interruption");
   const instance = createDashboardServer({
     repository: directory, packageRoot, browserOpener() {},
-    executor() { throw new Error("Opening watcher monitoring must not start a dashboard job."); }
+    ticketClient: { load: async () => item, reviewPullRequests: async () => [] },
+    executor() { throw new Error("Recovery must not start a dashboard job."); }
   });
   try {
     const address = await instance.listen({ port: await availablePort() });
     await page.goto(address.url);
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
-    await expect(page.locator("#watcher-status")).toContainText("investigating");
-    const attempt = page.locator("#watcher-attempts > li > details").first();
+    const attempt = page.locator("#watcher-attempts > tr > td > details").first();
     await attempt.locator("summary").click();
-    await expect(attempt).toContainText("focused regression: failed");
-    await expect(attempt).toContainText("Investigating the reported mapping");
-    await expect(attempt.getByRole("link", { name: "Open work item and Discussion" })).toHaveAttribute(
-      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
-    );
+    await attempt.getByRole("button", { name: "Review interrupted attempt" }).click();
+    const retry = attempt.getByRole("button", { name: "Authorize safe retry" });
+    await expect(retry).toBeDisabled();
+    await expect(attempt).toContainText("No final result was retained");
+    await expect(attempt.getByRole("button", { name: "Accept recorded result" })).toBeDisabled();
+    await attempt.getByRole("checkbox", { name: "I reviewed the ticket, existing work and limitations." }).check();
+    await expect(retry).toBeEnabled();
+    await retry.click();
+    await expect(page.locator("#watcher-attempts > tr > td").nth(2)).toHaveText("Reviewed recovery - retry");
+    await expect(attempt).toContainText("Recovery decision: retry");
     expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
-    release();
-    await watching;
-    await expect(page.locator("#watcher-status")).toContainText("stopped");
-    await expect(attempt).toContainText("Feedback recorded - blocked");
     await page.reload();
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
-    await page.locator("#watcher-attempts summary").click();
-    await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
-    await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
-    await page.screenshot({ path: test.info().outputPath("watcher-history.png"), fullPage: true });
+    await expect(page.locator("#watcher-attempts")).toContainText("Reviewed recovery - retry");
   } finally {
-    release();
-    await watching;
     await instance.close();
     rmSync(directory, { recursive: true, force: true });
   }
@@ -1753,6 +2050,34 @@ test("session controls reconnect, confirm another owner and resume its stopped j
   }
 });
 
+test("configured clones show sign-in guidance instead of asking to add a repository", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-sign-in-ui-"));
+  let server;
+  try {
+    const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+    profile.browserAutomation.authentication = {
+      required: true, command: "node authenticate.js", statusPaths: [".auth/state.json"]
+    };
+    mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    server = createDashboardServer({ repository: directory, packageRoot });
+    const url = (await server.listen({ port: await availablePort() })).url;
+    await openWorkflowControls(page, url);
+    await page.locator('input[name="mode"][value="playwright-only"]').check();
+    await expect(page.locator("#readiness")).toHaveText("Sign-in required for live validation");
+    await expect(page.locator("#welcome-add-repository")).toBeHidden();
+    await expect(page.locator("#welcome-guidance")).toContainText("Connect Playwright");
+    await expect(page.getByRole("button", { name: "Connect Playwright" })).toBeEnabled();
+    const status = await (await page.request.get(`${url}/api/status`)).json();
+    expect(status.readiness.configurationReady).toBe(true);
+    expect(status.readiness.profileReady).toBe(false);
+    expect(status.job).toBeNull();
+  } finally {
+    await server?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("dashboard exposes repository readiness through the running server", async ({
   page,
   request
@@ -2791,6 +3116,7 @@ test("repository memory shows saved outcomes safely and selecting one never resu
   page.on("request", (request) => { if (request.method() === "POST") { posts++; } });
   const saved = {
     id: "saved-chat", request: "<img src=x onerror=alert(1)> Synthetic remembered work",
+    workspace: { jobId: "saved-chat", repository: join(repository, "previous-checkout"), url: "http://127.0.0.1:1" },
     status: "blocked", requestType: "bug-fix", targetEnvironment: "dev",
     stages: { diagnosis: { status: "passed", message: "Synthetic diagnosis complete" } },
     bugs: [], logs: [], activity: [], canResume: false, canComment: false
@@ -2853,8 +3179,48 @@ test("queue navigation opens the inspector at the first card without changing jo
   await expect(page.locator("#details-group")).toHaveAttribute("open", "");
   await expect(page.locator("#queue-panel")).toBeInViewport();
   await expect(page.locator("#details-view > :first-child")).toHaveAttribute("id", "queue-panel");
+  await expect(page.locator("#queue-list")).toHaveJSProperty("tagName", "OL");
+  await expect(page.locator("#queue-list > li")).toHaveCount(2);
   await expect(page.locator("#queue-list")).toContainText("Waiting #1");
   await expect(page.locator("#queue-list")).toContainText("Synthetic next bug");
+  expect(posts).toBe(0);
+});
+
+test("watcher grid handles empty history, unavailable titles and stale responses without executing work", async ({ page }) => {
+  let posts = 0;
+  let unavailable = false;
+  const body = { status: "idle", pollSeconds: 300, attempts: [], titleWarning: "" };
+  await mockChatWorkspace(page);
+  await page.route("**/api/ticket-automation", route => route.fulfill({
+    status: unavailable ? 503 : 200,
+    contentType: "application/json",
+    body: JSON.stringify(unavailable ? { error: "Synthetic watcher history unavailable" } : body)
+  }));
+  page.on("request", request => { if (request.method() === "POST") { posts++; } });
+  await page.goto(baseUrl);
+  await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+  await expect(page.locator("#watcher-empty")).toBeVisible();
+  const grid = page.getByRole("table", { name: "Watcher jobs" });
+  await expect(grid).toBeHidden();
+  body.titleWarning = "Synthetic titles could not be loaded.";
+  body.attempts.push({
+    id: "legacy-attempt", workItemId: 7, title: "", status: "complete", outcome: "analysis",
+    workItemUrl: "https://dev.azure.com/example-org/Example/_workitems/edit/7",
+    historyAvailable: false, checks: [], activity: []
+  });
+  await expect(grid).toBeVisible({ timeout: 10000 });
+  const row = grid.locator("tbody > tr");
+  await expect(row.locator(".watcher-title")).toHaveText("Title unavailable");
+  await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - analysis");
+  await expect(page.locator("#watcher-status")).toContainText(body.titleWarning);
+  await expect(page.locator("#watcher-empty")).toBeHidden();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await row.getByRole("cell").nth(2).scrollIntoViewIfNeeded();
+  await expect(row.getByRole("cell").nth(2)).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  unavailable = true;
+  await expect(page.locator("#watcher-status")).toContainText("Previously displayed history may be stale.", { timeout: 10000 });
+  await expect(row.locator(".watcher-title")).toHaveText("Title unavailable");
   expect(posts).toBe(0);
 });
 

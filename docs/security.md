@@ -25,14 +25,27 @@ operations. Treat every runner as privileged engineering infrastructure.
 
 ## Process isolation
 
-- Optional ticket watching is an explicitly started local Agency session, not
+- Automatically assigned dashboard worktrees are bound to a private receipt
+  containing the job, source, branch, base commit and profile revision. Existing
+  directories without matching ownership are not adopted. Isolated executors
+  use per-worktree leases; local testing uses a separate shared reservation
+  across the Git common repository. Waits are cancellable, never reclaimed
+  using heartbeat age or a PID alone. Credentials, browser state, path grants
+  and successful validation evidence are not copied to the new checkout.
+- Optional ticket watching is an explicitly started local Agency or Copilot CLI session, not
   an onboarding side effect. Its fresh `--yes --allow-all-tools` consent binds
   the checkout's ADO origin, configured area subtrees, exact tag, target branch,
-  non-production environment and installed helper directory. This is a
+  authenticated-user assignment (`@Me`), non-production environment and installed helper directory. This is a
   privileged tool session, not an OS sandbox. Agent instructions restrict
   business access to existing read-only guards; tool grants do not technically
   prevent a privileged runtime from issuing other commands. Organization
   controls and normal human MFA remain authoritative.
+- Watcher assignment filtering uses the Azure DevOps authenticated identity,
+  never a configured display name, Windows user or GitHub identity. Discovery
+  requires `[System.AssignedTo] = @Me`; fresh ticket loads independently recheck
+  it before execution, feedback, recovery and handoff. Unknown or reassigned
+  ownership grants nothing. Prior journal history and interruption barriers
+  remain intact; this filter is not a new ADO authorization mechanism.
 - The watcher serializes investigations, stores a bounded Git-private
   revision journal, acquiring its exclusive lock before reading any state,
   and verifies draft status, repository,
@@ -47,12 +60,50 @@ operations. Treat every runner as privileged engineering infrastructure.
   that lease is released only after verified termination. Executor output is
   bounded and line-buffered for credential suppression before display, independently
   of raw structured-result parsing.
+- A reviewed `ticketAutomation.migrations` entry permits a dedicated migration
+  for one exact work-item ID within validated, existing non-linked source
+  directories. This is agent-enforced change scope, not a filesystem sandbox or
+  data-access grant. Unapproved migrations remain analysis-only. Profile changes
+  invalidate the watcher session; historical approval hashes are deduplication
+  metadata, never continuing authority after revocation. Required checks, draft
+  verification, repository instructions and read-only business-data controls remain.
+- Recovery review is read-only. Dashboard recovery requires the exact loopback
+  host/origin; CLI decisions require `--yes` and a matching review token.
+  Reconciliation holds both ownership locks, rechecks the journal/profile/ticket,
+  linked PRs and matching branches, and preserves a bounded decision audit.
+  Retained or uncertain ownership remains blocked; recovery never clears it or
+  kills a process. Missing results and changed ticket content cannot be accepted.
+  Active linked PRs prevent retry; draft acceptance re-verifies provider linkage.
+  Recovery neither publishes feedback nor changes work-item state or Git.
 - Ticket content is credential-screened before prompt construction or executor
   handoff, including descriptions, all comments and credential-bearing URLs.
   Rejected content is not copied into diagnostics or journal entries.
   The selected POST and broad-write safety helpers and the API authentication
   helper are bound by contained real path and content revision, then revalidated
   before launch and feedback; changing a helper requires a fresh scope review.
+- Completed-attempt handoff requires exact dashboard host/origin, an explicit
+  confirmation bound to its instance and a fresh ticket/profile/helper/PR review
+  token. It prepares normal canonical intake and preserves durable attempt
+  provenance; duplicate retained handoffs are rejected. No watcher state is
+  replayed or tool, write, data or deferred-validation grant transferred.
+- Optional `analysis.evidenceSources` is discovery metadata, not a connector or
+  read-only capability. Entries select only configured non-production
+  environments and bounded, unlinked repository-owned JavaScript helpers.
+  Discovery never executes them. Helpers still require normal authorization,
+  authentication and independently established read-only enforcement; privileged
+  tool execution is not sandboxed. Production helpers, credential files and
+  automatic host-session MCP inheritance are not supported by this configuration.
+- The separate watcher-only `analysis.productionReadOnlyEvidence` exception
+  requires `readOnly: true`, exact work-item/correlation bindings, contained
+  reviewed JavaScript readers and matching helper SHA256 hashes. The explicit
+  `--allow-production-evidence` session flag grants only those matching
+  diagnostic reads, not production application testing, business-data writes,
+  role changes or host-session MCP access. Review actual helper transport and
+  output sanitization; a metadata flag/hash does not prove a read-only identity.
+  Each reader must reject other IDs and arbitrary queries, bound responses and
+  timeouts, block redirects, and keep tokens/raw records out of retained output.
+  Profile/helper changes require a newly reviewed session. Revoked/historical
+  approval fingerprints retain deduplication provenance, never access authority.
 - Dashboard watcher monitoring is read-only and bound to the checkout's
   reviewed journal scope. It retains bounded sanitized structured progress,
   not raw output, credentials or browser state. Check messages remain
@@ -217,7 +268,49 @@ remain manual. Ordinary authorization source identifiers are reviewable, but
 authorization assignments/headers, credential values and solicitations remain
 protected. Reason-specific next steps never reveal the rejected payload.
 
+### Persistent DEV browser and API access
+
+Repository settings can enable **real DEV API reads and all writes** once per
+repository. The reviewed profile sets `browserAutomation.dataSafety.devWrite.allowAll`
+to `true`, with the existing exact DEV HTTPS origins, API scope and `.mjs` session
+helper described below. No per-job write permission or confirmation checkbox is
+required. Disabling the setting revokes this persistent access. Profiles without
+the flag retain their existing policy; PPE, SIT/UAT and production do not inherit it.
+
+Configured DEV defaults become `non-production-approved`/`approved-write`, not
+read-only or intercepted. Native jobs receive a fresh revision-bound internal
+`fixlab_dev_write` capability; the user does not approve each job. Explicit
+stricter mode selections and API-only, unit-only and production restrictions remain
+authoritative. Normal sign-in/MFA is still required for each developer.
+
+Real React browser flows use the packaged `dashboard/dev-browser.js`
+`createDevBrowserContext` helper. It preserves the application's existing
+authenticated browser state and forwards actual HTTP responses, including search
+POST, create, update and submit operations. It does not create authentication,
+mock responses or turn successful HTTP calls into passed scenario evidence.
+Complete authentication before the guarded journey; foreign identity-provider
+navigation and token-refresh requests are not silently allowed. Renew legitimate
+authentication separately when needed. Do not record credentials, response bodies
+or credential-bearing traces.
+
+Service workers, unrelated API origins, API redirects and automatic transport
+retries are blocked; failed/ambiguous traffic stops subsequent writes. Profile or
+helper changes revoke an active context. Call `assertHealthy` and close the
+context, and assert actual UI/API outcomes separately. Guards require Playwright
+1.48+. They cover browser HTTP traffic, not direct `APIRequestContext`, arbitrary
+shell networking or a same-user OS sandbox. Do not override them with page routes.
+
+For applications using an owned loopback frontend proxy, optionally configure
+`devWrite.browserProxyPaths`, for example `["/api", "/odata"]`. Review the actual
+React development-server proxy first: these prefixes must target only the listed
+DEV origins, never another environment. This is an operator assertion, not
+upstream deployment attestation. Prefixes do not authorize other local services
+or arbitrary frontend paths. Loopback frontend hot-reload WebSockets and standard
+CRA/Vite health probes remain supported; external API WebSockets are not covered.
+
 ### Broad DEV and PPE API writes
+
+The following per-job controls apply when persistent DEV access is not enabled.
 
 Native Copilot dashboard jobs provide a separate, off-by-default **Allow all DEV
 API writes for this job** checkbox. Select DEV, leave explicit read-only or
@@ -246,7 +339,7 @@ precedence. The server revalidates configuration at grant creation and use;
 readiness is not a grant. Invalid optional PPE setup is reported, not enabled.
 Direct HTTP callers still need the exact browser origin and explicit write
 confirmation fields. These defaults never modify existing jobs or recover
-expired grants. DEV remains off by default.
+expired grants. DEV without persistent setup remains off by default.
 
 In `.github/fixlab/repository-profile.json`, declare DEV in `environments`, keep
 `productionAllowed: false`, and add this inside `browserAutomation.dataSafety`:

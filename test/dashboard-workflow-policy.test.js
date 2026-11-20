@@ -100,7 +100,8 @@ test("verified query guidance stays aligned without expanding interactive CLI ar
     assert.ok(source.includes(READ_ONLY_POST_GUIDANCE), path);
   }
   const cli = readFileSync(new URL("../bin/fixlab.js", import.meta.url), "utf8");
-  assert.match(cli, /request && profile\.validation\?\.liveTestsRequired !== false &&\s+profile\.browserAutomation\?\.mode !== "api" \? \[READ_ONLY_POST_GUIDANCE\]/u);
+  assert.match(cli, /request && profile\.validation\?\.liveTestsRequired !== false &&\s+profile\.browserAutomation\?\.mode !== "api" && !testEvidence\.persistentDevApi \? \[READ_ONLY_POST_GUIDANCE\]/u);
+  assert.match(cli, /request && testEvidence\.persistentDevApi \? \[PERSISTENT_DEV_API_GUIDANCE\]/u);
 });
 
 test("DEV write guidance stays native-only and aligned across runtime and initialized agents", () => {

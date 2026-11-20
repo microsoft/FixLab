@@ -46,6 +46,17 @@ repackage the rejected operation to evade review. **Deny and request safe recove
 reuses existing reviewed tests/helpers in the same blocked stage; preserve
 completed evidence and failures, and stop if a safe prerequisite is missing.
 
+Incident evidence: discover repository-owned Cosmos/trace helpers in profile.analysis.evidenceSources for the exact selected non-production environment. Read helper usage and verify its current source revision. Discovery grants no tool or data access and proves no read-only enforcement; normal permissions, authentication and stricter unit-only/API-only policies remain authoritative. Use only separately approved read-only access with bounded IDs, time ranges and fields. Never infer production permission from DEV or az login; host Copilot MCP connections are not automatically inherited. Preserve sanitized source/time/correlation evidence, not credentials, customer records or raw responses. Missing access, read-only proof or row-level evidence is a blocker, not a confirmed cause or justification for a speculative fix.
+
+Issue-driven execution: use `fixlab issue-plan` to preview validated trace or
+Playwright plans before `--execute`. Ground filters and selectors in repository
+source. No arbitrary KQL/JavaScript. Existing authentication and job permissions
+remain authoritative. Production traces require separate
+`--allow-production-evidence` approval. DEV writes require explicit job approval
+and `--allow-dev-writes` with a reviewed write-capable fixture; this permits any
+DEV record for that invocation only. Generated journeys stay transient; only
+actual executed assertions establish pass/fail.
+
 For authorized DEV/PPE/SIT/UAT data-changing POST actions, discover
 `fixlab_nonproduction_post` in a native Copilot dashboard job. The **Allow POST
 writes** checkbox is off by default. Explicit selection authorizes configured
@@ -91,6 +102,8 @@ startup/authentication prerequisite without blocking independent code work or
 an otherwise authorized draft. Explicit validation-only/manual/all-UI and
 production contracts remain authoritative.
 
+Dashboard isolation is assigned automatically when required; continue the same job in its owned checkout. Code work remains parallel in separate owned checkouts. Before directly starting local applications, authentication helpers or live checks outside configured gates, acquire the assigned dashboard's `fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>`. Local-stack/live-test gates reserve shared testing automatically and wait without failing. A kept-open preview retains the reservation until it stops. Acquisition is not validation evidence; never clear another owner's reservation or copy credentials, runtime grants or validation evidence.
+
 Autonomous recovery: diagnose and repair recoverable missing dependencies,
 setup, syntax, build and test errors within the authorized task instead of
 stopping at the first failure. Reuse repository helpers and existing tools;
@@ -108,7 +121,24 @@ alone does not prove a scenario passed. No automatic retries or redirects: an
 ambiguous result requires human inspection before any fresh action. Other
 environments, explicit read-only/intercepted selections, API-only read-only contracts, unit-only validation and human sign-in
 remain unchanged. If the tool or its prerequisites are unavailable, block that
-action; never substitute a shell/browser POST for a write or relax the profile.
+action; never substitute a shell/browser POST for a write outside the configured
+guarded DEV path, or relax the profile.
+
+Persistent DEV API access: `dataSafety.devWrite.allowAll=true` authorizes real
+GET/HEAD/OPTIONS/POST/PUT/PATCH/DELETE on the reviewed DEV origins without per-job
+permission prompts. It overrides DEV read-only/intercepted defaults, not explicit
+stricter selections, API-only/unit-only/production restrictions or normal
+authentication. Use `createDevBrowserContext` from
+`FIXLAB_HELPER_ROOT/dashboard/dev-browser.js` with `FIXLAB_REPOSITORY`,
+`FIXLAB_DEV_API_ENVIRONMENT=dev` and existing authenticated `storageState`.
+Reviewed `browserProxyPaths` may cover the owned loopback frontend's API proxies
+to those DEV origins; never infer or retarget a proxy. Use `fixlab_dev_write` for
+native API writes. Do not mock DEV responses or replace the guard. Assert real
+UI/API behavior, call `assertHealthy` and close. Profile/helper changes require
+fresh validation; redirects, automatic transport retries, unknown outcomes and
+unrelated API origins are blocked. API success alone is not scenario success.
+Other environments retain their existing policy. The read-only defaults below
+apply only without this persistent DEV configuration.
 
 Verified read-only POST searches: Cover the full verified query scope for
 approved DEV/PPE reads. Contracts/implementation must prove no business/workflow

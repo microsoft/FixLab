@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { spawnSync } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,47 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const packageRoot = process.env.FIXLAB_TEST_PACKAGE_ROOT ?? fileURLToPath(new URL("..", import.meta.url));
 const { createDashboardServer } = await import(pathToFileURL(join(packageRoot, "dashboard", "server.js")).href);
+const { compileIssuePlan, executeBrowserPlan, issuePlanConfiguration } = await import(pathToFileURL(join(packageRoot, "dashboard", "issue-plans.js")).href);
+
+test("issue plans execute a real browser repro before and after the local fixture is fixed", async () => {
+  test.setTimeout(90000);
+  const parent = join(packageRoot, "test-results");
+  mkdirSync(parent, { recursive: true });
+  const directory = mkdtempSync(join(parent, "issue-plan-browser-"));
+  const relativeDirectory = directory.slice(packageRoot.length).replaceAll("\\", "/").replace(/^\/+/u, "");
+  let fixed = false;
+  const server = createServer((_request, response) => {
+    response.setHeader("content-type", "text/html");
+    response.end(`<label>Name<input aria-label="Name"></label><button onclick="document.querySelector('input').value='${fixed ? "New name" : "Lost name"}'">Apply</button>`);
+  });
+  try {
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    writeFileSync(join(directory, "fixture.mjs"), 'export { test, expect } from "@playwright/test";\n');
+    writeFileSync(join(directory, "config.mjs"), `export default { timeout: 15000, use: { headless: true${process.platform === "win32" ? ', channel: "msedge"' : ""} } };\n`);
+    const profile = { environments: ["dev"], applications: { frontend: { healthUrl: origin } },
+      browserAutomation: { workingDirectory: ".", testSynthesis: { enabled: true, issuePlans: {
+        fixture: `${relativeDirectory}/fixture.mjs`, config: `${relativeDirectory}/config.mjs`,
+        directory: `${relativeDirectory}/journeys`
+      } } } };
+    const plan = { version: 1, kind: "playwright", workItemId: 42, environment: "dev",
+      policyRevision: issuePlanConfiguration(packageRoot, profile, "dev").browser.policyRevision,
+      title: "Issue 42 retains the updated name",
+      steps: [{ action: "goto", path: "/" },
+        { action: "fill", target: { by: "label", value: "Name" }, value: "New name" },
+        { action: "click", target: { by: "role", role: "button", name: "Apply" } },
+        { action: "assertValue", target: { by: "label", value: "Name" }, value: "New name" }] };
+    const compiled = compileIssuePlan(packageRoot, profile, plan, { environment: "dev" });
+    const before = await executeBrowserPlan(packageRoot, compiled);
+    expect(before.status).toBe("failed");
+    expect(before.failedStep).toBe(4);
+    fixed = true;
+    expect((await executeBrowserPlan(packageRoot, compiled)).status).toBe("passed");
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("linked frontend opening confirms its separate owner, rejects stale review and starts no job", async ({ page }) => {
   const directory = mkdtempSync(join(tmpdir(), "fixlab-linked-browser-"));

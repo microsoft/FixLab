@@ -8,6 +8,7 @@ import { createDevPostTool, createDevWriteApproval, createPpeWriteApproval, crea
 import { forwardApprovedBrowserPost, forwardApprovedBrowserRequest, startBrowserPostBridge } from "../dashboard/browser-post.js";
 import { runCopilotSession } from "../dashboard/copilot-session.js";
 import { createRuntimeRequestBridge, runtimeRequestId } from "../dashboard/runtime-requests.js";
+import { createDevBrowserContext } from "../dashboard/dev-browser.js";
 
 function fixture(t, overrides = {}) {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-dev-post-"));
@@ -554,6 +555,125 @@ test("PPE POST-only approval stops after an unsuccessful request without followi
   await assert.rejects(tool.handler(args), /approval has stopped/u);
 });
 
+test("repository-configured DEV access exposes writes without a per-job permission", async t => {
+  const state = fixture(t);
+  state.profile.browserAutomation.dataSafety.devWrite = {
+    allowAll: true, origins: ["https://api.dev.example.test"],
+    scope: "api://example-service/access", sessionHelper: "session.mjs"
+  };
+  state.save();
+  const tool = createDevPostTool({ ...state.settings,
+    jobId: "11111111-1111-4111-8111-111111111111",
+    ask() { assert.fail("Persistent DEV access must not ask for job permission."); }
+  });
+  assert.equal(tool.name, "fixlab_dev_write");
+  await tool.handler({ ...state.args, method: "POST" });
+  assert.equal(state.requests.length, 1);
+  assert.equal(state.prompts.length, 0);
+});
+
+test("DEV browser guards allow real HTTP workflows without prompts and retain only sanitized results", async t => {
+  const state = fixture(t);
+  state.profile.applications = { frontend: { healthUrl: "http://localhost:3000" } };
+  state.profile.browserAutomation.dataSafety.devWrite = {
+    allowAll: true, origins: ["https://api.dev.example.test"],
+    scope: "api://example-service/access", sessionHelper: "session.mjs"
+  };
+  state.save();
+  let handler;
+  let options;
+  let closed = false;
+  const context = {
+    async route(_pattern, callback) { handler = callback; },
+    async routeWebSocket() {},
+    async close() { closed = true; }
+  };
+  const browser = { async newContext(value) { options = value; return context; } };
+  const session = await createDevBrowserContext(browser, {
+    repository: state.repository, targetEnvironment: "DEV"
+  });
+  assert.equal(options.serviceWorkers, "block");
+  const requests = [];
+  const invoke = async (method, url = state.url, status = 200) => handler({
+    request: () => ({ url: () => url, method: () => method,
+      resourceType: () => "fetch", redirectedFrom: () => null }),
+    async fetch(value) {
+      assert.equal(value.maxRedirects, 0);
+      assert.equal(value.maxRetries, 0);
+      requests.push(method);
+      return { status: () => status };
+    },
+    async fulfill() {},
+    async abort() {}
+  });
+  for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE"]) { await invoke(method); }
+  const evidence = await session.assertHealthy();
+  assert.deepEqual(requests, ["GET", "POST", "PUT", "PATCH", "DELETE"]);
+  assert.equal(evidence.validationPassed, false);
+  assert.equal(evidence.mutationMode, "approved-write");
+  assert.deepEqual(evidence.requests, requests.map(method => ({ method, status: 200 })));
+  assert.doesNotMatch(JSON.stringify(evidence), /synthetic-value|payload|Authorization/u);
+  await invoke("POST", "https://api.production.example.test/items");
+  await assert.rejects(session.assertHealthy(), /outside the configured DEV/u);
+  assert.equal(requests.length, 5);
+  await assert.rejects(session.close(), /outside the configured DEV/u);
+  assert.equal(closed, true);
+});
+
+test("persistent DEV access never overrides API-only, unit-only or production-backed contracts", async t => {
+  for (const restrict of [
+    profile => { profile.browserAutomation.mode = "api"; },
+    profile => { profile.validation = { liveTestsRequired: false }; },
+    profile => { profile.browserAutomation.apiAuthentication = { productionDatabaseReadOnly: true }; }
+  ]) {
+    const state = fixture(t);
+    state.profile.browserAutomation.dataSafety.devWrite = {
+      allowAll: true, origins: ["https://api.dev.example.test"],
+      scope: "api://example-service/access", sessionHelper: "session.mjs"
+    };
+    restrict(state.profile);
+    state.save();
+    assert.throws(() => createDevPostTool({ ...state.settings,
+      jobId: "11111111-1111-4111-8111-111111111111" }), /explicit non-production/u);
+    await assert.rejects(createDevBrowserContext({}, {
+      repository: state.repository, targetEnvironment: "dev"
+    }), /explicit non-production/u);
+    assert.equal(state.requests.length, 0);
+    assert.equal(state.prompts.length, 0);
+  }
+});
+
+test("DEV browser guards revoke changed setup and never retry ambiguous mutations", async t => {
+  for (const mode of ["network", "redirect", "configuration", "server"]) {
+    const state = fixture(t);
+    state.profile.applications = { frontend: { healthUrl: "http://localhost:3000" } };
+    state.profile.browserAutomation.dataSafety.devWrite = {
+      allowAll: true, origins: ["https://api.dev.example.test"],
+      scope: "api://example-service/access", sessionHelper: "session.mjs"
+    };
+    state.save();
+    let handler;
+    let sent = 0;
+    const session = await createDevBrowserContext({ async newContext() {
+      return { async route(_pattern, callback) { handler = callback; },
+        async routeWebSocket() {}, async close() {} };
+    } }, { repository: state.repository, targetEnvironment: "DEV" });
+    if (mode === "configuration") { writeFileSync(state.helper, "export const changed = true;"); }
+    const route = {
+      request: () => ({ url: () => state.url, method: () => "POST",
+        resourceType: () => "xhr", redirectedFrom: () => null }),
+      async fetch() { sent++; if (mode === "network") { throw new Error("private diagnostic"); }
+        return { status: () => mode === "server" ? 500 : 302 }; },
+      async fulfill() { assert.equal(mode, "server", "Redirected or failed transport must not be fulfilled."); },
+      async abort() {}
+    };
+    await handler(route);
+    await handler(route);
+    assert.equal(sent, mode === "configuration" ? 0 : 1);
+    await assert.rejects(session.close(), /changed|redirect|failed|HTTP 500/u);
+  }
+});
+
 test("broad DEV approval supports every write method and any record/path only on exact reviewed origins", async (t) => {
   const state = fixture(t);
   delete state.profile.browserAutomation.dataSafety.devPost;
@@ -724,7 +844,7 @@ test(`native SDK consumes ${environment} ${postOnly ? "POST-only" : "broad"} app
     client: {
       async start() {},
       async createSession(options) {
-        exposedTool = options.tools[0];
+        exposedTool = options.tools.definitions[0];
         assert.equal(exposedTool.name, postOnly ? "fixlab_nonproduction_post" : `fixlab_${environment.toLowerCase()}_write`);
         return {
           rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
@@ -898,7 +1018,7 @@ test("native SDK consumes job-scoped POST approval without prompting and revokes
     client: {
       async start() {},
       async createSession(options) {
-        exposedTool = options.tools[0];
+        exposedTool = options.tools.definitions[0];
         return {
           rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
           async sendAndWait() {
@@ -983,11 +1103,11 @@ test("native SDK exposes DEV POST only with explicit run policy and never uses A
     client: {
       async start() {},
       async createSession(options) {
-        assert.equal(options.tools[0].name, "fixlab_dev_post");
+        assert.equal(options.tools.definitions[0].name, "fixlab_dev_post");
         return {
           rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
           async sendAndWait() {
-            await assert.rejects(options.tools[0].handler(state.args), /not individually approved/u);
+            await assert.rejects(options.tools.definitions[0].handler(state.args), /not individually approved/u);
           }
         };
       },

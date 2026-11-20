@@ -32,6 +32,7 @@ import {
   createCacheContext,
   createCopilotExecutor,
   createAuthenticationDiagnostics,
+  createRuntimeExecutor,
   createDashboardServer,
   configuredTestSynthesis,
   createProcessCompletion,
@@ -46,6 +47,7 @@ import {
   openLocalUrl,
   normalizeEngineeringSummary,
   validateCopilotModel,
+  validateLiveTestConfiguration,
   validateLiveTestProfile
 } from "../dashboard/server.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
@@ -62,6 +64,152 @@ const packageRoot = new URL("..", import.meta.url).pathname.replace(
   "$1"
 );
 
+test("isolated dashboard jobs automatically hand off the same ID, run in parallel and queue only shared testing", async () => {
+  const repository = createGitRepository();
+  const workspaces = new Map();
+  const executions = [];
+  const profile = validProfile({
+    worktreeSetup: { mode: "isolated" },
+    validation: { gates: [{ id: "local-check", stage: "local-stack", requiresLiveIntegration: false,
+      command: process.execPath, args: ["-e", "console.log('owned checkout check')"],
+      workingDirectory: ".", timeoutSeconds: 30 }] }
+  });
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  git(repository, ["add", "."]);
+  git(repository, ["commit", "--quiet", "-m", "Configured isolated jobs"]);
+  git(repository, ["switch", "--detach", "HEAD"]);
+  writeFileSync(join(repository, "tracked.txt"), "preserve source edits");
+  let setups = 0;
+  const current = await startDashboard(repository, input => {
+    let finish;
+    const completion = new Promise(resolve => { finish = resolve; });
+    executions.push({ ...input, finish });
+    return { completion, terminate() {} };
+  }, undefined, {
+    workspaceServers: workspaces,
+    workspaceSetup: async ({ workspace }) => {
+      setups += 1;
+      assert.equal(readFileSync(join(workspace.repository, "tracked.txt"), "utf8").trim(), "initial");
+      return { ready: true, message: "Synthetic fixture restore completed." };
+    }
+  });
+  try {
+    const post = input => jsonRequest(current.url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Fix this isolated fixture.", mode: "fix-and-validate",
+        routineFileAccess: true, ...input })
+    });
+    const first = await post({});
+    assert.equal(first.response.status, 202, JSON.stringify(first.body));
+    assert.equal(first.body.job.status, "running", first.body.job.error);
+    const firstJob = first.body.job;
+    assert.equal(firstJob.workspace.jobId, firstJob.id);
+    assert.equal(executions[0].sessionId, firstJob.id);
+    assert.equal(executions[0].repository, firstJob.workspace.repository);
+    assert.equal(executions[0].fileAccess, null, "Checkout-specific trust is not copied to another directory.");
+    const firstArgs = { repository, port: Number(new URL(current.url).port) };
+    const forwarded = await dashboardConversation(firstArgs);
+    assert.equal(forwarded.repository, firstJob.workspace.repository);
+    const { result: second } = await dashboardControl({ ...firstArgs,
+      instanceId: forwarded.instanceId, jobId: forwarded.job.id, operation: "job-start", confirmed: true,
+      parameters: { request: "Fix another isolated fixture.", mode: "fix-and-validate" } });
+    assert.equal(second.queued, false);
+    assert.equal(second.job.status, "running", second.job.error);
+    const secondJob = (await jsonRequest(current.url, "/api/status")).body.job;
+    assert.equal(second.job.id, secondJob.id);
+    assert.equal(executions.length, 2);
+    assert.equal(setups, 2);
+    assert.notEqual(executions[0].repository, executions[1].repository);
+    assert.equal(readFileSync(join(repository, "tracked.txt"), "utf8"), "preserve source edits");
+    const invoke = (job, payload) => jsonRequest(job.workspace.url, "/api/validation/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jobId: job.id, repository: job.workspace.repository, ...payload })
+    });
+    assert.equal((await invoke(firstJob, { resource: "local-testing" })).body.status, 0);
+    let finished = false;
+    const queued = invoke(secondJob, { gateId: "local-check" }).then(result => { finished = true; return result; });
+    let waiting = false;
+    for (let attempt = 0; attempt < 100 && !waiting; attempt += 1) {
+      const state = (await jsonRequest(secondJob.workspace.url, "/api/status")).body.job;
+      waiting = state.logs.some(entry => entry.message.includes("Waiting for another job"));
+      if (!waiting) { await new Promise(resolve => setTimeout(resolve, 20)); }
+    }
+    assert.equal(waiting, true);
+    assert.equal(finished, false);
+    executions[0].finish({ code: 0 });
+    const completed = await queued;
+    assert.equal(completed.response.status, 200, JSON.stringify(completed.body));
+    assert.equal(completed.body.status, 0, completed.body.summary);
+    const validated = (await jsonRequest(secondJob.workspace.url, "/api/status")).body.job;
+    assert.equal(validated.validation.gates.find(gate => gate.id === "local-check").status, "passed");
+    const active = await dashboardConversation(firstArgs);
+    const stopped = await dashboardControl({ ...firstArgs, instanceId: active.instanceId, jobId: active.job.id,
+      operation: "job-stop", parameters: {}, confirmed: true });
+    assert.equal(stopped.state.job.id, secondJob.id);
+  } finally {
+    await current.dashboard.close();
+    rmSync(`${repository}.fixlab-worktrees`, { recursive: true, force: true });
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("parallel checkout preparation retains each response identity and Stop cancels only its owned setup", async () => {
+  const repository = createGitRepository();
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"),
+    JSON.stringify(validProfile({ worktreeSetup: { mode: "isolated" } })));
+  git(repository, ["add", "."]);
+  git(repository, ["commit", "--quiet", "-m", "Isolated setup fixture"]);
+  const setups = [];
+  const executions = [];
+  const current = await startDashboard(repository, input => {
+    executions.push(input.repository);
+    return { completion: Promise.resolve({ code: 0 }), hasStopped: () => true };
+  }, undefined, {
+    workspaceSetup: ({ workspace, signal }) => new Promise((resolveSetup, reject) => {
+      setups.push({ workspace, finish: () => resolveSetup({ ready: true, message: "Synthetic restore completed." }) });
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    })
+  });
+  let first;
+  let second;
+  try {
+    const post = () => jsonRequest(current.url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Fix the synthetic fixture.", mode: "fix-and-validate" })
+    });
+    first = post();
+    for (let attempt = 0; attempt < 100 && setups.length < 1; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(setups.length, 1);
+    const firstJob = (await jsonRequest(current.url, "/api/status")).body.job;
+    second = post();
+    for (let attempt = 0; attempt < 100 && setups.length < 2; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(setups.length, 2, "Preparation must not wait for another job's setup.");
+    const stopped = await jsonRequest(firstJob.workspace.url, "/api/job/stop", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+    });
+    assert.equal(stopped.response.status, 202, JSON.stringify(stopped.body));
+    assert.equal(stopped.body.job.status, "cancelled");
+    const firstResult = await first;
+    assert.equal(firstResult.body.job.id, firstJob.id);
+    assert.equal(firstResult.body.job.status, "cancelled");
+    assert.equal(executions.length, 0);
+    setups[1].finish();
+    const secondResult = await second;
+    assert.notEqual(secondResult.body.job.id, firstJob.id);
+    assert.equal(secondResult.body.queued, false);
+    assert.deepEqual(executions, [secondResult.body.job.workspace.repository]);
+  } finally {
+    await current.dashboard.close();
+    await Promise.allSettled([first, second]);
+    rmSync(`${repository}.fixlab-worktrees`, { recursive: true, force: true });
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test("watcher monitoring exposes only this repository's recorded history and never starts or controls work", async () => {
   const repository = createGitRepository();
   git(repository, ["remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]);
@@ -71,25 +219,78 @@ test("watcher monitoring exposes only this repository's recorded history and nev
   });
   writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
   const plan = ticketAutomationPlan(repository, profile, { environment: "dev" });
-  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
+  const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
     tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic fixture", comments: [] };
   await watchTickets({
     repository, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
     client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
     execute: async () => ({ outcome: "blocked", summary: "Human sign-in is required; no live tests ran." })
   });
-  const current = await startDashboard(repository, () => { assert.fail("Monitoring must not execute a job."); });
+  const journalPath = join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+  const legacy = JSON.parse(readFileSync(journalPath, "utf8"));
+  delete legacy.entries[0].title;
+  writeFileSync(journalPath, JSON.stringify(legacy));
+  const legacyBefore = readFileSync(journalPath, "utf8");
+  let titleCalls = 0;
+  const current = await startDashboard(repository, () => { assert.fail("Monitoring must not execute a job."); },
+    undefined, { ticketClient: {
+      load: async () => item, reviewPullRequests: async () => [],
+      loadTitles: async () => {
+        titleCalls += 1;
+        if (titleCalls > 1) { throw new Error("Synthetic title access failure"); }
+        return { 42: "Synthetic ADO title" };
+      }
+    } });
   try {
     const response = await jsonRequest(current.url, "/api/ticket-automation");
     assert.equal(response.response.status, 200);
     assert.equal(response.body.environment, "DEV");
     assert.equal(response.body.attempts[0].outcome, "blocked");
+    assert.equal(response.body.attempts[0].title, "Synthetic ADO title");
+    assert.equal(readFileSync(journalPath, "utf8"), legacyBefore);
+    await jsonRequest(current.url, "/api/ticket-automation");
+    assert.equal(titleCalls, 1, "Repeated polling must reuse bounded title metadata");
     assert.match(response.body.attempts[0].workItemUrl, /^https:\/\/dev\.azure\.com\/example-org\/Example\//);
     assert.equal((await jsonRequest(current.url, "/api/status")).body.job, null);
     const denied = await jsonRequest(current.url, "/api/ticket-automation", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "retry" })
     });
     assert.equal(denied.response.status, 404);
+    item.title = "Synthetic interrupted fixture";
+    await assert.rejects(watchTickets({
+      repository, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+      client: { findTagged: async () => [42], load: async () => item },
+      execute() { throw new Error("Synthetic interrupted execution"); }
+    }), /Synthetic interrupted/);
+    git(repository, ["branch", "fix/42-interrupted"]);
+    const journal = join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const before = readFileSync(journal, "utf8");
+    const request = (path, body, origin = current.url) => jsonRequest(current.url, path, {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: origin },
+      body: JSON.stringify(body)
+    });
+    const rejected = await request("/api/ticket-automation/review", { workItemId: 42 }, "https://untrusted.example");
+    assert.equal(rejected.response.status, 403);
+    const review = await request("/api/ticket-automation/review", { workItemId: 42 });
+    assert.equal(review.response.status, 200);
+    assert.equal(review.body.canRetry, true);
+    assert.ok(review.body.branches.some(branch => branch.startsWith("fix/42-interrupted ")));
+    assert.equal(readFileSync(journal, "utf8"), before);
+    const recovery = { workItemId: 42, reviewToken: review.body.reviewToken, decision: "retry" };
+    assert.equal((await request("/api/ticket-automation/reconcile", recovery)).response.status, 409);
+    assert.equal(readFileSync(journal, "utf8"), before);
+    const recovered = await request("/api/ticket-automation/reconcile", { ...recovery, confirmed: true });
+    assert.equal(recovered.response.status, 200);
+    assert.equal((await jsonRequest(current.url, "/api/status")).body.job, null);
+    const retired = JSON.parse(readFileSync(journalPath, "utf8"));
+    retired.entries.at(-1).id = 43;
+    delete retired.entries.at(-1).title;
+    writeFileSync(journalPath, JSON.stringify(retired));
+    const unavailable = await jsonRequest(current.url, "/api/ticket-automation");
+    assert.equal(unavailable.response.status, 200);
+    assert.match(unavailable.body.titleWarning, /ADO titles could not be loaded/);
+    assert.equal(unavailable.body.attempts[0].workItemId, 43);
+    assert.doesNotMatch(JSON.stringify(unavailable.body), /Synthetic title access failure/);
     writeFileSync(join(repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json"),
       '{"private-sentinel-malformed');
     const invalid = await jsonRequest(current.url, "/api/ticket-automation");
@@ -130,6 +331,118 @@ test("authentication diagnostics classify split output without retaining private
   diagnostics.observe("stdout", Buffer.from("module 'private-dependency'"));
   assert.equal(diagnostics.failure().reason, "authentication-required",
     "access restrictions must not be hidden behind dependency diagnostics");
+});
+
+test("reviewed watcher handoff preserves the active job, canonical intake, permissions and durable duplicate protection", async () => {
+  const repository = createGitRepository();
+  git(repository, ["remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]);
+  const profile = validProfile({
+    environments: ["dev", "sit"], ticketAutomation: { areaPaths: ["Example\\Application"] },
+    analysis: { evidenceSources: [{ id: "incident-traces", kind: "traces", environment: "dev", helper: "trace-helper.mjs" }] }
+  });
+  writeFileSync(join(repository, "trace-helper.mjs"), 'throw new Error("Do not execute discovery.");');
+  writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  git(repository, ["add", "."]);
+  git(repository, ["commit", "--quiet", "-m", "Reviewed fixture profile"]);
+  const item = { id: 42, revision: 1, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic handoff", comments: [] };
+  const ticketClient = {
+    findTagged: async () => [42], load: async () => structuredClone(item),
+    hasComment: async () => false, async comment() {}, reviewPullRequests: async () => []
+  };
+  await watchTickets({
+    repository, plan: ticketAutomationPlan(repository, profile, { environment: "dev" }),
+    once: true, confirmed: true, allowAllTools: true, onEvent() {}, client: ticketClient,
+    execute: async () => ({ outcome: "analysis", summary: "Requires an agreed cross-layer implementation." })
+  });
+  let executions = 0;
+  const current = await startDashboard(repository, ({ prompt }) => {
+    executions += 1;
+    assert.match(prompt, /incident-traces/);
+    assert.match(prompt, /Discovery grants no tool or data access/);
+    return { completion: new Promise(() => {}), terminate() {} };
+  }, undefined, { ticketClient });
+  let restored;
+  try {
+    const post = (path, body, origin = current.url) => jsonRequest(current.url, path, {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify(body)
+    });
+    const active = await post("/api/jobs", {
+      request: "Keep the existing validation job.", mode: "validate-only", targetEnvironment: "dev"
+    });
+    assert.equal(active.response.status, 202);
+    const status = (await jsonRequest(current.url, "/api/status")).body;
+    const history = (await jsonRequest(current.url, "/api/ticket-automation")).body;
+    const attemptId = history.attempts[0].id;
+    assert.equal((await post("/api/ticket-automation/handoff-review", { attemptId },
+      "https://untrusted.example")).response.status, 403);
+    const review = (await post("/api/ticket-automation/handoff-review", { attemptId })).body;
+    const input = {
+      ...review.jobInput, mode: "fix-and-validate",
+      workItems: [{ id: 999, title: "Forged item must not replace the reviewed ticket." }],
+      watcherHandoff: { attemptId, reviewToken: review.reviewToken, instanceId: status.instanceId }
+    };
+    assert.equal((await post("/api/jobs", input)).response.status, 409);
+    input.watcherHandoff.confirmed = true;
+    assert.equal((await post("/api/jobs", input, "https://untrusted.example")).response.status, 403);
+    assert.equal((await post("/api/jobs", { ...input, targetEnvironment: "sit" })).response.status, 409);
+    item.revision += 1;
+    assert.equal((await post("/api/jobs", input)).response.status, 409);
+    input.watcherHandoff.reviewToken =
+      (await post("/api/ticket-automation/handoff-review", { attemptId })).body.reviewToken;
+    const started = await post("/api/jobs", input);
+    assert.equal(started.response.status, 202, JSON.stringify(started.body));
+    assert.equal(started.body.queued, true);
+    assert.equal(started.body.job.id, active.body.job.id);
+    assert.equal(started.body.queuedJob.bugs[0].id, "42");
+    assert.equal(started.body.queuedJob.toolApprovalMode, "ask");
+    assert.equal(started.body.queuedJob.watcherHandoff.attemptId, attemptId);
+    assert.equal(executions, 1, "The handoff queues normally and never replays the watcher.");
+    assert.equal((await post("/api/jobs", input)).response.status, 409);
+    await current.dashboard.close();
+    restored = await startDashboard(repository, () => { assert.fail("Recovery must not auto-execute."); },
+      undefined, { ticketClient });
+    const recovered = (await jsonRequest(restored.url, "/api/status")).body;
+    assert.equal(recovered.history.find(job => job.id === started.body.queuedJob.id)
+      .watcherHandoff.attemptId, attemptId);
+    const duplicate = await jsonRequest(restored.url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: restored.url },
+      body: JSON.stringify({ ...input, watcherHandoff: {
+        ...input.watcherHandoff, instanceId: recovered.instanceId
+      } })
+    });
+    assert.equal(duplicate.response.status, 409);
+    assert.match(duplicate.body.error, /already linked to local job/);
+  } finally {
+    if (restored) { await restored.dashboard.close(); }
+    await current.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("headless runtime selection resolves Copilot directly rather than falling back to Agency or the native SDK", context => {
+  const original = childProcess.spawnSync;
+  const calls = [];
+  const lookup = context.mock.method(childProcess, "spawnSync", (command, args, options) => {
+    if (args?.[0] === "copilot" && ["where.exe", "which"].includes(command)) {
+      calls.push({ command, args });
+      return { status: 1, stdout: "", stderr: "" };
+    }
+    return original(command, args, options);
+  });
+  syncBuiltinESMExports();
+  try {
+    const executor = createRuntimeExecutor({
+      packageRoot, runtime: "copilot", model: "gpt-5.3-codex", native: false
+    });
+    assert.throws(() => executor({ repository: process.cwd(), prompt: "Do not launch a real runtime." }),
+      error => error.executorNotStarted === true && /copilot executable is unavailable/.test(error.message));
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].args, ["copilot"]);
+  } finally {
+    lookup.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("engineering summary validates detail fields, redacts sensitive text and rejects unsafe paths", () => {
@@ -644,6 +957,45 @@ function validProfile(overrides = {}) {
     ...overrides
   };
 }
+
+test("configuration readiness does not require sign-in but live validation still does", async () => {
+  const repository = createGitRepository();
+  let dashboard;
+  try {
+    const profile = validProfile();
+    profile.browserAutomation.authentication = {
+      required: true, command: "node authenticate.js", statusPaths: [".auth/state.json"]
+    };
+    writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    const pending = inspectRepository(repository);
+    assert.equal(pending.configurationReady, true);
+    assert.equal(pending.profileReady, false);
+    assert.match(pending.error, /authentication is not ready/);
+    assert.equal(validateLiveTestConfiguration(profile, repository).ok, true);
+    assert.equal(validateLiveTestProfile(profile, repository).ok, false);
+    const started = await startDashboard(repository, () => assert.fail("Setup must not start an executor"));
+    dashboard = started.dashboard;
+    const instanceId = (await jsonRequest(started.url, "/api/status")).body.instanceId;
+    const configure = (body) => jsonRequest(started.url, "/api/repository/configuration", {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: started.url },
+      body: JSON.stringify({ instanceId, ...body })
+    });
+    const settings = (await configure({ action: "inspect" })).body;
+    const preview = await configure({ action: "preview", repository, revision: settings.revision,
+      values: { ...settings.values, name: "Reviewed before sign-in" }, install: false });
+    assert.equal(preview.response.status, 200, preview.body.error);
+    assert.equal(inspectRepository(repository).profileReady, false);
+    const unsafe = structuredClone(profile);
+    unsafe.browserAutomation.dataSafety.productionAllowed = true;
+    assert.equal(validateLiveTestConfiguration(unsafe, repository).ok, false);
+    mkdirSync(join(repository, ".auth"), { recursive: true });
+    writeFileSync(join(repository, ".auth", "state.json"), "{}");
+    assert.equal(inspectRepository(repository).profileReady, true);
+  } finally {
+    await dashboard?.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
 
 test("dashboard readiness blocks a missing explicit Playwright configuration", () => {
   const repository = createRepository();
@@ -2196,6 +2548,49 @@ test("PPE POST-only approval uses reviewed API bases without granting other meth
   }
 });
 
+test("persistent DEV setup authorizes real workflows without job consent and revalidates after restart", async () => {
+  const repository = createGitRepository();
+  const profile = validProfile();
+  profile.browserAutomation.testSynthesis.devReadOnly = true;
+  profile.browserAutomation.dataSafety.devWrite = {
+    allowAll: true, scope: "api://example-service/access", sessionHelper: "dev-session.mjs",
+    origins: ["https://api.dev.example.test"]
+  };
+  writeFileSync(join(repository, "dev-session.mjs"),
+    'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+  const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+  writeFileSync(profilePath, JSON.stringify(profile));
+  const launches = [];
+  const executor = input => { launches.push(input); return { completion: new Promise(() => {}) }; };
+  let running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
+  try {
+    const created = await jsonRequest(running.url, "/api/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: "Exercise real DEV create/update/submit.", mode: "validate-only",
+        targetEnvironment: "dev" })
+    });
+    assert.equal(created.response.status, 202, created.body.error);
+    assert.equal(launches[0].allowPostRequests, true);
+    assert.equal(launches[0].postWriteApproval.mode, "dev-origin");
+    assert.match(launches[0].prompt, /without job permission prompts/u);
+    assert.match(launches[0].prompt, /createDevBrowserContext/u);
+    assert.equal(created.body.job.testEvidence.source, "non-production-approved");
+    assert.equal(created.body.job.testEvidence.mutationMode, "approved-write");
+    await running.dashboard.close();
+    running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
+    const resumed = await jsonRequest(running.url, "/api/job/input", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "retry", details: "Resume with persistent repository DEV access." })
+    });
+    assert.equal(resumed.response.status, 202, resumed.body.error);
+    assert.equal(launches.at(-1).postWriteApproval.mode, "dev-origin");
+    assert.equal(launches.at(-1).postWriteApproval.jobId, created.body.job.id);
+  } finally {
+    await running.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 for (const environment of ["dev", "ppe"]) {
 for (const enabled of [true, false]) {
   test(`${environment.toUpperCase()} portal default ${enabled} is environment-bound, recovered and cannot change on retry`, async () => {
@@ -2903,6 +3298,10 @@ test("native executor forwards budget/protected-path configuration and retains b
 process.stdin.once("data", (chunk) => {
   const config = JSON.parse(chunk.toString());
   const valid = config.inputTokenLimit === 100 &&
+    config.targetEnvironment === "dev" &&
+    process.env.FIXLAB_DEV_API_ENVIRONMENT === "dev" &&
+    process.env.FIXLAB_REPOSITORY === config.repository &&
+    process.env.FIXLAB_HELPER_ROOT === config.packageRoot &&
     config.fileAccess.mode === "source-read-write" &&
     config.fileAccess.jobId === config.sessionId &&
     config.postWriteApproval.jobId === config.sessionId &&
@@ -2925,7 +3324,7 @@ setInterval(() => {}, 1000);
   t.signal.addEventListener("abort", () => handle?.terminate(), { once: true });
   try {
     handle = createCopilotExecutor({ packageRoot: runtime })({
-      repository, sessionId, prompt: "Synthetic owned budget protocol.",
+      repository, sessionId, prompt: "Synthetic owned budget protocol.", targetEnvironment: "dev",
       postWriteApproval: { jobId: sessionId, environment: "dev", revision: "a".repeat(64), mode: "dev-origin" },
       fileAccess: { mode: "source-read-write", repository: realpathSync.native(repository), jobId: sessionId },
       inputTokenLimit: 100, protectedPaths: [join(repository, "session.js")],
@@ -4043,6 +4442,11 @@ test("dashboard reports readiness and serves only known static assets", async ()
     assert.match(pageText, /id="close-workspace-tools"[^>]*>Back to chat<\/button>/);
     assert.match(pageText, /Secrets, external access and publication still need review/);
     assert.match(pageText, /proceeds autonomously/);
+    assert.match(pageText, /<table aria-label="Watcher jobs">/);
+    assert.match(pageText, /<th scope="col">Status<\/th>/);
+    assert.match(pageText, /<th scope="col">Title<\/th>/);
+    assert.match(pageText, /<tbody id="watcher-attempts"><\/tbody>/);
+    assert.match(pageText, /<ol id="queue-list"><\/ol>/);
 
     const traversal = await fetch(`${url}/..%2fpackage.json`);
     assert.equal(traversal.status, 404);
@@ -4805,6 +5209,14 @@ test("job prompts omit irrelevant publication guidance and keep one output contr
       request: "Validate the reported behavior.", mode, targetEnvironment: "dev"
     });
     assert.ok(prompt.length < limit, `${mode}: ${prompt.length} must be below ${limit}`);
+    const persistent = buildJobPrompt({
+      request: "Validate the reported behavior.", mode, targetEnvironment: "dev",
+      testEvidence: { enabled: true, source: "non-production-approved", mutationMode: "approved-write",
+        requireScenarioEvidence: true, persistentDevApi: true }
+    });
+    assert.ok(persistent.length < limit, `${mode}: configured DEV must remain below ${limit}`);
+    assert.match(persistent, /without per-job permission prompts/u);
+    assert.doesNotMatch(persistent, /Verified read-only POST searches:|writes require separate native approval/u);
     for (const marker of [
       "FixLab output protocol", "FIXLAB_TEST|source|mutation-mode|scenario",
       "FIXLAB_BUG|id|outcome|owner|summary"
@@ -5963,7 +6375,7 @@ test("dashboard queues concurrent jobs and starts the next passed job", async ()
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         request: "Reject this request type.",
-        requestType: "feature",
+        requestType: "unsupported-type",
         mode: "validate-only"
       })
     });
@@ -6313,6 +6725,12 @@ test("dashboard restores held jobs after restart", async () => {
     await first.dashboard.close();
   }
 
+  const savedPath = join(repository, ".git", "fixlab", "dashboard-jobs.json");
+  const saved = JSON.parse(readFileSync(savedPath, "utf8"));
+  saved.jobs.find(job => job.id === heldJobId).workspace = {
+    jobId: heldJobId, repository: join(repository, "previous-checkout"), url: "http://127.0.0.1:1"
+  };
+  writeFileSync(savedPath, JSON.stringify(saved));
   const second = await startDashboard(repository, () => {
     throw new Error("executor should not run while restoring held jobs");
   });
@@ -6323,6 +6741,7 @@ test("dashboard restores held jobs after restart", async () => {
       [heldJobId]
     );
     assert.equal(status.body.held[0].status, "held");
+    assert.equal(status.body.held[0].workspace, null, "A new dashboard must not reuse a dead workspace URL.");
   } finally {
     await second.dashboard.close();
     rmSync(repository, { recursive: true, force: true });

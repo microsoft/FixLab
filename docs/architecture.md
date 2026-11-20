@@ -7,10 +7,21 @@ installation and usage guides.
 
 FixLab separates orchestration from repository-specific behavior.
 
+The dashboard's native Copilot transport uses `@microsoft/copilot-sdk` v2
+and runtime protocol 4. Client startup explicitly selects coding-agent mode
+and a spawned stdio transport; session permissions, managed settings, tools
+and extensions use the v2 option groups. A protocol mismatch blocks execution
+before intake rather than counting missing stages as completed.
+
 The optional `fixlab watch` entry point polls explicitly tagged ADO work items
+assigned to the authenticated Azure DevOps user (`@Me`)
 under reviewed application area paths. It derives repository authority from the
 checkout's Git origin, requires a selected non-production environment, and uses
-the owned Agency executor for one sequential investigation per polling pass.
+the owned Agency or Copilot CLI executor for one sequential investigation per polling pass.
+Discovery filters assignment server-side; each subsequent ticket load rechecks
+`@Me` before eligibility, including execution, feedback, recovery and handoff.
+Unassigned/other-user tickets do not execute; reassignment retains existing
+findings and ownership barriers instead of silently publishing or clearing them.
 The agent proposes either a draft PR or analysis; the watcher independently
 verifies draft/repository/branch/work-item linkage and owns escaped Discussion
 feedback. Its Git-private journal records execution before launch and feedback
@@ -20,12 +31,53 @@ approved local session is separate from dashboard jobs and normal per-executor
 tool consent. Setup only supplies defaults; it never starts a watcher.
 
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
-journal through `GET /api/ticket-automation`; it never starts, retries or controls
+journal through `GET /api/ticket-automation`; reading never starts or changes
 watcher work. Future attempts retain timestamps, safe structured activity and
 agent-reported check/scenario outcomes. Raw output is not retained. The latest
 20 attempts retain at most 20 activity and 10 check updates each; older entries
 keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown.
 Last reported worker status is not a process-liveness assertion.
+
+Completed attempts support a separate local-job handoff review. An exact-origin
+POST refreshes the ticket and linked PRs and binds a token to the attempt,
+profile/helper revisions and provider evidence. Confirmation prepares the normal
+job form only; submission rechecks that evidence and attaches canonical intake
+plus durable attempt provenance. Duplicate retained handoffs are rejected.
+Ordinary queues, leases, workspace review, permissions and PR gates remain
+authoritative; watcher grants never transfer. Short Discussion comments retain
+full structured reports in expandable watcher history.
+
+Optional `analysis.evidenceSources` identifies contained repository-owned
+Cosmos/trace helpers by non-production environment. Shared discovery emits
+bounded metadata and content revisions to watcher, CLI and dashboard execution;
+it never runs a helper or grants access. Dashboard launches refresh discovery,
+including continuations. The helper's reviewed authentication/read-only
+enforcement and normal runtime permissions remain necessary; no host MCP
+configuration or production access is inherited.
+
+The watcher-only `analysis.productionReadOnlyEvidence` exception binds reviewed
+readers to an exact work-item ID, correlation ID and helper SHA256. A separate
+`--allow-production-evidence` session opt-in discloses those scopes before launch;
+only the matching ticket receives them. It never changes the non-production
+application environment or ordinary CLI/dashboard grants. Reader or profile
+changes invalidate the session. A newly approved reader revision re-evaluates
+that ticket once without deleting history; historical approval hashes never
+authorize reads after revocation. Helpers must implement and prove bounded,
+read-only transport themselves; discovery is not a sandbox or database role.
+
+Interrupted-attempt review is shared by the dashboard and `watch-review` CLI.
+It reads the bound ticket, linked provider PRs, matching local branches and
+ownership reservations. Separately confirmed reconciliation acquires the watcher
+lock and canonical executor lease and checks a fresh snapshot token before
+recording acceptance, retry authorization or a decision to remain blocked.
+It never clears another ownership reservation, launches an executor, changes
+Git/ADO state or deletes prior attempts. Retry removes only that attempt's
+deduplication barrier; a normally approved watcher restart is still required.
+Acceptance requires a stored successful result and unchanged ticket, plus fresh
+provider verification for draft PRs. Results returned before a ticket/configuration
+change are retained for review, not automatically published.
+Copilot watcher sessions explicitly use CLI transport; dashboard sessions retain
+the native SDK transport and its existing interactive publication permissions.
 
 Explicit `--resolve-on-completion` (or reviewed `ticketAutomation.resolveOnCompletion`)
 permits the watcher, not the agent, to set `Resolved` after a separately verified
@@ -570,6 +622,13 @@ client can explicitly set job `permissionPreflight` to pause before executor
 admission and use the existing exact-folder review/approval flow. It grants nothing by
 itself, and the first approved invocation starts a new runtime session rather
 than resuming one that never ran. No grants persist across dashboard restart.
+An existing job can retain its receipt-verified checkout profile when the source
+profile changes only formatting or watcher-only production diagnostic metadata.
+Recovery verifies the same worktree, branch, base commit and exact saved profile
+hash, and still checks every declared setup file. It neither rewrites the ownership
+receipt nor inherits the new diagnostic configuration. Onboarding uses the saved
+profile instead of recopying the source. Changes to execution settings or edits to
+the saved configuration remain blocking; this does not waive owner verification.
 Completed preflight lifecycle state does persist so a recovered session is not
 misclassified as an unstarted one; restarting as a new job resets that state.
 A pre-executor workspace blocker retains the approved job-local folder grant
@@ -1249,8 +1308,20 @@ It accepts only the current running job, rejects browser-origin requests,
 restricts the target to the assigned dashboard checkout, and runs one bounded
 gate at a time through the structured executor. This applies in shared and
 isolated modes; sharing a Git common directory does not establish assignment.
-For isolation, onboard the worktree and start its dashboard before creating a
-gated job. Gated jobs cannot switch checkouts through a validation request.
+For explicitly isolated editing jobs, and detached checkouts outside shared
+mode, the dashboard prepares a receipt-bound worktree and assigns the same job
+ID to its owned dashboard automatically. Declared non-sensitive configuration
+and dependency restores are prepared there; source edits and other owners are
+preserved. Checkout-specific grants, credentials and successful gate evidence
+do not transfer. The browser and MCP follow that assignment. Gated jobs cannot
+switch checkouts through a validation request.
+Independent isolated jobs execute concurrently. A separate Git-common-directory
+reservation serializes local-stack/live gates, owned application startup and
+authentication. Waiting is cancellable and resumes automatically after verified
+release; a kept-open preview retains its reservation. Direct native checks use
+the supplied `fixlab gate --resource local-testing` command first. Acquiring
+this resource is not passing validation evidence. Stop also cancels owned
+checkout setup before an executor starts; no unverified owner is reclaimed.
 Requests are rejected after owned executor stop or dashboard shutdown begins,
 including requests whose bodies were still arriving when shutdown began.
 Only executor results can pass these gates; agent stage markers cannot.

@@ -39,6 +39,43 @@ test("scenario-first validation and independent recovery stay aligned across bro
   }
 });
 
+test("persistent DEV browser/API access stays aligned across runtimes without job permission prompts", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
+    const text = readFileSync(join(root, entryPoint), "utf8");
+    for (const contract of [/RUNTIME_RECOVERY_GUIDANCE/u, /FIXLAB_HELPER_ROOT/u,
+      /FIXLAB_REPOSITORY/u, /FIXLAB_DEV_API_ENVIRONMENT/u]) {
+      assert.match(text, contract, entryPoint);
+    }
+  }
+  for (const entryPoint of ["dashboard/workflow-policy.js", "agents/fixlab.md",
+    "com.github.copilot/agents/fixlab.agent.md", "templates/fixlab-autofix.agent.md",
+    ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/[`"]/gu, "").replace(/\s+/gu, " ");
+    for (const contract of [/dataSafety\.devWrite\.allowAll=true/u, /without per-job permission prompts/u,
+      /createDevBrowserContext/u, /browserProxyPaths/u, /assertHealthy/u,
+      /not scenario success/u, /Other environments retain their existing policy/u]) {
+      assert.match(text, contract, entryPoint);
+    }
+  }
+});
+
+test("automatic checkout assignment and shared-testing waits stay aligned across execution surfaces", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of [
+    "dashboard/server.js", "bin/fixlab.js", "agents/fixlab.md",
+    "com.github.copilot/agents/fixlab.agent.md", "templates/fixlab-autofix.agent.md",
+    ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"
+  ]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/\s+/gu, " ");
+    for (const contract of [
+      /[Ii]solation is assigned automatically/u, /same job/u, /parallel in separate owned checkouts/u,
+      /--resource local-testing/u, /wait without failing/u, /reservation until it stops/u,
+      /not validation evidence/u, /never clear another owner's reservation/u
+    ]) { assert.match(text, contract, entryPoint); }
+  }
+});
+
 test("full-page portal evidence guidance stays aligned without requiring browser artifacts for API-only jobs", () => {
   const root = join(testDirectory, "..");
   for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
@@ -66,7 +103,6 @@ test("full-page portal evidence guidance stays aligned without requiring browser
     assert.match(text, /Save\/Submit and persistence remain unverified/u, entryPoint);
   }
 });
-
 test("safe recovery and scoped DEV/PPE/SIT/UAT POST guidance stay aligned across execution surfaces", () => {
   const root = join(testDirectory, "..");
   for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
@@ -252,6 +288,22 @@ test("cross-runtime validation guidance stays aligned", () => {
   );
   assert.match(browserRule, /applyTo: "dashboard\/public\/\*\*\/\*\.js"/);
   assert.match(browserRule, /event registration/);
+});
+
+test("issue-driven execution keeps runtime and packaged-agent contracts aligned", () => {
+  const root = join(testDirectory, "..");
+  for (const entry of ["dashboard/server.js", "bin/fixlab.js", "dashboard/ticket-automation.js"]) {
+    assert.match(readFileSync(join(root, entry), "utf8"), /issuePlanContext/u, entry);
+  }
+  for (const entry of ["agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"]) {
+    const text = readFileSync(join(root, entry), "utf8").replace(/\s+/gu, " ");
+    for (const contract of [/fixlab issue-plan/u, /No arbitrary KQL\/JavaScript/u,
+      /--allow-production-evidence/u, /DEV writes require explicit job approval/u,
+      /--allow-dev-writes/u, /Generated journeys stay transient/u, /actual executed assertions/u]) {
+      assert.match(text, contract, entry);
+    }
+  }
 });
 
 test("transient journey exceptions stay bounded across all execution surfaces", () => {

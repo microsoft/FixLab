@@ -84,7 +84,7 @@ function existingFile(path) {
   return readFileSync(path);
 }
 
-export function planWorktreeSetup({ source, repository, templatePath }) {
+export function planWorktreeSetup({ source, repository, templatePath, preserveProfileRevision }) {
   const sourceRoot = realpathSync.native(source);
   const targetRoot = realpathSync.native(repository);
   if (
@@ -94,9 +94,19 @@ export function planWorktreeSetup({ source, repository, templatePath }) {
     throw new Error("--from must identify another checkout of the same Git repository");
   }
   const sourceProfilePath = setupPath(sourceRoot, SETUP_PROFILE_PATH);
-  const rawProfile = existingFile(sourceProfilePath);
+  let rawProfile = existingFile(sourceProfilePath);
+  const sourceProfile = rawProfile;
   if (!rawProfile) {
     throw new Error("The --from checkout has no repository profile; configure it before worktree onboarding");
+  }
+  if (preserveProfileRevision !== undefined) {
+    const savedProfile = existingFile(setupPath(targetRoot, SETUP_PROFILE_PATH));
+    if (typeof preserveProfileRevision !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(preserveProfileRevision) || !savedProfile ||
+        createHash("sha256").update(savedProfile).digest("hex") !== preserveProfileRevision) {
+      throw new Error("The saved worktree profile changed; review its configuration before setup.");
+    }
+    rawProfile = savedProfile;
   }
   let profile;
   try {
@@ -122,7 +132,9 @@ export function planWorktreeSetup({ source, repository, templatePath }) {
     ) {
       throw new Error(`Worktree setup must not copy credentials, dependencies or browser state: ${name}`);
     }
-    const sourcePath = setupPath(sourceRoot, name);
+    const sourcePath = setupPath(
+      name === SETUP_PROFILE_PATH && preserveProfileRevision !== undefined ? targetRoot : sourceRoot, name
+    );
     const targetPath = setupPath(targetRoot, name);
     const content = existingFile(sourcePath);
     if (!content) {
@@ -142,10 +154,15 @@ export function planWorktreeSetup({ source, repository, templatePath }) {
   if (configurationErrors.length) {
     throw new Error(configurationErrors.join("\n"));
   }
-  return { source: sourceRoot, repository: targetRoot, profile, files };
+  return { source: sourceRoot, repository: targetRoot, profile, files,
+    ...(preserveProfileRevision !== undefined ? { sourceProfile } : {}) };
 }
 
 export function applyWorktreeSetup(plan) {
+  if (plan.sourceProfile &&
+      !existingFile(setupPath(plan.source, SETUP_PROFILE_PATH))?.equals(plan.sourceProfile)) {
+    throw new Error(`Setup files changed after planning; review a new plan: ${SETUP_PROFILE_PATH}`);
+  }
   for (const file of plan.files) {
     setupPath(plan.source, file.name);
     setupPath(plan.repository, file.name);
@@ -196,3 +213,4 @@ export function browserConfigurationErrors(profile, repository, plannedFiles = n
   return errors;
 }
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";

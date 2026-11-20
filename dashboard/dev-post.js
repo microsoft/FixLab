@@ -11,9 +11,7 @@ export function configuredPostSafety(profile, targetEnvironment) {
   return safety?.post?.[environment] ?? (environment === "dev" ? safety?.devPost : undefined);
 }
 
-function configurationAt(repository, environment = "dev", jobConsent = false, originWrites = false, postBases = false) {
-  const label = environment.toUpperCase();
-  const operation = originWrites ? `${label} write` : "POST";
+function profileAt(repository, operation) {
   const path = setupPath(repository, SETUP_PROFILE_PATH);
   const info = lstatSync(path);
   if (!info.isFile() || info.nlink !== 1 || info.size > 65536) {
@@ -24,6 +22,16 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
   try { profile = JSON.parse(raw.toString("utf8")); } catch {
     throw new Error(`${operation} requires a valid JSON repository profile.`);
   }
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
+    throw new Error(`${operation} requires a JSON object repository profile.`);
+  }
+  return { profile, raw };
+}
+
+function configurationAt(repository, environment = "dev", jobConsent = false, originWrites = false, postBases = false, snapshot) {
+  const label = environment.toUpperCase();
+  const operation = originWrites ? `${label} write` : "POST";
+  const { profile, raw } = snapshot ?? profileAt(repository, operation);
   const safety = profile.browserAutomation?.dataSafety;
   const configuration = originWrites ? safety?.[`${environment}Write`] : configuredPostSafety(profile, environment);
   if (!configuration || (postBases && configuration.baseUrls === undefined)) { return null; }
@@ -73,6 +81,12 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
         configuration.origins.length > 16) {
       throw new Error(`${label} writes require 1-16 explicitly reviewed ${label} HTTPS origins.`);
     }
+    if (configuration.browserProxyPaths !== undefined &&
+        (!Array.isArray(configuration.browserProxyPaths) || configuration.browserProxyPaths.length > 16 ||
+          configuration.browserProxyPaths.some(path => typeof path !== "string" ||
+            !/^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)*$/u.test(path)))) {
+      throw new Error("DEV browser proxy paths must be at most 16 literal path prefixes mapped to the approved API origins.");
+    }
     for (const origin of configuration.origins) {
       const url = new URL(origin);
       const labels = url.hostname.toLowerCase().split(/[.-]/u);
@@ -104,6 +118,32 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
   }
   return { configuration, helper, scope,
     revision: createHash("sha256").update(raw).update(readFileSync(helper)).digest("hex") };
+}
+
+export function persistentDevApiConfiguration(repository, proposedProfile) {
+  const snapshot = proposedProfile === undefined ? profileAt(repository, "DEV API")
+    : { profile: proposedProfile, raw: Buffer.from(JSON.stringify(proposedProfile)) };
+  const enabled = snapshot.profile.browserAutomation?.dataSafety?.devWrite?.allowAll;
+  if (enabled === undefined || enabled === false) { return null; }
+  if (enabled !== true || snapshot.raw.length > 65536) {
+    throw new Error("DEV API allowAll must be an explicit boolean in a bounded repository profile.");
+  }
+  const plan = configurationAt(repository, "dev", true, true, false, snapshot);
+  const frontend = snapshot.profile.applications?.frontend?.healthUrl;
+  const url = frontend ? new URL(frontend) : null;
+  if (url && (!["http:", "https:"].includes(url.protocol) || url.username || url.password)) {
+    throw new Error("DEV browser access requires a credential-free HTTP(S) frontend URL.");
+  }
+  return { ...plan, frontendOrigin: url?.origin };
+}
+
+export function inspectDevApiConfiguration(repository) {
+  try {
+    return { configured: Boolean(persistentDevApiConfiguration(repository)), error: null };
+  } catch (error) {
+    return { configured: false, error: safeRuntimeText(error.message, 1000)
+      ? error.message : "DEV API setup is invalid; review the origins, scope and session helper." };
+  }
 }
 
 export function createPostWriteApproval(repository, targetEnvironment, jobId) {
@@ -184,6 +224,12 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
     throw new Error("allowPostRequests must be a boolean.");
   }
   const environment = typeof targetEnvironment === "string" ? targetEnvironment.toLowerCase() : "";
+  const persistentDevWrites = environment === "dev" && !selectedMutationMode &&
+    mutationMode === "approved-write" && persistentDevApiConfiguration(repository);
+  if (persistentDevWrites) {
+    allowPostRequests = true;
+    postWriteApproval = createDevWriteApproval(repository, "dev", jobId);
+  }
   const jobConsent = typeof allowPostRequests === "boolean";
   const jobScoped = postWriteApproval !== undefined && postWriteApproval !== null;
   const originWrites = isOriginWriteApproval(postWriteApproval);
@@ -221,11 +267,14 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
     }
   };
   if (!jobConsent && !planAt()) { return null; }
+  const originConsent = persistentDevWrites
+    ? "The repository persistently authorizes DEV writes without per-job permission prompts."
+    : `The user explicitly approved ${allMethods ? "broad writes" : "all POST requests only"} for this job.`;
   const tool = {
     name: allMethods ? `fixlab_${environment}_write` :
       !jobConsent && environment === "dev" ? "fixlab_dev_post" : "fixlab_nonproduction_post",
     description: originWrites
-      ? `Send ${allMethods ? methods.join(", ") : "any POST, including writes,"} to any path/record within the configured ${label} HTTPS ${postBases ? "API bases" : "origins"}, using existing authentication. The user explicitly approved ${allMethods ? "broad writes" : "all POST requests only"} for this job; no endpoint/test-record list or repeat confirmation is needed. Approval is job/profile/helper-bound and expires with execution. No other ${allMethods ? "" : "methods, "}environments, redirects, retries, credentials or response bodies. A real write is not a passed scenario assertion.`
+      ? `Send ${allMethods ? methods.join(", ") : "any POST, including writes,"} to any path/record within the configured ${label} HTTPS ${postBases ? "API bases" : "origins"}, using existing authentication. ${originConsent} no endpoint/test-record list or repeat confirmation is needed. Approval is job/profile/helper-bound and expires with execution. No other ${allMethods ? "" : "methods, "}environments, redirects, retries, credentials or response bodies. A real write is not a passed scenario assertion.`
       : `Send one ${label} POST using its configured endpoint/test-record allowlist and existing authentication helper. ${jobScoped ? "The user approved this job's configured writes through the POST checkbox; no repeat confirmation is needed. Approval is bound to this job and the reviewed profile/helper revision." : "The complete URL and JSON payload require individual human confirmation, even with Allow all."} Missing setup blocks the action, not unrelated work. No redirects, retries, credentials or response bodies. This is a real write, not intercepted evidence.`,
     skipPermission: true,
     parameters: {

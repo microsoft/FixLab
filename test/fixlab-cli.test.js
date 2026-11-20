@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import {
@@ -9,6 +10,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -25,6 +27,7 @@ import {
   stopKeepAwake
 } from "../bin/keep-awake.js";
 import { buildQuerySetupPrompt } from "../dashboard/repository-setup.js";
+import { createExecutorLease } from "../dashboard/executor-lease.js";
 
 const cli = fileURLToPath(new URL("../bin/fixlab.js", import.meta.url));
 
@@ -36,6 +39,17 @@ function run(args, cwd, environment = {}, input = undefined, timeout = undefined
     input,
     timeout
   });
+}
+
+async function availableLoopbackPort() {
+  const probe = createServer();
+  await new Promise((resolvePort, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolvePort);
+  });
+  const port = probe.address().port;
+  await new Promise((resolvePort, reject) => probe.close((error) => error ? reject(error) : resolvePort()));
+  return port;
 }
 
 function createPackageManagerShims(repository) {
@@ -109,16 +123,42 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     const plan = run(args, repository);
     assert.equal(plan.status, 0, plan.stderr);
     assert.match(plan.stdout, /"requiresConfirmation": true/);
+    assert.match(plan.stdout, /"assignee": "@Me"/);
     assert.match(plan.stdout, /"targetBranch": "develop"/);
     assert.match(plan.stdout, /No work-item state changes/);
+    const copilotArgs = ["watch", repository, "--runtime", "copilot", "--model", "gpt-5.3-codex", "--environment", "dev"];
+    const copilot = run(copilotArgs, repository);
+    assert.equal(copilot.status, 0, copilot.stderr);
+    assert.match(copilot.stdout, /"runtime": "copilot"/);
+    assert.match(copilot.stdout, /"model": "gpt-5.3-codex"/);
+    assert.match(copilot.stdout, /Plan only/);
+    const copilotUnapproved = run([...copilotArgs, "--yes", "--once"], repository);
+    assert.equal(copilotUnapproved.status, 1);
+    assert.match(copilotUnapproved.stderr, /--allow-all-tools/);
     const resolutionPlan = run([...args, "--resolve-on-completion"], repository);
     assert.equal(resolutionPlan.status, 0, resolutionPlan.stderr);
     assert.match(resolutionPlan.stdout, /Resolved after a verified draft PR or a confirmed cause/);
     assert.match(resolutionPlan.stdout, /Plan only/);
+    const evidencePlan = run([...args, "--allow-production-evidence"], repository);
+    assert.equal(evidencePlan.status, 0, evidencePlan.stderr);
+    assert.match(evidencePlan.stdout, /"allowProductionEvidence": true/);
+    assert.match(evidencePlan.stdout, /"productionEvidence": \[\]/);
+    assert.match(evidencePlan.stdout, /ticket\/correlation-bound production diagnostic readers/);
+    assert.match(evidencePlan.stdout, /Plan only/);
     assert.equal(existsSync(join(repository, ".git", "fixlab", "ticket-automation")), false);
     const unapproved = run([...args, "--yes", "--once"], repository);
     assert.equal(unapproved.status, 1);
     assert.match(unapproved.stderr, /--allow-all-tools/);
+    const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
+    const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+    mkdirSync(join(repository, "portal"));
+    profile.ticketAutomation.migrations = [{ workItemId: 42, allowedPaths: ["portal"] }];
+    writeFileSync(profilePath, JSON.stringify(profile));
+    const migrationPlan = run(args, repository);
+    assert.equal(migrationPlan.status, 0, migrationPlan.stderr);
+    const disclosure = JSON.parse(migrationPlan.stdout.slice(0, migrationPlan.stdout.lastIndexOf("}") + 1));
+    assert.deepEqual(disclosure.migrations, [{ workItemId: 42, allowedPaths: ["portal"] }]);
+    assert.match(migrationPlan.stdout, /Plan only/);
     const unknown = run([...args, "--unknown-watch-option"], repository);
     assert.equal(unknown.status, 1);
     assert.match(unknown.stderr, /Usage: fixlab watch/);
@@ -239,6 +279,23 @@ test("query setup propagates runtime failure without reporting the adapter ready
   assert.equal(result.status, 7);
   assert.doesNotMatch(result.stdout, /setup ready|onboarding is ready/u);
 });
+
+test("watch recovery CLI validates IDs and confirmation before accessing providers or changing state", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-recovery-"));
+  try {
+    const review = run(["watch-review", repository, "--ticket", "../42"], repository);
+    assert.equal(review.status, 1);
+    assert.match(review.stderr, /positive --ticket/);
+    const mutatingReview = run(["watch-review", repository, "--ticket", "42", "--yes"], repository);
+    assert.equal(mutatingReview.status, 1);
+    assert.match(mutatingReview.stderr, /read-only/);
+    const recover = run(["watch-recover", repository, "--ticket", "42", "--decision", "retry",
+      "--review-token", "a".repeat(64)], repository);
+    assert.equal(recover.status, 1);
+    assert.match(recover.stderr, /explicitly confirm/);
+    assert.equal(existsSync(join(repository, ".git")), false);
+  } finally { rmSync(repository, { recursive: true, force: true }); }
+});
 test("direct shared-mode bug fixing requires dashboard-owned branch acquisition", () => {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-shared-"));
   try {
@@ -335,7 +392,7 @@ test("onboard creates a new profile and stops before placeholder setup", () => {
   }
 });
 
-test("onboard plans existing repository setup without making changes", () => {
+test("onboard reuses the repository example and plans setup without executing commands", () => {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-"));
 
   try {
@@ -359,6 +416,10 @@ test("onboard plans existing repository setup without making changes", () => {
       );
     }
     writeFileSync(join(repository, "frontend", "package-lock.json"), "{}");
+    renameSync(
+      profilePath,
+      join(repository, ".github", "fixlab", "repository-profile.example.json")
+    );
 
     const result = run(
       ["onboard", repository, "--runtime", "copilot"],
@@ -367,6 +428,9 @@ test("onboard plans existing repository setup without making changes", () => {
     );
 
     assert.equal(result.status, 0);
+    assert.match(result.stdout, /Reused repository-owned profile example/);
+    assert.doesNotMatch(result.stdout, /Then rerun fixlab onboard/);
+    assert.deepEqual(JSON.parse(readFileSync(profilePath, "utf8")), profile);
     assert.match(result.stdout, /Repository preparation plan/);
     assert.match(result.stdout, /Playwright setup directory/);
     assert.match(
@@ -441,13 +505,7 @@ test("onboard provisions a worktree only with approval, grants exact dependency 
 
 test("chat opens explicit interactive setup for an incomplete profile and does not start after setup failure", async () => {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-chat-setup-"));
-  const probe = createServer();
-  await new Promise((resolvePort, reject) => {
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", resolvePort);
-  });
-  const port = probe.address().port;
-  await new Promise((resolvePort, reject) => probe.close((error) => error ? reject(error) : resolvePort()));
+  const port = await availableLoopbackPort();
   try {
     assert.equal(run(["init", repository], repository).status, 0);
     const profilePath = join(repository, ".github", "fixlab", "repository-profile.json");
@@ -695,6 +753,57 @@ test("init creates a parseable repository profile", () => {
       readFileSync(join(promptDirectory, "fixlab.summary.prompt.md"), "utf8"),
       readFileSync(new URL("../prompts/fixlab.summary.prompt.md", import.meta.url), "utf8")
     );
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("init copies the repository example exactly and preserves subsequent local configuration", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-profile-example-"));
+  const directory = join(repository, ".github", "fixlab");
+  const examplePath = join(directory, "repository-profile.example.json");
+  const profilePath = join(directory, "repository-profile.json");
+  try {
+    mkdirSync(directory, { recursive: true });
+    const profile = JSON.parse(readFileSync(new URL("../templates/repository-profile.json", import.meta.url), "utf8"));
+    profile.name = "Repository-owned team configuration";
+    const example = `${JSON.stringify(profile, null, 2)}\n`;
+    writeFileSync(examplePath, example);
+    const initialized = run(["init", repository], repository);
+    assert.equal(initialized.status, 0, initialized.stderr);
+    assert.equal(readFileSync(profilePath, "utf8"), example);
+    profile.name = "Developer-local configuration";
+    const local = JSON.stringify(profile);
+    writeFileSync(profilePath, local);
+    writeFileSync(examplePath, "{");
+    const repeated = run(["init", repository], repository);
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.equal(readFileSync(profilePath, "utf8"), local);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("init rejects invalid repository examples without creating a generic profile or prompts", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-profile-example-"));
+  const directory = join(repository, ".github", "fixlab");
+  const examplePath = join(directory, "repository-profile.example.json");
+  try {
+    mkdirSync(directory, { recursive: true });
+    for (const contents of ["{", "[]", "null"]) {
+      writeFileSync(examplePath, contents);
+      const result = run(["init", repository], repository);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /Repository profile example/);
+      assert.equal(existsSync(join(directory, "repository-profile.json")), false);
+      assert.equal(existsSync(join(repository, ".github", "prompts")), false);
+    }
+    rmSync(examplePath);
+    mkdirSync(examplePath);
+    const result = run(["init", repository], repository);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /must be a regular file/);
+    assert.equal(existsSync(join(directory, "repository-profile.json")), false);
   } finally {
     rmSync(repository, { recursive: true, force: true });
   }
@@ -1339,6 +1448,147 @@ test("dashboard rejects unknown options before starting", () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /unknown dashboard option/);
+});
+
+async function verifyDashboardActivation(prepareRequested) {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-dashboard-example-"));
+  const port = await availableLoopbackPort();
+  const directory = join(repository, ".github", "fixlab");
+  mkdirSync(directory, { recursive: true });
+  const profile = JSON.parse(readFileSync(new URL("../templates/repository-profile.json", import.meta.url), "utf8"));
+  profile.name = "Reviewed team dashboard";
+  profile.browserAutomation.workingDirectory = "browser";
+  profile.browserAutomation.authentication = {
+    required: true, command: "node authenticate.js", statusPaths: [".auth/state.json"]
+  };
+  profile.validation.commands.frontendRestore = "node prepare.js";
+  profile.validation.commands.backendRestore = "node prepare.js";
+  profile.validation.commands.browserRestore = "node prepare.js";
+  const example = `${JSON.stringify(profile, null, 2)}\n`;
+  writeFileSync(join(directory, "repository-profile.example.json"), example);
+  for (const name of ["frontend", "backend/src", "browser"]) {
+    const workingDirectory = join(repository, name);
+    mkdirSync(workingDirectory, { recursive: true });
+    writeFileSync(join(workingDirectory, "prepare.js"),
+      'const fs = require("node:fs"); const path = require("node:path"); ' +
+      'fs.writeFileSync("prepared.txt", "ready"); ' +
+      (name === "browser"
+        ? 'const directory = path.join("node_modules", "@playwright", "test"); ' +
+          'fs.mkdirSync(directory, { recursive: true }); ' +
+          'fs.writeFileSync(path.join(directory, "index.js"), "exports.chromium = { launch: async () => ({ close: async () => {} }) };");'
+        : ""));
+  }
+  let resolveStarted;
+  let rejectStarted;
+  const started = new Promise((resolveStart, rejectStart) => {
+    resolveStarted = resolveStart;
+    rejectStarted = rejectStart;
+  });
+  const child = spawn(process.execPath, [
+    cli, "dashboard", repository, "--port", String(port),
+    ...(prepareRequested ? ["--prepare", "--yes"] : [])
+  ], {
+    cwd: repository, stdio: ["ignore", "pipe", "pipe"]
+  });
+  const exited = new Promise((resolveExit) => {
+    child.once("exit", resolveExit);
+    child.once("error", resolveExit);
+  });
+  let output = "";
+  let errors = "";
+  child.stdout.on("data", (chunk) => {
+    output += chunk;
+    if (output.includes(`FixLab dashboard: http://127.0.0.1:${port}`)) {
+      resolveStarted();
+    }
+  });
+  child.stderr.on("data", (chunk) => { errors += chunk; });
+  child.once("error", rejectStarted);
+  child.once("exit", (code) => rejectStarted(new Error(`Dashboard exited with ${code}: ${errors}`)));
+  const timer = setTimeout(() => rejectStarted(new Error(`Dashboard startup timed out: ${errors}`)), 30000);
+  try {
+    await started;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const statusResponse = await fetch(`${baseUrl}/api/status`);
+    assert.equal(statusResponse.status, 200);
+    const status = await statusResponse.json();
+    assert.equal(status.readiness.configurationReady, true, status.readiness.error);
+    assert.equal(status.readiness.profileReady, false);
+    assert.match(status.readiness.error, /authentication is not ready/);
+    assert.equal(status.readiness.profileName, profile.name);
+    assert.equal(readFileSync(join(directory, "repository-profile.json"), "utf8"), example);
+    assert.equal(existsSync(join(repository, ".github", "prompts")), false);
+    assert.equal(existsSync(join(repository, ".github", "agents")), false);
+    assert.equal(status.job, null);
+    const sessionResponse = await fetch(`${baseUrl}/api/session`);
+    assert.equal(sessionResponse.status, 200);
+    const session = await sessionResponse.json();
+    assert.equal(session.frontend.running, false);
+    assert.equal(session.authentication.running, false);
+    assert.equal(existsSync(join(repository, "browser", ".auth", "state.json")), false);
+    for (const name of ["frontend", "backend/src", "browser"]) {
+      assert.equal(existsSync(join(repository, name, "prepared.txt")), prepareRequested);
+    }
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+    }
+    await exited;
+    rmSync(repository, { recursive: true, force: true });
+  }
+}
+
+test("dashboard activates a fresh checkout without starting work or applications", () =>
+  verifyDashboardActivation(false));
+
+test("dashboard prepares and activates a fresh checkout without starting work or applications", () =>
+  verifyDashboardActivation(true));
+
+test("dashboard preparation requires approval, honors executor ownership, and stops after a failed restore", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-dashboard-prepare-"));
+  let lease;
+  try {
+    assert.equal(run(["init", repository], repository).status, 0);
+    const path = join(repository, ".github", "fixlab", "repository-profile.json");
+    const profile = JSON.parse(readFileSync(path, "utf8"));
+    profile.validation.commands.frontendRestore = "node prepare.js";
+    profile.validation.commands.backendRestore = "node prepare.js";
+    writeFileSync(path, JSON.stringify(profile));
+    for (const name of ["frontend", "backend/src"]) {
+      const directory = join(repository, name);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "prepare.js"),
+        'require("node:fs").writeFileSync("prepared.txt", "attempted"); process.exit(7);');
+    }
+    const args = ["dashboard", repository, "--prepare"];
+    const plan = run(args, repository, createPackageManagerShims(repository));
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stdout, /No dashboard started/);
+    assert.equal(existsSync(join(repository, "frontend", "prepared.txt")), false);
+    lease = createExecutorLease(repository, randomUUID()).acquire(randomUUID());
+    const busy = run([...args, "--yes"], repository);
+    assert.equal(busy.status, 1);
+    assert.match(busy.stderr, /executor|ownership|lease/i);
+    assert.equal(existsSync(join(repository, "frontend", "prepared.txt")), false);
+    lease.release();
+    lease = null;
+    const failed = run([...args, "--yes"], repository);
+    assert.equal(failed.status, 7, failed.stderr);
+    assert.doesNotMatch(failed.stdout, /FixLab dashboard:/);
+    assert.equal(existsSync(join(repository, "frontend", "prepared.txt")), true);
+    assert.equal(existsSync(join(repository, "backend", "src", "prepared.txt")), false);
+    lease = createExecutorLease(repository, randomUUID()).acquire(randomUUID());
+  } finally {
+    lease?.release();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("dashboard rejects setup approval without a preparation request", () => {
+  const result = run(["dashboard", "--yes"], process.cwd());
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--yes requires --prepare/);
 });
 
 test("dashboard browser opening is opt-in, including after onboarding", () => {

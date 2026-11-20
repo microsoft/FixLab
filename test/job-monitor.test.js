@@ -355,7 +355,7 @@ test("notification installation is plan-first, idempotent, package-bound and ref
     const installed = installNotifications(repository, packageRoot, true);
     assert.equal(installed.status, "installed");
     const content = readFileSync(installed.destination, "utf8");
-    assert.match(content, /@github\/copilot-sdk\/extension/);
+    assert.match(content, /@microsoft\/copilot-sdk\/extension/);
     assert.match(content, /notification-extension\.js/);
     assert.doesNotMatch(content, /confirmed|watch_start/);
     assert.equal(installNotifications(repository, packageRoot, true).status, "already-installed");
