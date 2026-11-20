@@ -956,6 +956,9 @@ Persisted waiting jobs are restored in their original order after a dashboard
 restart, retain their UUID runtime session IDs, and remain paused behind a
 restored blocked or failed active job. If no blocking job remains, queue
 execution resumes automatically.
+Only queues compatible with the selected runtime are restored. Watcher-handoff
+jobs remain in history rather than replaying automatically. Startup queue
+execution waits until the owning listener and dashboard session are registered.
 Waiting jobs can be removed by queue position or job ID before execution. The
 dashboard records the job as cancelled, deletes only its FixLab-owned
 screenshot artifacts, renumbers the remaining queue, and never interrupts the
