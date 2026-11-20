@@ -3284,6 +3284,8 @@ function playwrightAuthenticationConfig(repository, { apiProof = false } = {}) {
   return {
     command,
     mode: browserAutomation.mode ?? "browser",
+    frontendOrigin: browserAutomation.mode === "api" || !profile.applications?.frontend?.healthUrl
+      ? null : new URL(profile.applications.frontend.healthUrl).origin,
     proofCommand: typeof authentication.proofCommand === "string" ? authentication.proofCommand.trim() : "",
     linkedProofRevision: authentication.linkedApplication === undefined ? null : linkedApiProofPlan(repository).revision,
     portalProofRevision: apiProof ||
@@ -3496,6 +3498,8 @@ async function frontendStatus(repository, connection) {
 }
 
 function authenticationProofIdentity(configuration, job) {
+  const jobBound = configuration.mode === "api" ||
+    Boolean(configuration.linkedProofRevision || configuration.portalProofRevision);
   let stateFiles = 0;
   const paths = configuration.statusPaths.map((path) => {
     const file = resolveContainedPath(configuration.workingDirectory, path, "authentication status path");
@@ -3521,8 +3525,10 @@ function authenticationProofIdentity(configuration, job) {
     portalProofRevision: configuration.portalProofRevision,
     workingDirectory: configuration.workingDirectory,
     environment: configuration.environment,
-    jobId: job?.id ?? null,
-    targetEnvironment: job?.targetEnvironment ?? null,
+    frontendOrigin: configuration.frontendOrigin,
+    jobId: jobBound ? job?.id ?? null : null,
+    targetEnvironment: jobBound ? job?.targetEnvironment ?? null :
+      job?.targetEnvironment || configuration.environment.FIXLAB_TARGET_ENVIRONMENT || "local",
     paths
   });
 }
@@ -7861,7 +7867,8 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
       const diagnostics = createAuthenticationDiagnostics();
       const child = spawnOwnedShell({ ...configuration,
         environment: { ...configuration.environment,
-          FIXLAB_TARGET_ENVIRONMENT: apiProof ? "local" : authenticationJob?.targetEnvironment ?? "local" },
+          FIXLAB_TARGET_ENVIRONMENT: apiProof ? "local" :
+            authenticationJob?.targetEnvironment || configuration.environment.FIXLAB_TARGET_ENVIRONMENT || "local" },
         command: proving ? configuration.proofCommand : configuration.command }, false, diagnostics.observe);
       playwrightConnection.handle = child;
       child.once("fixlab-input-error", (error) => {

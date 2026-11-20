@@ -5660,6 +5660,7 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
     profilePath,
     JSON.stringify(validProfile({
       name: "Playwright authentication repository",
+      environments: ["dev"],
       browserAutomation: {
         workingDirectory: ".",
         package: "@playwright/test",
@@ -5674,6 +5675,7 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
         authentication: {
           required: true,
           command: "node playwright-auth.js",
+          environment: { FIXLAB_TARGET_ENVIRONMENT: "dev" },
           statusPaths: ["e2e/.auth/user.json"]
         },
         dataSafety: {
@@ -5685,7 +5687,7 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
   );
   writeFileSync(
     join(repository, "playwright-auth.js"),
-    'const fs = require("node:fs"); fs.mkdirSync("e2e/.auth", { recursive: true }); fs.writeFileSync("e2e/.auth/user.json", "{}");'
+    'if (process.env.FIXLAB_TARGET_ENVIRONMENT !== "dev") process.exit(9); const fs = require("node:fs"); fs.mkdirSync("e2e/.auth", { recursive: true }); fs.writeFileSync("e2e/.auth/user.json", "{}");'
   );
   const screenshotDirectory = join(
     repository,
@@ -5794,6 +5796,13 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
       /private-auth-output-sentinel/u);
     profile.browserAutomation.authentication.command = "node playwright-auth.js";
     writeFileSync(profilePath, JSON.stringify(profile));
+    assert.equal((await jsonRequest(url, "/api/playwright/connect", { method: "POST" })).response.status, 202);
+    const restoredProofDeadline = Date.now() + 10000;
+    do {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      status = await jsonRequest(url, "/api/playwright/status");
+    } while (status.body.running && Date.now() < restoredProofDeadline);
+    assert.equal(status.body.ready, true, "restored authentication must be proven before session reuse");
 
     const job = await jsonRequest(url, "/api/jobs", {
       method: "POST",
@@ -5802,12 +5811,28 @@ test("dashboard checks and starts repository-owned Playwright authentication", a
         request: "Capture browser evidence.",
         requestType: "bug-fix",
         mode: "playwright-only",
+        targetEnvironment: "dev",
         recordPlaywrightVideo: true
       })
     });
     assert.equal(job.response.status, 202);
+    assert.equal((await jsonRequest(url, "/api/playwright/status")).body.ready, true,
+      "a new browser job reuses unchanged authentication for the same environment and origin");
+    const originalHealthUrl = profile.applications.frontend.healthUrl;
+    const changedOrigin = new URL(originalHealthUrl);
+    changedOrigin.port = String(Number(changedOrigin.port || 3000) + 1);
+    profile.applications.frontend.healthUrl = changedOrigin.href;
+    writeFileSync(profilePath, JSON.stringify(profile));
     assert.equal((await jsonRequest(url, "/api/playwright/status")).body.ready, false,
-      "a different job must obtain its own browser proof");
+      "a different frontend origin must obtain fresh browser proof");
+    profile.applications.frontend.healthUrl = originalHealthUrl;
+    profile.browserAutomation.authentication.environment = { FIXLAB_TARGET_ENVIRONMENT: "sit" };
+    writeFileSync(profilePath, JSON.stringify(profile));
+    assert.equal((await jsonRequest(url, "/api/playwright/status")).body.ready, false,
+      "changed authentication environment cannot reuse the previous proof");
+    profile.browserAutomation.authentication.environment = { FIXLAB_TARGET_ENVIRONMENT: "dev" };
+    writeFileSync(profilePath, JSON.stringify(profile));
+    assert.equal((await jsonRequest(url, "/api/playwright/status")).body.ready, true);
     assert.equal(job.body.job.recordPlaywrightVideo, true);
     mkdirSync(screenshotDirectory, { recursive: true });
     writeFileSync(

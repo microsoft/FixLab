@@ -1158,6 +1158,13 @@ environment values, and local status paths. The loopback dashboard can start
 that command and reports only configured/running/ready state; it never reads or
 returns authentication-state contents. The dashboard tracks the owned
 authentication process and terminates that handle during clean shutdown.
+Ordinary browser authentication proof is reusable across jobs only while the
+configured frontend origin, effective environment, authentication commands and
+regular state-file identity remain unchanged. A new job does not imply a new
+login. Live journeys still verify actual authenticated responses; expired or
+rejected sessions require reconnection. Linked and portal/API proof retain
+their job binding, and browser-session reuse never transfers runtime or write
+permissions between jobs.
 
 The loopback dashboard exposes a bounded, selected-job Playwright evidence
 gallery. It scans
