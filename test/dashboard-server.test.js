@@ -7290,6 +7290,18 @@ test("dashboard restores queued jobs in order after restart", async () => {
     await first.dashboard.close();
   }
 
+  const incompatible = await startDashboard(repository, () => {
+    assert.fail("A saved Agency queue must not execute under Copilot.");
+  }, undefined, { runtime: "copilot" });
+  try {
+    const status = (await jsonRequest(incompatible.url, "/api/status")).body;
+    assert.deepEqual(status.queue, []);
+    assert.ok(status.history.some(job => job.id === firstQueuedJobId));
+    assert.ok(status.history.some(job => job.id === secondQueuedJobId));
+  } finally {
+    await incompatible.dashboard.close();
+  }
+
   const executorCalls = [];
   const second = await startDashboard(repository, (input) => {
     executorCalls.push(input);

@@ -122,7 +122,7 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
     tools: {
       search: { enabled: true, deferThreshold: 1 },
       largeOutput: { enabled: true, maxSizeBytes: 8192 },
-      ...(devPost ? { definitions: [devPost] } : {})
+      ...(postAccess ? { definitions: [postAccess.tool] } : {})
     },
     state: { infiniteSessions: {
       enabled: true, backgroundCompactionThreshold: 0.25, bufferExhaustionThreshold: 0.4
@@ -130,7 +130,6 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
     extensions: { sdkPath: config.extensionSdkPath },
     events: { streaming: true },
     filesystem: { additionalDirectories: config.additionalDirs },
-    ...(postAccess ? { tools: { definitions: [postAccess.tool] } } : {}),
     ...(config.model ? { model: config.model } : {}),
     ...(config.model === "hydrafusion" ? { experiments: { enableExperimentalMode: true } } : {}),
     permissions: { onRequest: async (request) => {

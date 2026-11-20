@@ -4076,7 +4076,7 @@ export function createDashboardServer({
     );
   }
   const queuedSnapshots = persistedJobs
-    .filter((job) => job.status === "queued" &&
+    .filter((job) => job.status === "queued" && !job.watcherHandoff &&
       (job.runtime ?? (job.model ? "copilot" : "")) === runtime)
     .slice(0, MAX_QUEUED_JOBS);
   for (const snapshot of queuedSnapshots) {
@@ -5003,8 +5003,6 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
       question, workspaceReview
     };
   }
-
-  startNextJob();
 
   const server = createServer(async (request, response) => {
     const requestUrl = new URL(
@@ -8104,6 +8102,7 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
         await new Promise((resolveClose) => server.close(resolveClose));
         throw error;
       }
+      await startNextJob();
       return {
         host: DASHBOARD_HOST,
         port: address.port,
