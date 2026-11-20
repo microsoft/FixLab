@@ -125,12 +125,12 @@ test("publication consent binds Azure/GitHub checkpoint transitions and leaves u
           on() {},
           async sendAndWait() {
             const commit = state.command('git commit -m "Scoped fix"');
-            assert.equal((await options.onPermissionRequest(commit)).kind, "approve-once");
+            assert.equal((await options.permissions.onRequest(commit)).kind, "approve-once");
             git("commit", "--quiet", "-m", "Scoped fix");
             for (const command of ["git push origin HEAD:refs/heads/users/test/checkpoint", contexts[0][1]]) {
-              assert.equal((await options.onPermissionRequest(state.command(command))).kind, "approve-once");
+              assert.equal((await options.permissions.onRequest(state.command(command))).kind, "approve-once");
             }
-            assert.equal((await options.onPermissionRequest({ ...commit, managedApprovalRequired: true })).kind, "reject");
+            assert.equal((await options.permissions.onRequest({ ...commit, managedApprovalRequired: true })).kind, "reject");
           }
         };
       },
@@ -279,12 +279,12 @@ test("SDK handles routine discovery and its own CLI help without prompting or gr
           } });
           const search = { ...state.read(join(state.repository, "src")),
             intention: `Search in directory: ${join(state.repository, "src")}` };
-          assert.deepEqual(await options.onPermissionRequest(search), {
+          assert.deepEqual(await options.permissions.onRequest(search), {
             kind: "approve-once", approvedInteractively: false
           });
           observe({ type: "tool.execution_complete", data: { toolCallId: "native-search" } });
           for (const request of [discovery, help]) {
-            assert.deepEqual(await options.onPermissionRequest(request), {
+            assert.deepEqual(await options.permissions.onRequest(request), {
               kind: "approve-once", approvedInteractively: false
             });
           }
@@ -293,7 +293,7 @@ test("SDK handles routine discovery and its own CLI help without prompting or gr
             { ...discovery, managedApprovalRequired: true },
             { ...help, requestSandboxBypass: true }
           ]) {
-            assert.deepEqual(await options.onPermissionRequest(request), { kind: "reject" });
+            assert.deepEqual(await options.permissions.onRequest(request), { kind: "reject" });
           }
         }
       };
@@ -540,7 +540,7 @@ test("reviewed file trust covers source reads and edits across hosts, never othe
           state.read(), write(), state.read(authTest), write(authTest),
           { ...write(), diff: "+".repeat(8500) }
         ]) {
-          assert.deepEqual(await options.onPermissionRequest(request), {
+          assert.deepEqual(await options.permissions.onRequest(request), {
             kind: "approve-once", approvedInteractively: false
           });
         }
@@ -788,13 +788,13 @@ test("SDK grants skip only explicitly reviewed matching requests and expire with
             rpc: { managedSettings: { async get() { return { failClosed: false }; } } },
             on() {},
             async sendAndWait() {
-              assert.deepEqual(await options.onPermissionRequest(request), {
+              assert.deepEqual(await options.permissions.onRequest(request), {
                 kind: "approve-once", approvedInteractively: true
               });
-              assert.deepEqual(await options.onPermissionRequest(request), {
+              assert.deepEqual(await options.permissions.onRequest(request), {
                 kind: "approve-once", approvedInteractively: !grant
               });
-              assert.deepEqual(await options.onPermissionRequest({
+              assert.deepEqual(await options.permissions.onRequest({
                 ...request, managedApprovalRequired: true
               }), { kind: "approve-once", approvedInteractively: true });
             }

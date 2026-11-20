@@ -338,7 +338,7 @@ test(`native SDK consumes broad ${environment} approval and expires it on execut
     client: {
       async start() {},
       async createSession(options) {
-        exposedTool = options.tools[0];
+        exposedTool = options.tools.definitions[0];
         assert.equal(exposedTool.name, `fixlab_${environment.toLowerCase()}_write`);
         return {
           rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
@@ -504,7 +504,7 @@ test("native SDK consumes job-scoped POST approval without prompting and revokes
     client: {
       async start() {},
       async createSession(options) {
-        exposedTool = options.tools[0];
+        exposedTool = options.tools.definitions[0];
         return {
           rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
           async sendAndWait() {
@@ -589,11 +589,11 @@ test("native SDK exposes DEV POST only with explicit run policy and never uses A
     client: {
       async start() {},
       async createSession(options) {
-        assert.equal(options.tools[0].name, "fixlab_dev_post");
+        assert.equal(options.tools.definitions[0].name, "fixlab_dev_post");
         return {
           rpc: { managedSettings: { async get() { return { failClosed: false }; } } }, on() {},
           async sendAndWait() {
-            await assert.rejects(options.tools[0].handler(state.args), /not individually approved/u);
+            await assert.rejects(options.tools.definitions[0].handler(state.args), /not individually approved/u);
           }
         };
       },

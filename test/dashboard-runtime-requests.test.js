@@ -9,8 +9,20 @@ import {
   runtimeQuestionPrompt,
   validateRuntimeUsage
 } from "../dashboard/runtime-requests.js";
-import { extensionLaunchProvider, runCopilotSession } from "../dashboard/copilot-session.js";
-import { join } from "node:path";
+import { createCopilotClient, extensionLaunchProvider, runCopilotSession } from "../dashboard/copilot-session.js";
+import { join, resolve } from "node:path";
+
+test("native SDK accepts default and experimental protocol-4 client settings", async () => {
+  for (const model of [undefined, "hydrafusion"]) {
+    const config = {
+      repository: resolve(import.meta.dirname, ".."),
+      packageRoot: resolve(import.meta.dirname, ".."),
+      model
+    };
+    const client = await createCopilotClient(config);
+    assert.deepEqual(await client.stop(), []);
+  }
+});
 
 function managedPolicyRpc(policy = { failClosed: false }) {
   return {
@@ -110,7 +122,7 @@ test("SDK safe recovery returns a denial with bounded feedback rather than appro
       async start() {},
       async createSession(options) {
         return { rpc: managedPolicyRpc(), on() {}, async sendAndWait() {
-          assert.deepEqual(await options.onPermissionRequest({ kind: "shell", fullCommandText: "x".repeat(8193) }),
+          assert.deepEqual(await options.permissions.onRequest({ kind: "shell", fullCommandText: "x".repeat(8193) }),
             { kind: "reject", feedback: PERMISSION_RECOVERY_GUIDANCE });
         } };
       },
@@ -188,16 +200,16 @@ for (const selection of ["ask", "allow-all", "live-grant"]) {
             rpc: managedPolicyRpc(), on() {},
             async sendAndWait() {
               if (selection === "live-grant") {
-                assert.deepEqual(await options.onPermissionRequest(routine), {
+                assert.deepEqual(await options.permissions.onRequest(routine), {
                   kind: "approve-once", approvedInteractively: true
                 });
               }
-              assert.deepEqual(await options.onPermissionRequest(routine), selection === "ask"
+              assert.deepEqual(await options.permissions.onRequest(routine), selection === "ask"
                 ? { kind: "reject" } : { kind: "approve-once", approvedInteractively: false });
               for (const request of manual) {
-                assert.deepEqual(await options.onPermissionRequest(request), { kind: "reject" });
+                assert.deepEqual(await options.permissions.onRequest(request), { kind: "reject" });
               }
-              await assert.rejects(options.onUserInputRequest({ question: "Complete normal sign-in?" }), /cancelled/);
+              await assert.rejects(options.interaction.onUserInputRequest({ question: "Complete normal sign-in?" }), /cancelled/);
             }
           };
         },
@@ -232,10 +244,10 @@ test("a live Allow all grant is never inherited by a replacement SDK executor", 
         rpc: managedPolicyRpc(), on() {},
         async sendAndWait() {
           const request = { kind: "shell", fullCommandText: "npm test" };
-          assert.deepEqual(await options.onPermissionRequest(request), launch === 1
+          assert.deepEqual(await options.permissions.onRequest(request), launch === 1
             ? { kind: "approve-once", approvedInteractively: true } : { kind: "reject" });
           if (launch === 1) {
-            assert.deepEqual(await options.onPermissionRequest(request), {
+            assert.deepEqual(await options.permissions.onRequest(request), {
               kind: "approve-once", approvedInteractively: false
             });
           }
@@ -404,11 +416,11 @@ for (const resume of [false, true]) {
       on(listener) { events.push(listener); },
       async sendAndWait(input) {
         assert.equal(input.prompt, "Synthetic native-bridge scenario.");
-        const permission = await config.onPermissionRequest({
+        const permission = await config.permissions.onRequest({
           kind: "shell", fullCommandText: "npm test", managedApprovalRequired: true
         });
         assert.deepEqual(permission, { kind: "approve-once", approvedInteractively: true });
-        assert.deepEqual(await config.onUserInputRequest({
+        assert.deepEqual(await config.interaction.onUserInputRequest({
           question: "Continue the synthetic scenario?", choices: ["Continue", "Cancel"]
         }), { answer: "Continue", wasFreeform: false });
         events[0]({ type: "assistant.message_delta", data: { deltaContent: "Scenario complete." } });
@@ -432,18 +444,18 @@ for (const resume of [false, true]) {
       output: (stream, text) => output.push({ stream, text })
     });
     assert.equal(stopped, true);
-    assert.equal(config.agent, "fixlab:fixlab");
-    assert.equal(config.enableManagedSettings, true);
-    assert.deepEqual(config.toolSearch, { enabled: true, deferThreshold: 1 });
-    assert.deepEqual(config.largeOutput, { enabled: true, maxSizeBytes: 8192 });
-    assert.equal(config.enableConfigDiscovery, true);
-    assert.equal(config.availableTools, undefined);
-    assert.equal(config.excludedTools, undefined);
-    assert.equal(config.customAgents, undefined);
+    assert.equal(config.agents.selected, "fixlab:fixlab");
+    assert.equal(config.github.fetchManagedSettings, true);
+    assert.deepEqual(config.tools.search, { enabled: true, deferThreshold: 1 });
+    assert.deepEqual(config.tools.largeOutput, { enabled: true, maxSizeBytes: 8192 });
+    assert.equal(config.events.streaming, true);
+    assert.equal(config.tools.availableTools, undefined);
+    assert.equal(config.tools.excludedTools, undefined);
+    assert.equal(config.agents.definitions, undefined);
     assert.equal(config.systemMessage, undefined);
     assert.equal(config.model, "hydrafusion");
-    assert.equal(config.enableExperimentalMode, true);
-    assert.deepEqual(config.additionalDirectories, ["reviewed-directory"]);
+    assert.equal(config.experiments.enableExperimentalMode, true);
+    assert.deepEqual(config.filesystem.additionalDirectories, ["reviewed-directory"]);
     assert.deepEqual(output, [{ stream: "stdout", text: "Scenario complete." }]);
   });
 }
@@ -581,8 +593,8 @@ test(`oversized ${mode} resumes compact retained history once before executing, 
         const client = {
           async start() {},
           async resumeSession(id, options) {
-            assert.equal(options.enableManagedSettings, true);
-            assert.deepEqual(options.infiniteSessions, {
+            assert.equal(options.github.fetchManagedSettings, true);
+            assert.deepEqual(options.state.infiniteSessions, {
               enabled: true, backgroundCompactionThreshold: 0.25, bufferExhaustionThreshold: 0.4
             });
             return session;
@@ -663,7 +675,7 @@ for (const inputTokenLimit of [0, 129, 130, 131]) {
     const client = {
       async start() {},
       async createSession(options) {
-        assert.deepEqual(options.infiniteSessions, {
+        assert.deepEqual(options.state.infiniteSessions, {
           enabled: true, backgroundCompactionThreshold: 0.25, bufferExhaustionThreshold: 0.4
         });
         return {
@@ -764,7 +776,7 @@ test("a pending human permission is not approved after the input ceiling is reac
         rpc: managedPolicyRpc(),
         on(value) { listener = value; },
         async sendAndWait() {
-          permission = options.onPermissionRequest({ kind: "shell", fullCommandText: "npm test" });
+          permission = options.permissions.onRequest({ kind: "shell", fullCommandText: "npm test" });
           listener({ type: "assistant.usage", data: { inputTokens: 100 } });
           await permission;
         }

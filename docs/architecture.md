@@ -7,6 +7,12 @@ installation and usage guides.
 
 FixLab separates orchestration from repository-specific behavior.
 
+The dashboard's native Copilot transport uses `@microsoft/copilot-sdk` v2
+and runtime protocol 4. Client startup explicitly selects coding-agent mode
+and a spawned stdio transport; session permissions, managed settings, tools
+and extensions use the v2 option groups. A protocol mismatch blocks execution
+before intake rather than counting missing stages as completed.
+
 The optional `fixlab watch` entry point polls explicitly tagged ADO work items
 assigned to the authenticated Azure DevOps user (`@Me`)
 under reviewed application area paths. It derives repository authority from the

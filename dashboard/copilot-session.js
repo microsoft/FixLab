@@ -36,9 +36,24 @@ export function extensionLaunchProvider(bootstrap) {
 function extensionBootstrapPath() {
   const platform = process.platform === "linux" &&
       !process.report.getReport().header.glibcVersionRuntime ? "linuxmusl" : process.platform;
-  const require = createRequire(import.meta.resolve("@github/copilot-sdk"));
-  const root = dirname(require.resolve(`@github/copilot-sdk-${platform}-${process.arch}/package.json`));
+  const require = createRequire(import.meta.resolve("@microsoft/copilot-sdk"));
+  const root = dirname(require.resolve(`@microsoft/copilot-sdk-${platform}-${process.arch}/package.json`));
   return join(root, "preloads", "extension_bootstrap.mjs");
+}
+
+export async function createCopilotClient(config) {
+  const { CopilotClient, RuntimeConnection } = await import("@microsoft/copilot-sdk");
+  config.extensionSdkPath = dirname(fileURLToPath(import.meta.resolve("@microsoft/copilot-sdk")));
+  return new CopilotClient({
+    mode: "coding-agent",
+    runtime: RuntimeConnection.forSpawnedStdio({
+      workingDirectory: config.repository,
+      args: config.model === "hydrafusion" ? ["--experimental"] : []
+    }),
+    plugins: { builtinDirectories: [config.packageRoot] },
+    extensions: { launchProvider: extensionLaunchProvider(extensionBootstrapPath()) },
+    observability: { logLevel: "error" }
+  });
 }
 
 export async function runCopilotSession(config, { client, ask, output, onUsage = () => {},
@@ -97,21 +112,22 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
   const options = {
     sessionId: config.sessionId,
     workingDirectory: config.repository,
-    agent: "fixlab:fixlab",
-    enableConfigDiscovery: true,
-    enableManagedSettings: true,
-    toolSearch: { enabled: true, deferThreshold: 1 },
-    largeOutput: { enabled: true, maxSizeBytes: 8192 },
-    infiniteSessions: {
-      enabled: true, backgroundCompactionThreshold: 0.25, bufferExhaustionThreshold: 0.4
+    agents: { selected: "fixlab:fixlab" },
+    github: { fetchManagedSettings: true },
+    tools: {
+      search: { enabled: true, deferThreshold: 1 },
+      largeOutput: { enabled: true, maxSizeBytes: 8192 },
+      ...(devPost ? { definitions: [devPost] } : {})
     },
-    extensionSdkPath: config.extensionSdkPath,
-    streaming: true,
-    additionalDirectories: config.additionalDirs,
-    ...(devPost ? { tools: [devPost] } : {}),
+    state: { infiniteSessions: {
+      enabled: true, backgroundCompactionThreshold: 0.25, bufferExhaustionThreshold: 0.4
+    } },
+    extensions: { sdkPath: config.extensionSdkPath },
+    events: { streaming: true },
+    filesystem: { additionalDirectories: config.additionalDirs },
     ...(config.model ? { model: config.model } : {}),
-    ...(config.model === "hydrafusion" ? { enableExperimentalMode: true } : {}),
-    onPermissionRequest: async (request) => {
+    ...(config.model === "hydrafusion" ? { experiments: { enableExperimentalMode: true } } : {}),
+    permissions: { onRequest: async (request) => {
       const prompt = runtimePermissionPrompt(request);
       if (budgetReached) {
         return { kind: "reject" };
@@ -204,8 +220,8 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
       return response.action === "allow"
         ? { kind: "approve-once", approvedInteractively: true }
         : { kind: "reject" };
-    },
-    onUserInputRequest: async (request) => {
+    } },
+    interaction: { onUserInputRequest: async (request) => {
       if (budgetReached) {
         throw budgetError();
       }
@@ -217,7 +233,7 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
         throw new Error("The user cancelled the runtime question.");
       }
       return { answer: response.answer, wasFreeform: response.wasFreeform };
-    }
+    } }
   };
   try {
     onUsage({ ...usage });
@@ -326,17 +342,7 @@ async function main() {
           throw new Error("A valid runtime start message is required.");
         }
         started = true;
-        const { CopilotClient, RuntimeConnection } = await import("@github/copilot-sdk");
-        message.extensionSdkPath = dirname(fileURLToPath(import.meta.resolve("@github/copilot-sdk")));
-        client = new CopilotClient({
-          connection: RuntimeConnection.forStdio({
-            args: message.model === "hydrafusion" ? ["--experimental"] : []
-          }),
-          workingDirectory: message.repository,
-          builtinPluginDirectories: [message.packageRoot],
-          extensionLaunchProvider: extensionLaunchProvider(extensionBootstrapPath()),
-          logLevel: "error"
-        });
+        client = await createCopilotClient(message);
         task = runCopilotSession(message, {
           client,
           output: (stream, text) => emit({ type: "output", stream, text }),
