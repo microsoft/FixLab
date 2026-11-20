@@ -200,6 +200,7 @@ const mutationModes = new Set([
   "approved-write",
   "profile-defined"
 ]);
+
 const profileRelativePath = join(
   ".github",
   "fixlab",

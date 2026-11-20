@@ -79,8 +79,11 @@ test("help lists supported commands", () => {
   assert.match(result.stdout, /fixlab <repository>/);
   assert.match(result.stdout, /--stop/);
   assert.match(result.stdout, /--runtime <agency\|copilot>/);
+  assert.match(result.stdout, /--model <model>/);
   assert.match(result.stdout, /--environment <name>/);
   assert.match(result.stdout, /FIXLAB_RUNTIME/);
+  assert.match(result.stdout, /FIXLAB_MODEL/);
+  assert.match(result.stdout, /HydraFusion/);
   assert.match(result.stdout, /127\.0\.0\.1:4317/);
   assert.match(result.stdout, /docs\/troubleshooting\.md/);
 });
@@ -1652,6 +1655,73 @@ test("run launches the FixLab plugin directly through Copilot", () => {
   }
 });
 
+test("run selects HydraFusion through Copilot CLI arguments or environment", () => {
+  const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-"));
+  const executableDirectory = join(repository, "bin");
+  const environment = {
+    PATH: `${executableDirectory}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}`
+  };
+
+  try {
+    assert.equal(run(["init", repository], repository).status, 0);
+    mkdirSync(executableDirectory);
+    const executable = join(
+      executableDirectory,
+      process.platform === "win32" ? "copilot.cmd" : "copilot"
+    );
+    writeFileSync(
+      executable,
+      process.platform === "win32"
+        ? "@echo off\r\necho ARGS:%*\r\nmore\r\n"
+        : "#!/bin/sh\nprintf 'ARGS:%s\\n' \"$*\"\ncat\n"
+    );
+    if (process.platform !== "win32") {
+      chmodSync(executable, 0o755);
+    }
+
+    const explicit = run(
+      [
+        "run",
+        repository,
+        "--runtime",
+        "copilot",
+        "--model",
+        "hydrafusion",
+        "--",
+        "validate",
+        "the",
+        "change"
+      ],
+      repository,
+      environment
+    );
+    assert.equal(explicit.status, 0);
+    assert.match(explicit.stdout, /--experimental --model hydrafusion/);
+
+    const fromEnvironment = run(
+      [
+        "run",
+        repository,
+        "--runtime",
+        "copilot",
+        "--",
+        "validate",
+        "the",
+        "change"
+      ],
+      repository,
+      { ...environment, FIXLAB_MODEL: "hydrafusion" }
+    );
+    assert.equal(fromEnvironment.status, 0);
+    assert.match(
+      fromEnvironment.stdout,
+      /--experimental --model hydrafusion/
+    );
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test("run without a request preserves interactive Agency mode", () => {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-"));
   const executableDirectory = join(repository, "bin");
@@ -1819,6 +1889,30 @@ test("runtime selection rejects unsupported values", () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /runtime must be one of: agency, copilot/);
+});
+
+test("model selection requires Copilot and rejects shell metacharacters", () => {
+  const agency = run(
+    ["run", "--model", "hydrafusion", "--", "validate"],
+    process.cwd()
+  );
+  assert.equal(agency.status, 1);
+  assert.match(agency.stderr, /model selection requires the copilot runtime/);
+
+  const unsafe = run(
+    [
+      "run",
+      "--runtime",
+      "copilot",
+      "--model",
+      "hydrafusion&whoami",
+      "--",
+      "validate"
+    ],
+    process.cwd()
+  );
+  assert.equal(unsafe.status, 1);
+  assert.match(unsafe.stderr, /model must be/);
 });
 
 test("run rejects an environment outside the repository profile", () => {

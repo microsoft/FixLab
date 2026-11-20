@@ -924,6 +924,7 @@ Start chat from an onboarded repository:
 ```powershell
 fixlab chat
 fixlab chat --runtime copilot
+fixlab chat --runtime copilot --model hydrafusion
 ```
 
 When the current directory is not an onboarded repository, chat asks for the
@@ -938,6 +939,7 @@ Use `fixlab dashboard` to start the local UI server without opening a browser:
 ```powershell
 fixlab dashboard
 fixlab dashboard --runtime copilot
+fixlab dashboard --runtime copilot --model hydrafusion
 ```
 
 Open the printed URL manually, request `open dashboard` in terminal chat, or
@@ -984,6 +986,10 @@ Direct mode launches:
 ```powershell
 copilot --plugin-dir <installed-fixlab-package> --agent fixlab:fixlab
 ```
+
+With HydraFusion selected, direct mode adds
+`--experimental --model hydrafusion`. Other model identifiers add only
+`--model <model>`.
 
 The dashboard uses the same plugin resolution and streams long prompts through
 standard input. Closing it terminates only its tracked runtime and Playwright

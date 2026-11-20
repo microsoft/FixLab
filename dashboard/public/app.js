@@ -2330,7 +2330,9 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
       button.classList.add("selected");
     }
     const summary = document.createElement("strong");
-    summary.textContent = `${label} · ${job.status} · ${job.requestType}`;
+    summary.textContent = `${label} · ${job.status} · ${job.requestType}${
+      job.model ? ` · ${job.model}` : ""
+    }`;
     const details = document.createElement("span");
     details.className = "job-request";
     details.textContent =

@@ -528,6 +528,7 @@ test("direct Copilot executor preserves stdin sessions and resume", () => {
     resumed.args.at(-1),
     "--resume=22222222-2222-4222-8222-222222222222"
   );
+
 });
 
 async function availablePort() {
@@ -4593,6 +4594,51 @@ test("dashboard accepts rendered text stage markers", async () => {
     assert.equal(result.body.job.stages.intake.status, "passed");
     assert.equal(result.body.job.stages["live-test"].status, "skipped");
     assert.equal(result.body.job.stages.pr.status, "blocked");
+  } finally {
+    await dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("dashboard separates adjacent rendered markers", async () => {
+  const repository = createRepository();
+  const executor = ({ onOutput }) => {
+    const markers = [
+      "FIXLAB_STAGE|intake|passed|Request accepted.",
+      "FIXLAB_ACTIVITY|diagnosis|Focused evidence confirms the existing behavior.",
+      "FIXLAB_STAGE|diagnosis|passed|Diagnosis confirmed.",
+      "FIXLAB_STAGE|reproduce|passed|Focused reproduction confirmed.",
+      "FIXLAB_STAGE|fix|skipped|Validate-only mode.",
+      "FIXLAB_STAGE|review|passed|Existing diff remains scoped.",
+      "FIXLAB_STAGE|local-stack|passed|Focused local checks passed.",
+      "FIXLAB_STAGE|live-test|skipped|Browser validation was not required.",
+      "FIXLAB_STAGE|pr|skipped|Validate-only mode."
+    ];
+    onOutput("stdout", markers.join(""));
+    return { completion: Promise.resolve({ code: 0 }), terminate() {} };
+  };
+  const { dashboard, url } = await startDashboard(repository, executor);
+
+  try {
+    const started = await jsonRequest(url, "/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: "Validate adjacent marker parsing.",
+        mode: "validate-only"
+      })
+    });
+    assert.equal(started.response.status, 202);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await jsonRequest(url, "/api/job");
+    assert.equal(result.body.job.status, "passed");
+    assert.equal(result.body.job.stages.intake.status, "passed");
+    assert.equal(result.body.job.stages.diagnosis.status, "passed");
+    assert.equal(result.body.job.stages.fix.status, "skipped");
+    assert.equal(result.body.job.stages.pr.status, "skipped");
+    assert.equal(result.body.job.activity.length, 1);
+    assert.match(result.body.job.activity[0].message, /Focused evidence/);
   } finally {
     await dashboard.close();
     rmSync(repository, { recursive: true, force: true });
