@@ -3,9 +3,9 @@ export function configuredWorkflow(profile = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       (value.mode !== undefined && !["efficient", "strict"].includes(value.mode)) ||
       (value.publication !== undefined && !["draft", "ready"].includes(value.publication)) ||
-      ["unitTestsAfterPr", "optionalBuilds"].some((key) =>
+      ["unitTestsAfterPr", "optionalBuilds", "askBeforeLiveTests"].some((key) =>
         value[key] !== undefined && typeof value[key] !== "boolean")) {
-    throw new Error("workflow must declare efficient or strict mode, draft or ready publication, and boolean unitTestsAfterPr/optionalBuilds preferences.");
+    throw new Error("workflow must declare efficient or strict mode, draft or ready publication, and boolean unitTestsAfterPr/optionalBuilds/askBeforeLiveTests preferences.");
   }
   const reviewTeams = configuredReviewTeams({ pullRequests: {
     reviewTeams: profile.pullRequests?.reviewTeams === undefined
@@ -16,6 +16,7 @@ export function configuredWorkflow(profile = {}) {
     unitTestsAfterPr: value.unitTestsAfterPr ?? false,
     publication: value.publication ?? (value.mode === "strict" ? "ready" : "draft"),
     optionalBuilds: value.optionalBuilds ?? false,
+    askBeforeLiveTests: value.askBeforeLiveTests ?? false,
     ...(reviewTeams.length ? { reviewTeams } : {})
   };
 }
@@ -100,12 +101,16 @@ export const DRAFT_INTEGRATION_GUIDANCE =
   "Draft integration deferral: for fix-and-validate jobs with saved draft publication only, continue authorized frontend or backend code work and local checks when live integration is unavailable. A configured backend does not require local .NET/Key Vault startup for a frontend-only draft. Verify the complete diff; start only applications needed by the actual checks. Existing approved DEV APIs may support authenticated reads without a local backend; deployed APIs never prove unpublished backend changes. Identity-only SSO does not authorize business reads: preserve its guards and require separately reviewed API access. After focused regression, required local gates and diff review pass, publish only the authorized DRAFT PR. Disclose every unavailable startup, authentication, browser/API check and unverified integration. Mark deferred stages skipped with the exact prerequisite, never passed; retain all gate results. Live-test gates and explicitly marked requiresLiveIntegration gates remain required for full validation, not draft publication. Explicit manual/all-UI requests, production read-only approval, ready/merge gates, repository instructions and runtime permissions remain authoritative. Do not disable guards, change the profile to fake readiness, widen SSO scopes or manufacture live evidence.";
 
 export function allowsPostPrLiveReview(job) {
-  return job.workflow?.mode === "efficient" && allowsDraftIntegrationDeferral(job) &&
+  return job.workflow?.askBeforeLiveTests === true &&
+    job.workflow?.mode === "efficient" && allowsDraftIntegrationDeferral(job) &&
     !job.skipLiveTests && !job.deferValidation && !job.testEvidence?.unitTestsOnly;
 }
 
 export const POST_PR_LIVE_REVIEW_GUIDANCE =
-  "Default draft handoff: for efficient fix-and-validate jobs with draft publication, finish focused regression, required local gates and diff review, then create or update the authorized draft PR and verify provider isDraft=true. Before optional application startup, browser/API authentication or live testing, share the PR URL and ask whether live testing is possible on the developer's machine and request PR review. Wait for the user's explicit choice; do not infer consent from ticket assignment, available authentication or a running portal. If live testing is unavailable or declined, keep the same PR draft and record live checks as pending or skipped, never passed. If accepted, validate the matching checkout and update that same PR with actual results. Explicit strict/ready, validation-only, manual/all-UI, unit-test-only and per-job validation choices remain authoritative; required gates and merge policy are never waived.";
+  "Prompted draft handoff: only when workflow.askBeforeLiveTests=true, for efficient fix-and-validate jobs with draft publication, finish focused regression, required local gates and diff review, then create or update the authorized draft PR and verify provider isDraft=true. Before optional application startup, browser/API authentication or live testing, share the PR URL and ask whether live testing is possible on the developer's machine and request PR review. Wait for the user's explicit choice; do not infer consent from ticket assignment, available authentication or a running portal. If live testing is unavailable or declined, keep the same PR draft and record live checks as pending or skipped, never passed. If accepted, validate the matching checkout and update that same PR with actual results. Explicit strict/ready, validation-only, manual/all-UI, unit-test-only and per-job validation choices remain authoritative; required gates and merge policy are never waived.";
+
+export const AUTOMATIC_LIVE_TEST_GUIDANCE =
+  "Automatic live validation: workflow.askBeforeLiveTests=false is the default. Run needed live tests on the developer's machine without a separate live-test handoff question, within the selected environment and already-reviewed repository scope. For efficient draft jobs, publish the focused checkpoint first, request PR review, then continue the smallest matching real scenario and update the same PR with actual results. Validate code changes from the exact owned checkout on localhost. Reuse valid authenticated sessions and verify fresh proof; stop for genuine expired sign-in, missing access or ownership conflicts. DEV may use configured read-only queries or existing dataSafety.devWrite.allowAll=true read/write scope and guarded helpers without per-job write prompts. Never infer write access from automatic live testing, change a read-only profile, enable another environment or bypass runtime/managed permissions, authentication, production restrictions or mutation guards. Explicit skipLiveTests, deferValidation, unit-test-only, API-only, synthetic-only and stricter per-job choices remain authoritative. Unavailable live checks stay failed, blocked or skipped, never passed; independent draft work and PR review may continue.";
 
 export const WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE =
   "Work-item validation evidence: in authorized code jobs only, only after approved live browser validation actually runs scenario assertions for the original Azure DevOps work item, use existing authorized Azure DevOps tools to attach an available genuine, reviewed non-sensitive screenshot and comment the actual result and PR link. Verify the exact work-item identity and scenario; verify the attachment relation before claiming publication. Never upload intake images, stale artifacts, login screens, browser state or invented screenshots. If validation cannot run, is skipped or is API/unit-only, do not upload screenshots. Missing capture: comment the actual result and reason without an image. Missing upload permission or an ambiguous result: report the exact limitation locally; never bypass access controls or blindly retry. Missing screenshots or evidence publication must not block the draft PR or change validation outcomes; required validation/merge gates remain authoritative.";
@@ -121,7 +126,7 @@ export function workItemValidationEvidenceGuidance(job) {
 }
 
 export function efficientWorkflowGuidance(workflow, {
-  dashboard = true, postPrLiveReview = workflow.publication === "draft"
+  dashboard = true, postPrLiveReview = workflow.askBeforeLiveTests === true && workflow.publication === "draft"
 } = {}) {
   return `Saved efficient delivery policy (applies without repeated job/stage questions):
 - Inspect the effective diff, make the smallest fix, run the focused regression checks that cover it, and self-review the checkpoint.
@@ -129,7 +134,7 @@ export function efficientWorkflowGuidance(workflow, {
 - After that reviewed focused checkpoint and any explicitly required pre-publication checks, create or update the authorized ${workflow.publication === "ready" ? "READY-FOR-REVIEW" : "DRAFT"} pull request now. Do not wait for optional broad local tests or builds. Never create an empty PR or stage unrelated files.
 - Verify provider isDraft is ${workflow.publication !== "ready"} before reporting the PR stage passed. Publication is not proof of completed validation or permission to mark ready, merge, deploy or force-push.
 ${postPrLiveReview ? `- ${POST_PR_LIVE_REVIEW_GUIDANCE}
-${dashboard ? "- After verified draft publication and any explicitly requested post-PR local checks, emit local-stack skipped only for unstarted applications, preserve completed startup outcomes, and emit live-test blocked while awaiting the user's live-test choice. Preserve pr passed and exit for same-job input. This is a planned handoff, not a failed browser run. Retry may run the focused live gate; Skip records missing live evidence and keeps the PR draft. Do not repeat completed checks or create another PR.\n" : ""}` : ""}
+${dashboard ? "- After verified draft publication and any explicitly requested post-PR local checks, emit local-stack skipped only for unstarted applications, preserve completed startup outcomes, and emit live-test blocked while awaiting the user's live-test choice. Preserve pr passed and exit for same-job input. This is a planned handoff, not a failed browser run. Retry may run the focused live gate; Skip records missing live evidence and keeps the PR draft. Do not repeat completed checks or create another PR.\n" : ""}` : workflow.askBeforeLiveTests !== true ? `- ${AUTOMATIC_LIVE_TEST_GUIDANCE}\n` : ""}
 - ${workflow.unitTestsAfterPr ? `After creating the PR, run the broader local unit-test gates against the same checkout through ${dashboard ? "dashboard-owned execution" : "fixlab exec with compact structured evidence"}. Update the same PR with actual results; do not delay PR creation while those tests run.` : "Broader local unit tests are optional and are not automatically requested. Leave their status not run/pending and report required remote CI separately."}
 - ${workflow.optionalBuilds ? "The saved repository preference requests optional builds after PR creation; run them and report their actual outcomes." : "Optional builds are not automatically requested. Offer the saved repository Settings preference once when needed, not a question for every job or stage. Never run a full build merely to decide whether a PR may be created."}
 - Keep every pending, failed, stale, skipped or not-run check explicit in the PR and dashboard. Never convert an optional check into passed, reuse stale evidence, bypass an explicitly required gate, or disable a CI/merge policy.

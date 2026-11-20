@@ -381,7 +381,7 @@ distinct from the local advisory metadata cache and does not automatically
 promote learned rules or share consumer knowledge with other repositories.
 
 `dashboard/workflow-policy.js` supplies product-wide defaults for new jobs:
-`workflow: { mode: "efficient", publication: "draft", unitTestsAfterPr: false, optionalBuilds: false }`.
+`workflow: { mode: "efficient", publication: "draft", unitTestsAfterPr: false, optionalBuilds: false, askBeforeLiveTests: false }`.
 Repository Settings persists overrides once. The reviewed focused checkpoint
 precedes an authorized draft PR; ready-for-review publication requires the
 explicit `publication: "ready"` preference. Broad unit tests and builds run
@@ -390,6 +390,13 @@ publication field retain their recorded ready-for-review intent. The runtime
 also preserves legacy strict-ready intent when no publication preference is
 specified. An explicit strict plus draft choice remains draft, with provider
 `isDraft: true` verified; strict validation requirements are unchanged.
+
+Needed live validation continues automatically within existing reviewed access;
+draft publication and PR review do not require a separate live-test choice.
+`askBeforeLiveTests: true` opts efficient draft jobs into the developer-local
+handoff instead. This workflow preference grants no runtime, authentication or
+data access. Existing persistent DEV API configuration supports reviewed reads
+and writes without per-job prompts; read-only profiles remain read-only.
 
 Editing jobs with saved draft publication separate local checkpoint readiness
 from full integration readiness. After focused regression, required local gates

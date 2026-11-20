@@ -4,7 +4,8 @@
     "mode": "efficient",
     "unitTestsAfterPr": false,
     "publication": "draft",
-    "optionalBuilds": false
+    "optionalBuilds": false,
+    "askBeforeLiveTests": false
   },
   "name": "Example React and .NET repository",
   "architecture": "React frontend with ASP.NET Core backend",

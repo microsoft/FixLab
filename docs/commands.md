@@ -18,14 +18,21 @@ checks and reviewed diff, then an authorized draft PR. Broader local unit tests
 and optional builds are not automatically requested. Repository Settings saves
 `workflow.mode` (`efficient` or `strict`), `workflow.publication` (`draft` by
 default in efficient mode, `ready` by default in strict mode),
-`workflow.unitTestsAfterPr` (default `false`) and `workflow.optionalBuilds`
-(default `false`) once. Marking a draft ready requires a separate reviewed
+`workflow.unitTestsAfterPr` (default `false`), `workflow.optionalBuilds`
+(default `false`) and `workflow.askBeforeLiveTests` (default `false`) once. Marking a draft ready requires a separate reviewed
 decision. No per-stage workflow selection is needed.
 After the default draft is published and verified, FixLab shares its URL, requests
-PR review and asks whether focused live testing is possible on the developer's
-machine. Optional application startup, sign-in and live tests wait for explicit
-acceptance. Retry runs the focused live check; Skip keeps the draft and records
-missing live evidence, never a pass. Existing strict/ready, validation-only,
+PR review and continues needed focused live tests on the developer's machine
+without another live-test handoff question. Existing authentication, runtime
+permissions, ownership and environment/data-safety restrictions remain required.
+Repository Settings can opt into `workflow.askBeforeLiveTests: true`; that mode
+waits for acceptance after draft publication. Retry runs the focused live check;
+Skip keeps the draft and records missing live evidence, never a pass.
+DEV supports either approved read-only queries or configured read/write access
+through `browserAutomation.dataSafety.devWrite.allowAll: true` and exact reviewed
+origins. Enable that scope once in Repository Settings to use the existing guarded
+API/browser helpers without per-job write prompts; automatic live testing itself
+does not enable writes or change a read-only profile. Existing strict/ready, validation-only,
 manual/all-UI, unit-test-only and explicit validation choices retain their contracts.
 After an approved browser validation actually executes assertions for the source
 Azure DevOps work item, the agent uses authorized Azure DevOps tools to attach an

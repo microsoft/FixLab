@@ -9,6 +9,10 @@ operations. Treat every runner as privileged engineering infrastructure.
 - Authorize by repository, environment, operation, and runner.
 - Separate permission to validate from permission to modify code.
 - Require explicit permission for pull request creation and deployment.
+- Automatic live validation removes only the separate draft-PR handoff question.
+  It grants no runtime or data access. Reviewed persistent DEV read/write scope
+  may run without per-job write prompts; read-only scopes, other environments,
+  authentication, managed permissions and ownership checks remain enforced.
 - Use short-lived credentials and workload identities where possible.
 
 ## Secrets

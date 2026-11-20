@@ -17,6 +17,7 @@ export const REPOSITORY_SETTING_FIELDS = [
   { key: "readyPublication", label: "Publish ready for review instead of draft? Required checks and publication consent still apply.", type: "boolean" },
   { key: "unitTestsAfterPr", label: "Run broader local unit tests after PR creation?", type: "boolean" },
   { key: "optionalBuilds", label: "Run optional builds after PR creation? Saved once, not asked each stage.", type: "boolean" },
+  { key: "askBeforeLiveTests", label: "Ask before optional live tests after a draft PR? Off runs needed tests automatically within existing approved access.", type: "boolean" },
   { key: "name", label: "What should this repository be called?", type: "text" },
   { key: "frontendDirectory", label: "Where is the frontend? Use a repository-relative folder.", type: "text" },
   { key: "frontendCommand", label: "Which command starts the frontend?", type: "text" },
@@ -109,6 +110,7 @@ export function inspectRepositorySettings(repository) {
     readyPublication: workflow.publication === "ready",
     unitTestsAfterPr: workflow.unitTestsAfterPr,
     optionalBuilds: workflow.optionalBuilds,
+    askBeforeLiveTests: workflow.askBeforeLiveTests,
     name: p.name ?? basename(info.root),
     frontendDirectory: f.workingDirectory ?? (existsSync(join(info.root, "frontend")) ? "frontend" : "."),
     frontendCommand: f.command ?? "npm start", frontendPort: f.port ?? 3000,
@@ -224,7 +226,8 @@ function configuredProfile(root, original, values) {
     workflow: configuredWorkflow({ workflow: {
       mode: values.efficientWorkflow ? "efficient" : "strict",
       publication: values.readyPublication ? "ready" : "draft",
-      unitTestsAfterPr: values.unitTestsAfterPr, optionalBuilds: values.optionalBuilds
+      unitTestsAfterPr: values.unitTestsAfterPr, optionalBuilds: values.optionalBuilds,
+      askBeforeLiveTests: values.askBeforeLiveTests
     } }),
     validation: { ...original.validation, agentIdleTimeoutMinutes: values.idleTimeoutMinutes },
     browserAutomation: {
