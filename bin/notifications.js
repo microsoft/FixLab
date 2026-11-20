@@ -27,7 +27,7 @@ export function installNotifications(repository, packageRoot, yes = false) {
   const destination = join(directory, "extension.mjs");
   const entry = pathToFileURL(resolve(packageRoot, "mcp", "notification-extension.js")).href;
   const content = [
-    'import { joinSession } from "@github/copilot-sdk/extension";',
+    'import { joinSession } from "@microsoft/copilot-sdk/extension";',
     `import { attachNotifications } from ${JSON.stringify(entry)};`,
     "await attachNotifications(joinSession);",
     ""

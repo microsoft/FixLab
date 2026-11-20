@@ -7,10 +7,21 @@ installation and usage guides.
 
 FixLab separates orchestration from repository-specific behavior.
 
+The dashboard's native Copilot transport uses `@microsoft/copilot-sdk` v2
+and runtime protocol 4. Client startup explicitly selects coding-agent mode
+and a spawned stdio transport; session permissions, managed settings, tools
+and extensions use the v2 option groups. A protocol mismatch blocks execution
+before intake rather than counting missing stages as completed.
+
 The optional `fixlab watch` entry point polls explicitly tagged ADO work items
+assigned to the authenticated Azure DevOps user (`@Me`)
 under reviewed application area paths. It derives repository authority from the
 checkout's Git origin, requires a selected non-production environment, and uses
-the owned Agency executor for one sequential investigation per polling pass.
+the owned Agency or Copilot CLI executor for one sequential investigation per polling pass.
+Discovery filters assignment server-side; each subsequent ticket load rechecks
+`@Me` before eligibility, including execution, feedback, recovery and handoff.
+Unassigned/other-user tickets do not execute; reassignment retains existing
+findings and ownership barriers instead of silently publishing or clearing them.
 The agent proposes either a draft PR or analysis; the watcher independently
 verifies draft/repository/branch/work-item linkage and owns escaped Discussion
 feedback. Its Git-private journal records execution before launch and feedback
@@ -20,16 +31,71 @@ approved local session is separate from dashboard jobs and normal per-executor
 tool consent. Setup only supplies defaults; it never starts a watcher.
 
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
-journal through `GET /api/ticket-automation`; it never starts, retries or controls
+journal through `GET /api/ticket-automation`; reading never starts or changes
 watcher work. Future attempts retain timestamps, safe structured activity and
 agent-reported check/scenario outcomes. Raw output is not retained. The latest
 20 attempts retain at most 20 activity and 10 check updates each; older entries
 keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown.
 Last reported worker status is not a process-liveness assertion.
 
+Completed attempts support a separate local-job handoff review. An exact-origin
+POST refreshes the ticket and linked PRs and binds a token to the attempt,
+profile/helper revisions and provider evidence. Confirmation prepares the normal
+job form only; submission rechecks that evidence and attaches canonical intake
+plus durable attempt provenance. Duplicate retained handoffs are rejected.
+Ordinary queues, leases, workspace review, permissions and PR gates remain
+authoritative; watcher grants never transfer. Short Discussion comments retain
+full structured reports in expandable watcher history.
+
+Optional `analysis.evidenceSources` identifies contained repository-owned
+Cosmos/trace helpers by non-production environment. Shared discovery emits
+bounded metadata and content revisions to watcher, CLI and dashboard execution;
+it never runs a helper or grants access. Dashboard launches refresh discovery,
+including continuations. The helper's reviewed authentication/read-only
+enforcement and normal runtime permissions remain necessary; no host MCP
+configuration or production access is inherited.
+
+The watcher-only `analysis.productionReadOnlyEvidence` exception binds reviewed
+readers to an exact work-item ID, correlation ID and helper SHA256. A Cosmos
+reader may instead use `scope: "repository"` with a contained JSON `policy`,
+`policySha256`, and `helperSha256`, omitting fixed incident identifiers. The
+watcher supplies the current work-item ID; the reviewed helper must enforce
+policy resources, scalar projections, filters, bounded read-only execution and
+its own production opt-in. Discovery uses `--policy`; issue-specific plans are
+previewed before `--execute --allow-production-evidence`. Policy changes require
+fresh review and invalidate the running session, just like helper changes.
+This source registration never executes a helper or proves data-plane access.
+A separate
+`--allow-production-evidence` session opt-in discloses those scopes before launch;
+only the matching ticket receives them. It never changes the non-production
+application environment or ordinary CLI/dashboard grants. Reader or profile
+changes invalidate the session. A newly approved reader revision re-evaluates
+that ticket once without deleting history; historical approval hashes never
+authorize reads after revocation. Helpers must implement and prove bounded,
+read-only transport themselves; discovery is not a sandbox or database role.
+
+Interrupted-attempt review is shared by the dashboard and `watch-review` CLI.
+It reads the bound ticket, linked provider PRs, matching local branches and
+ownership reservations. Separately confirmed reconciliation acquires the watcher
+lock and canonical executor lease and checks a fresh snapshot token before
+recording acceptance, retry authorization or a decision to remain blocked.
+It never clears another ownership reservation, launches an executor, changes
+Git/ADO state or deletes prior attempts. Retry removes only that attempt's
+deduplication barrier; a normally approved watcher restart is still required.
+Acceptance requires a stored successful result and unchanged ticket, plus fresh
+provider verification for draft PRs. Results returned before a ticket/configuration
+change are retained for review, not automatically published.
+Copilot watcher sessions explicitly use CLI transport; dashboard sessions retain
+the native SDK transport and its existing interactive publication permissions.
+
 Explicit `--resolve-on-completion` (or reviewed `ticketAutomation.resolveOnCompletion`)
 permits the watcher, not the agent, to set `Resolved` after a separately verified
-draft PR or an analysis with a confirmed cause, evidence and next steps. Feedback
+draft PR, an analysis with a confirmed cause, evidence and next steps, or a logically
+completed story with a finding, evidence and completion reason. The latter applies
+only to User Stories, Features and Product Backlog Items with no ongoing or planned
+implementation; a partial investigation does not establish story completion.
+New Discussion feedback includes `[Fixlab automation]`. Existing pending feedback
+retains its original fingerprint during delivery reconciliation. Feedback
 explains that this is a human-review handoff, not merge/deployment/live-test proof.
 The client checks workflow support, tests the fresh work-item revision in JSON
 Patch and verifies the returned state/project. Unsupported workflows and changed
@@ -37,10 +103,71 @@ scope remain unresolved. Uncertain acknowledgements are read back, never blindly
 patched again; inconclusive/blocked outcomes and legacy completed attempts are not
 resolved. Resolved items are excluded from subsequent scans.
 
+When browser validation is enabled, scenario execution is the goal: run the real
+application with expected-versus-observed assertions, not only setup, sign-in or
+a screenshot. Use live data first where permitted, then profile-approved
+synthetic/intercepted data when suitable safe records or backend access are
+unavailable. Preserve the live limitation and label synthetic UI coverage
+separately. Explicit no-interception selections cannot use this fallback.
+Continue independently runnable scenarios despite unrelated PR/build/setup
+blockers, without substituting another checkout as proof of unpublished code.
+API-only, unit-only and explicitly deferred validation retain their contracts.
+
+Portal browser evidence defaults to unmasked full-page screenshots
+(`page.screenshot({ path, fullPage: true })`), without a separate screenshot-scope
+question. Crops are supplemental. Existing crop-only journeys can be supplemented
+in a job-owned transient wrapper without changing the original test, shared
+configuration or request guards. Explicit privacy policy and genuinely sensitive
+content still require protection; credentials, sign-in/MFA screens and
+private/customer data must not be captured. Evidence remains local unless sharing
+is separately authorized. Native permissions remain independent.
+
+Every executor prompt includes its assigned repository, actual bound dashboard
+port, instance ID and job ID, including browser-only jobs with no validation
+gates. Connected tools must read fresh status and use those bindings, never infer
+the default port or control another dashboard. Connection metadata is not consent.
+
+Generated journeys are actual discoverable `.spec` files in a job-owned folder
+under the selected Playwright configuration's `testDir`, respecting its
+`testMatch` and project selection. Verify discovery with the approved runner's
+`--list` before execution, then run the selected file/project and report its
+relative path, runner command and assertion results. Discovery alone is not
+scenario success. Preserve same-job scripts through retries; existing transient
+cleanup and product-PR exclusion rules still apply.
+
+Authentication helper output is classified transiently into fixed reason codes
+and recovery guidance for missing dependencies/browser executables, busy
+profiles, sign-in/access restrictions, configuration errors, timeouts or unknown
+failures. Raw output is never returned, logged or persisted. Both dashboard and
+connected tools expose the safe reason; this neither retries authentication nor
+grants permissions or changes browser ownership.
+
 Native runtime request classification supplies redacted, reason-specific
-diagnostics. Eligible blocked operations expose **Deny and request safe recovery**:
+diagnostics and next steps. Authorization source identifiers are not credential
+values; authorization assignments/headers and credential solicitations remain
+protected. After managed policy resolves, the native SDK may reject one eligible
+unreviewable operation with safe-recovery feedback automatically per executor.
+It creates no grant and never replays that operation. Human denials disable
+subsequent automatic recovery. Managed/sandbox restrictions, sensitive paths and
+offered source-edit review stay manual. A remaining eligible blocker reports
+that automatic recovery was attempted and requires an explicit decision.
+Eligible blocked operations expose **Deny and request safe recovery**:
 the runtime receives a rejection with fixed recovery feedback, not a permission
 grant or automatic replay. Existing stage evidence remains authoritative.
+Connected status distinguishes `executionState` from the retained job outcome:
+`waiting-for-input` and `waiting-for-permission` are not active validation.
+Non-sensitive native questions expose their exact request ID, question and
+choices. An explicitly confirmed `answer` reply is bound to the current
+instance, job and first pending request and continues that executor, without
+restarting stages or copying the answer into logs/history. Questions containing
+URLs remain dashboard-only so redacted destinations cannot be blindly approved.
+Credential-entry requests, including API keys, refresh tokens and PINs, are
+rejected before either input channel, including direct question transport.
+This includes displayed titles, details and choices. Diagnostic questions about
+credential-related tests and non-sensitive diagnostic answers remain supported;
+credential solicitation and answers containing credential values remain blocked.
+Native permissions stay in the browser panel; connected status exposes only
+fixed reason codes and recovery guidance, never commands, diffs or grant buttons.
 Separately, `fixlab_nonproduction_post` mediates DEV/PPE/SIT/UAT writes through each
 environment's existing authentication helper and exact endpoint/test-record
 allowlist. The off-by-default job-start checkbox authorizes configured writes
@@ -52,6 +179,26 @@ does not expand API-only/read-only or other-environment contracts. See the
 [security model](security.md#individually-confirmed-non-production-post) for configuration
 and the privileged-execution boundary.
 
+Reviewed Playwright business-request guards can use the current native executor's
+private browser POST relay. The runner imports `FIXLAB_BROWSER_POST_HELPER` from
+its inherited environment and calls `forwardApprovedBrowserPost`. The relay
+shares the POST tool's authorization, authentication helper and failure
+revocation; no separate approval file or browser token is used. It exists only
+with fresh configured job consent and closes on executor shutdown. Bounded API
+responses return privately to the browser, never to the model or dashboard
+history; status metadata alone does not establish a passed scenario.
+Broad PPE-origin jobs also expose `forwardApprovedBrowserRequest` for GET and
+CRUD through that same authentication and grant. This supports load/save/reload
+journeys without narrowing PPE to reads or treating every POST as a write.
+Browser requests are serialized; failed/ambiguous attempts revoke the shared
+grant without retrying pending actions. Other environment/POST-only scopes
+remain unchanged.
+
+The private relay allows at most 16 pending requests. Its bounded transport
+deadline includes queue time (20 seconds per slot, at most 320 seconds total);
+the upstream dispatch still has its separate 15-second limit. A slow earlier
+request does not consume a later request's dispatch budget.
+
 For broader DEV validation, the separate **Allow all DEV API writes for this job**
 checkbox exposes `fixlab_dev_write` for POST/PUT/PATCH/DELETE on exact reviewed
 `dataSafety.devWrite` HTTPS origins, without endpoint/test-record enumeration.
@@ -59,6 +206,15 @@ It can affect any accessible DEV record and reuses the same revision-bound,
 memory-only grant and lifecycle revocation. No other environment or explicit
 read-only contract is expanded; browser guards remain intact. See
 [DEV/PPE write configuration](security.md#broad-dev-and-ppe-api-writes).
+
+Legacy feature-specific browser guards are repaired through the separate
+interactive `fixlab setup-queries` operation. It requires a selected,
+profile-approved non-production browser read scope. Planning does not change
+files; `--yes` authorizes only reviewed query-policy/adapter changes and focused
+offline guard tests. It does not issue business API requests, grant runtime
+permissions, change product source or authorize writes. Both runtimes receive
+the same setup contract. Guard changes require a fresh reviewed validation job;
+validation-only jobs keep configuration read-only.
 
 PPE has an independent `dataSafety.ppeWrite` configuration, per-job confirmation
 and `fixlab_ppe_write` tool with the same CRUD methods and grant lifecycle.
@@ -480,6 +636,13 @@ client can explicitly set job `permissionPreflight` to pause before executor
 admission and use the existing exact-folder review/approval flow. It grants nothing by
 itself, and the first approved invocation starts a new runtime session rather
 than resuming one that never ran. No grants persist across dashboard restart.
+An existing job can retain its receipt-verified checkout profile when the source
+profile changes only formatting or watcher-only production diagnostic metadata.
+Recovery verifies the same worktree, branch, base commit and exact saved profile
+hash, and still checks every declared setup file. It neither rewrites the ownership
+receipt nor inherits the new diagnostic configuration. Onboarding uses the saved
+profile instead of recopying the source. Changes to execution settings or edits to
+the saved configuration remain blocking; this does not waive owner verification.
 Completed preflight lifecycle state does persist so a recovered session is not
 misclassified as an unstarted one; restarting as a new job resets that state.
 A pre-executor workspace blocker retains the approved job-local folder grant
@@ -678,8 +841,9 @@ profile-defined startup and live testing, evidence collection, and the gated
 pull-request outcome. It asks for human interaction only for authentication,
 unsafe-data approval, deployment or pull-request approval, or genuine blockers.
 The job form also exposes the repository profile's allowed non-production
-environments. A user can explicitly select environments such as DEV or SIT for
-profile-defined application startup and Playwright live testing. The server
+environments. A user can explicitly select profile-defined environments such
+as DEV, SIT, Test, or UAT for application startup and Playwright live testing;
+FixLab does not assume every user can access the same shared system. The server
 rejects values outside the profile allowlist and production aliases. The agent
 must use the selected environment exactly or block with the missing
 prerequisite; it cannot silently fall back to local or another environment.
@@ -793,6 +957,13 @@ failed jobs pause queue advancement so the same session remains resumable. A
 user may explicitly dismiss a failed job without resuming it; FixLab preserves
 the failed outcome in dashboard history, performs no repository mutation for
 that job, and starts the next queued job.
+Persisted waiting jobs are restored in their original order after a dashboard
+restart, retain their UUID runtime session IDs, and remain paused behind a
+restored blocked or failed active job. If no blocking job remains, queue
+execution resumes automatically.
+Only queues compatible with the selected runtime are restored. Watcher-handoff
+jobs remain in history rather than replaying automatically. Startup queue
+execution waits until the owning listener and dashboard session are registered.
 Waiting jobs can be removed by queue position or job ID before execution. The
 dashboard records the job as cancelled, deletes only its FixLab-owned
 screenshot artifacts, renumbers the remaining queue, and never interrupts the
@@ -992,6 +1163,13 @@ environment values, and local status paths. The loopback dashboard can start
 that command and reports only configured/running/ready state; it never reads or
 returns authentication-state contents. The dashboard tracks the owned
 authentication process and terminates that handle during clean shutdown.
+Ordinary browser authentication proof is reusable across jobs only while the
+configured frontend origin, effective environment, authentication commands and
+regular state-file identity remain unchanged. A new job does not imply a new
+login. Live journeys still verify actual authenticated responses; expired or
+rejected sessions require reconnection. Linked and portal/API proof retain
+their job binding, and browser-session reuse never transfers runtime or write
+permissions between jobs.
 
 The loopback dashboard exposes a bounded, selected-job Playwright evidence
 gallery. It scans
@@ -1154,8 +1332,20 @@ It accepts only the current running job, rejects browser-origin requests,
 restricts the target to the assigned dashboard checkout, and runs one bounded
 gate at a time through the structured executor. This applies in shared and
 isolated modes; sharing a Git common directory does not establish assignment.
-For isolation, onboard the worktree and start its dashboard before creating a
-gated job. Gated jobs cannot switch checkouts through a validation request.
+For explicitly isolated editing jobs, and detached checkouts outside shared
+mode, the dashboard prepares a receipt-bound worktree and assigns the same job
+ID to its owned dashboard automatically. Declared non-sensitive configuration
+and dependency restores are prepared there; source edits and other owners are
+preserved. Checkout-specific grants, credentials and successful gate evidence
+do not transfer. The browser and MCP follow that assignment. Gated jobs cannot
+switch checkouts through a validation request.
+Independent isolated jobs execute concurrently. A separate Git-common-directory
+reservation serializes local-stack/live gates, owned application startup and
+authentication. Waiting is cancellable and resumes automatically after verified
+release; a kept-open preview retains its reservation. Direct native checks use
+the supplied `fixlab gate --resource local-testing` command first. Acquiring
+this resource is not passing validation evidence. Stop also cancels owned
+checkout setup before an executor starts; no unverified owner is reclaimed.
 Requests are rejected after owned executor stop or dashboard shutdown begins,
 including requests whose bodies were still arriving when shutdown began.
 Only executor results can pass these gates; agent stage markers cannot.

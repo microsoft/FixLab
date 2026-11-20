@@ -321,6 +321,21 @@ export function sanitizeAzureDevOpsHtml(value) {
     .trim();
 }
 
+export function azureDevOpsCommentFingerprint(text) {
+  return createHash("sha256").update(text.replace(/\s+/gu, " ").trim()).digest("hex");
+}
+
+export function formatAzureDevOpsComment(text) {
+  const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  return escaped.split("\n\n").map(block => {
+    const [heading, ...lines] = block.split("\n");
+    if (heading.startsWith("## ") && lines.length && lines.every(line => line.startsWith("- "))) {
+      return `<h3>${heading.slice(3)}</h3><ul>${lines.map(line => `<li>${line.slice(2)}</li>`).join("")}</ul>`;
+    }
+    return block.replaceAll("\n", "<br>");
+  }).join("<br><br>");
+}
+
 function workItemText(value, maximumLength) {
   return sanitizeAzureDevOpsHtml(value).slice(0, maximumLength);
 }
@@ -617,7 +632,8 @@ export function createAzureDevOpsLoader({
             typeof comment?.createdDate === "string"
               ? comment.createdDate.slice(0, 100)
               : "",
-          text: workItemText(comment?.text, 2000)
+          text: workItemText(comment?.text, 2000),
+          contentFingerprint: azureDevOpsCommentFingerprint(sanitizeAzureDevOpsHtml(comment?.text))
         }))
         .filter((comment) => comment.text),
       commentsWarning: commentResult.warning,
@@ -758,6 +774,36 @@ export function createAzureDevOpsTicketClient({
     }
     return id;
   }
+  async function commentIds(id, marker) {
+    if (typeof marker !== "string" || marker.length > 200 ||
+        (!marker.startsWith("[FixLab automation ") && !/^[a-f0-9]{64}$/u.test(marker))) {
+      throw new Error("An exact feedback fingerprint or legacy automation marker is required.");
+    }
+    let continuation;
+    const matches = [];
+    for (let page = 0; page < 10; page += 1) {
+      const result = await request(`wit/workItems/${workItemId(id)}/comments?$top=100&order=desc&api-version=7.1-preview.4${continuation ? `&continuationToken=${encodeURIComponent(continuation)}` : ""}`);
+      if (!Array.isArray(result?.comments) || result.comments.length > 100) {
+        throw new Error("Azure DevOps returned an invalid comment collection.");
+      }
+      for (const comment of result.comments) {
+        const text = sanitizeAzureDevOpsHtml(comment.text);
+        if (!comment.isDeleted && (marker.startsWith("[FixLab automation ")
+          ? text.startsWith(marker) : azureDevOpsCommentFingerprint(text) === marker)) {
+          if (!Number.isSafeInteger(comment.id) || comment.id < 1) {
+            throw new Error("Azure DevOps returned an invalid feedback comment ID.");
+          }
+          matches.push(comment.id);
+        }
+      }
+      continuation = result.continuationToken;
+      if (!continuation) { return [...new Set(matches)]; }
+      if (typeof continuation !== "string" || continuation.length > 500) {
+        throw new Error("Azure DevOps returned an invalid comments continuation token.");
+      }
+    }
+    throw new Error("Existing feedback could not be fully checked; no duplicate comment was posted.");
+  }
   return {
     async findTagged(tag, areaPaths) {
       if (typeof tag !== "string" || !tag.trim() || tag.length > 100 || /[\r\n;]/u.test(tag)) {
@@ -770,7 +816,7 @@ export function createAzureDevOpsTicketClient({
       const quote = value => value.replaceAll("'", "''");
       const result = await request("wit/wiql?$top=21&api-version=7.1", {
         method: "POST",
-        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(target.project)}' AND (${areaPaths.map(path => `[System.AreaPath] UNDER '${quote(path)}'`).join(" OR ")}) AND [System.Tags] CONTAINS '${quote(tag)}' AND [System.WorkItemType] IN ('Bug', 'User Story', 'Feature', 'Product Backlog Item') AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Resolved') ORDER BY [System.ChangedDate] DESC` }
+        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${quote(target.project)}' AND [System.AssignedTo] = @Me AND (${areaPaths.map(path => `[System.AreaPath] UNDER '${quote(path)}'`).join(" OR ")}) AND [System.Tags] CONTAINS '${quote(tag)}' AND [System.WorkItemType] IN ('Bug', 'User Story', 'Feature', 'Product Backlog Item') AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Resolved') ORDER BY [System.ChangedDate] DESC` }
       });
       if (!Array.isArray(result?.workItems) || result.workItems.length > 20) {
         throw new Error("Ticket automation requires at most 20 eligible items; narrow the configured tag before continuing.");
@@ -785,40 +831,26 @@ export function createAzureDevOpsTicketClient({
       if (item.commentsWarning) {
         throw new Error(item.commentsWarning);
       }
+      const assignment = await request("wit/wiql?$top=2&api-version=7.1", {
+        method: "POST",
+        body: { query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${target.project.replaceAll("'", "''")}' AND [System.Id] = ${id} AND [System.AssignedTo] = @Me` }
+      });
+      if (!Array.isArray(assignment?.workItems) || assignment.workItems.length > 1 ||
+          assignment.workItems.some(value => value.id !== id)) {
+        throw new Error("Azure DevOps did not verify the exact work item's current-user assignment.");
+      }
+      item.assignedToCurrentUser = assignment.workItems.length === 1;
       delete item.screenshots;
       return item;
     },
-    async hasComment(id, marker) {
-      if (typeof marker !== "string" || marker.length > 200 || !marker.startsWith("[FixLab automation ")) {
-        throw new Error("An exact bounded automation feedback marker is required.");
-      }
-      let continuation;
-      for (let page = 0; page < 10; page += 1) {
-        const result = await request(`wit/workItems/${workItemId(id)}/comments?$top=100&order=desc&api-version=7.1-preview.4${continuation ? `&continuationToken=${encodeURIComponent(continuation)}` : ""}`);
-        if (!Array.isArray(result?.comments)) {
-          throw new Error("Azure DevOps returned an invalid comment collection.");
-        }
-        if (result.comments.some(comment => !comment.isDeleted &&
-            sanitizeAzureDevOpsHtml(comment.text).startsWith(marker))) {
-          return true;
-        }
-        continuation = result.continuationToken;
-        if (!continuation) {
-          return false;
-        }
-        if (typeof continuation !== "string" || continuation.length > 500) {
-          throw new Error("Azure DevOps returned an invalid comments continuation token.");
-        }
-      }
-      throw new Error("Existing feedback could not be fully checked; no duplicate comment was posted.");
-    },
+    commentIds,
+    async hasComment(id, marker) { return (await commentIds(id, marker)).length > 0; },
     async comment(id, text) {
       if (typeof text !== "string" || !text.trim() || text.length > 10000) {
         throw new Error("Ticket feedback requires bounded nonempty text.");
       }
-      const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "<br>");
-      return request(`wit/workItems/${workItemId(id)}/comments?api-version=7.1-preview.4`, {
-        method: "POST", body: { text: escaped }
+      return request(`wit/workItems/${workItemId(id)}/comments?format=html&api-version=7.1-preview.4`, {
+        method: "POST", body: { text: formatAzureDevOpsComment(text) }
       });
     },
     async resolve(id, revision, workItemType) {
@@ -844,6 +876,58 @@ export function createAzureDevOpsTicketClient({
         throw new Error("Azure DevOps did not verify the requested Resolved state.");
       }
       return result.rev;
+    },
+    async loadTitles(ids) {
+      if (!Array.isArray(ids) || !ids.length || ids.length > 20) {
+        throw new Error("Title lookup requires 1–20 work-item IDs.");
+      }
+      ids.forEach(workItemId);
+      const result = await request(`wit/workitems?ids=${ids.join(",")}&fields=System.Title,System.TeamProject&api-version=7.1`);
+      if (!Array.isArray(result?.value) || result.value.length !== ids.length ||
+          new Set(result.value.map(item => item.id)).size !== ids.length ||
+          result.value.some(item => !ids.includes(item.id) ||
+            item.fields?.["System.TeamProject"]?.toLowerCase() !== target.project.toLowerCase() ||
+            typeof item.fields?.["System.Title"] !== "string" || !item.fields["System.Title"].trim() ||
+            item.fields["System.Title"].length > 1000)) {
+        throw new Error("ADO did not return the exact recorded work-item titles in this project.");
+      }
+      return Object.fromEntries(result.value.map(item => [item.id, item.fields["System.Title"]]));
+    },
+    async reviewPullRequests(repository, ticketId) {
+      workItemId(ticketId);
+      if (typeof repository !== "string" || !repository.trim() || repository.length > 200) {
+        throw new Error("Recovery requires the configured repository.");
+      }
+      const item = await request(`wit/workitems/${ticketId}?$expand=relations&api-version=7.1`);
+      if (item?.id !== ticketId || item.fields?.["System.TeamProject"]?.toLowerCase() !== target.project.toLowerCase() ||
+          (item.relations !== undefined && !Array.isArray(item.relations))) {
+        throw new Error("Linked PR recovery requires the exact work-item identity and project.");
+      }
+      const links = (item.relations ?? []).filter(relation =>
+        relation.rel === "ArtifactLink" && typeof relation.url === "string" &&
+        relation.url.startsWith("vstfs:///Git/PullRequestId/"));
+      if (links.length > 20) { throw new Error("Too many linked PRs for bounded recovery; review the work item first."); }
+      const results = [];
+      for (const link of links) {
+        const parts = decodeURIComponent(link.url.slice("vstfs:///Git/PullRequestId/".length)).split("/");
+        if (parts.length !== 3 || !/^[1-9]\d{0,14}$/u.test(parts[2])) {
+          throw new Error("A linked PR has an invalid artifact identity; recovery remains blocked.");
+        }
+        const id = Number(parts[2]);
+        const pr = await request(`git/repositories/${encodeURIComponent(repository)}/pullrequests/${id}?api-version=7.1`);
+        if (pr?.pullRequestId !== id ||
+            !["active", "completed", "abandoned"].includes(pr.status) ||
+            ![pr.repository?.id, pr.repository?.name].some(value =>
+              typeof value === "string" && value.toLowerCase() === repository.toLowerCase()) ||
+            pr.repository?.id?.toLowerCase() !== parts[1].toLowerCase()) {
+          throw new Error("A linked PR could not be verified in the reviewed repository; inspect its work-item link.");
+        }
+        results.push({
+          id, status: pr.status, isDraft: pr.isDraft === true,
+          webUrl: `https://dev.azure.com/${encodeURIComponent(target.organization)}/${encodeURIComponent(target.project)}/_git/${encodeURIComponent(repository)}/pullrequest/${id}`
+        });
+      }
+      return results;
     },
     async verifyDraft(repository, id, targetBranch, ticketId) {
       const expectedTicketId = workItemId(ticketId);

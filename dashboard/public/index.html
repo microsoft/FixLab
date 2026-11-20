@@ -88,7 +88,19 @@
           <section aria-label="Tagged-ticket watcher history">
             <p id="watcher-status" class="guidance" role="status">Loading watcher history.</p>
             <p class="guidance">Read-only monitoring. Opening this view does not start or retry work, approve access, or run tests. Last reported status is not a process health check.</p>
-            <ol id="watcher-attempts"></ol>
+            <p id="watcher-empty" class="guidance" hidden>No watcher jobs recorded yet.</p>
+            <div id="watcher-grid" class="table-scroll" role="region" aria-label="Watcher job history" tabindex="0" hidden>
+              <table aria-label="Watcher jobs">
+                <thead>
+                  <tr>
+                    <th scope="col">Work item</th>
+                    <th scope="col">Title</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="watcher-attempts"></tbody>
+              </table>
+            </div>
             <p class="guidance">Finished means feedback was recorded, not that tests passed. Check and scenario messages are agent-reported, not independent runner proof. Detailed history is bounded to recent attempts; older attempts may have basic status only. See each work item's Discussion for published feedback.</p>
           </section>
         </details>
@@ -209,6 +221,7 @@
         <div class="composer-heading"><h2>Message FixLab</h2><span>New job</span></div>
         <form id="job-form">
           <p id="composer-question" class="guidance" hidden></p>
+          <p id="watcher-handoff-notice" class="guidance" role="status" hidden></p>
           <label for="request" class="visually-hidden">Bug or required enhancement</label>
           <textarea id="request" name="request" rows="3" maxlength="10000" required
             aria-describedby="composer-question composer-reply-result"
@@ -239,6 +252,7 @@
             <input name="allowAllTools" type="checkbox">
             Allow all tool commands for this run
           </label>
+          <p id="dev-api-policy" class="guidance" hidden>DEV API access is configured for this repository. Real reads and writes are enabled without per-job permission prompts; normal application sign-in is still required.</p>
           <p class="guidance">Privileged opt-in: reviewable tool requests can execute commands and change files without individual prompts. Organization policy, sensitive or escalated requests, sign-in, publication consent and required checks remain separate. This choice expires when the executor stops and is not inherited by retries or new jobs.</p>
           <fieldset>
             <legend>Intake</legend>
@@ -262,6 +276,7 @@
             <legend>Request type</legend>
             <label><input type="radio" name="requestType" value="bug-fix" checked> Bug fix</label>
             <label><input type="radio" name="requestType" value="small-enhancement"> Small enhancement</label>
+            <label><input type="radio" name="requestType" value="feature"> Scoped feature / cross-team work</label>
           </fieldset>
           <fieldset>
             <legend>Mode</legend>
@@ -310,8 +325,8 @@
             <option value="none">Live read-only (no added interception)</option>
           </select>
           <p class="guidance">This choice applies only to this job, not shared defaults. Intercepted mode can keep permitted backend reads real. Live read-only prohibits writes and requires a profile allowing non-production reads; repository-required guards remain authoritative. Neither option authorizes Save, Submit, Approve or other real writes.</p>
-          <label><input id="allow-post-requests" type="checkbox" name="allowPostRequests"> Allow POST writes for this job in the selected environment</label>
-          <p id="post-requests-guidance" class="guidance">Native Copilot, DEV/SIT/UAT/PPE only; off by default. Checking this authorizes configured endpoint/test-record writes for this job without repeat confirmation. If unchecked, each write needs confirmation. Saved endpoint/test-record/authentication configuration is still required. Approval expires on stop, hold, completion or restart; configuration changes require a newly reviewed job. Explicit read-only/intercepted modes and production remain blocked. Browser guards are not disabled.</p>
+          <label><input id="allow-post-requests" type="checkbox" name="allowPostRequests"> <span id="post-writes-label">Allow POST writes for this job in the selected environment</span></label>
+          <p id="post-requests-guidance" class="guidance">Native Copilot, DEV/SIT/UAT/PPE only; off by default. With reviewed dataSafety.post environment baseUrls, approval authorizes all POST requests, including writes to any path/record within the selected API base, without endpoint/test-record lists or repeat confirmation. It does not authorize PUT, PATCH or DELETE. Legacy endpoint/test-record configuration retains its narrower scope. Existing authentication helper required. If unchecked, writes need separate approval. Approval expires on stop, hold, completion or restart; configuration changes require a newly reviewed job. Explicit read-only/intercepted modes and production remain blocked. Browser guards are not disabled.</p>
           <label><input id="allow-dev-writes" type="checkbox" name="allowDevWrites"> <span id="origin-writes-label">Allow all DEV API writes for this job</span></label>
           <p id="dev-writes-guidance" class="guidance">Native Copilot and DEV/PPE only. PPE defaults on only when PPE origins are configured; uncheck to opt out. DEV remains off by default. Authorizes POST, PUT, PATCH and DELETE to any path on the selected environment's reviewed dataSafety.devWrite or dataSafety.ppeWrite HTTPS origins, affecting any record your account can access. DEV and PPE grants are separate. No endpoint/test-record list or repeat confirmation. Existing SSO helper required. Expires on stop, hold, completion or restart. Other environments, explicit read-only/intercepted modes and browser-guard bypass remain blocked. Separate from Allow all tools.</p>
           <fieldset>

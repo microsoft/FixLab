@@ -5,12 +5,25 @@ import {
   createRuntimeRequestBridge,
   MAX_RUNTIME_REQUESTS,
   PERMISSION_RECOVERY_GUIDANCE,
+  runtimeConversationQuestion,
   runtimePermissionPrompt,
   runtimeQuestionPrompt,
   validateRuntimeUsage
 } from "../dashboard/runtime-requests.js";
-import { extensionLaunchProvider, runCopilotSession } from "../dashboard/copilot-session.js";
-import { join } from "node:path";
+import { createCopilotClient, extensionLaunchProvider, runCopilotSession } from "../dashboard/copilot-session.js";
+import { join, resolve } from "node:path";
+
+test("native SDK accepts default and experimental protocol-4 client settings", async () => {
+  for (const model of [undefined, "hydrafusion"]) {
+    const config = {
+      repository: resolve(import.meta.dirname, ".."),
+      packageRoot: resolve(import.meta.dirname, ".."),
+      model
+    };
+    const client = await createCopilotClient(config);
+    assert.deepEqual(await client.stop(), []);
+  }
+});
 
 function managedPolicyRpc(policy = { failClosed: false }) {
   return {
@@ -34,6 +47,45 @@ function fixture() {
   return { bridge, sent, permission, get requests() { return requests; } };
 }
 
+test("connected blockers distinguish answerable questions from private questions and permission recovery", () => {
+  const question = {
+    ...runtimeQuestionPrompt({ question: "Which test scope?", choices: ["Focused", "Full"] }),
+    id: randomUUID()
+  };
+  const view = runtimeConversationQuestion(question);
+  assert.equal(view.kind, "runtime-question");
+  assert.equal(view.requestId, question.id);
+  assert.equal(view.message, "Which test scope?");
+  assert.deepEqual(view.choices, ["Focused", "Full"]);
+  assert.deepEqual(view.actions, ["answer"]);
+  for (const request of [
+    { ...question, details: "Allow GET https://private.example.test/path?" },
+    { ...question, choices: ["https://private.example.test/path"] },
+    { ...question, details: "Enter the verification code" },
+    { ...question, title: "Enter your PIN" },
+    ...["Enter your API key", "Enter your refresh token", "Enter your PIN",
+      "API key?", "Refresh token required to continue:", "PIN?", "API keys?", "Refresh tokens:", "Passcode?", "Credentials:"]
+      .map((details) => ({ ...question, details }))
+  ]) {
+    const hidden = runtimeConversationQuestion(request);
+    assert.equal(hidden.responseChannel, "dashboard");
+    assert.deepEqual(hidden.actions, []);
+    assert.doesNotMatch(JSON.stringify(hidden), /private\.example|verification code/);
+    if (!request.details.includes("https:") && !request.choices.some((value) => value.includes("https:"))) {
+      assert.throws(() => fixture().bridge.receive(request), /invalid/);
+    }
+  }
+  const blocked = runtimeConversationQuestion({
+    ...runtimePermissionPrompt({ kind: "write", fileName: "test.js", diff: 'const token = "private-sentinel";' }),
+    id: randomUUID()
+  });
+  assert.equal(blocked.kind, "runtime-input");
+  assert.deepEqual(blocked.blockedReasons, ["sensitive-content"]);
+  assert.equal(blocked.canRecover, true);
+  assert.match(blocked.message, /Deny and request safe recovery/);
+  assert.doesNotMatch(JSON.stringify(blocked), /private-sentinel|test\.js/);
+});
+
 test("blocked permission diagnostics distinguish causes without exposing original details", () => {
   for (const [request, expected] of [
     [{ kind: "shell", fullCommandText: "x".repeat(8193) }, ["oversized"]],
@@ -52,16 +104,55 @@ test("blocked permission diagnostics distinguish causes without exposing origina
   }
 });
 
+test("authorization source identifiers are reviewable without exposing authorization values", () => {
+  const prompt = runtimePermissionPrompt({
+    kind: "write", fileName: "FeatureFlagsController.cs",
+    diff: "using Microsoft.AspNetCore.Authorization;\n[Authorize]\npublic class FeatureFlagsController {}"
+  });
+  assert.equal(prompt.canApprove, true);
+  const state = fixture();
+  state.bridge.receive({ ...prompt, id: randomUUID() });
+  assert.equal(state.requests[0].canApprove, true);
+  for (const diff of [
+    'Authorization: Basic synthetic-private-value',
+    'const headers = { "Authorization": "synthetic-private-value" };',
+    'const authorization = "synthetic-private-value";',
+    'const rawAuthorizationHeader = "synthetic-private-value";',
+    'authorization header is synthetic-private-value'
+  ]) {
+    const hidden = runtimePermissionPrompt({ kind: "write", fileName: "test.js", diff });
+    assert.equal(hidden.canApprove, false);
+    assert.doesNotMatch(hidden.details, /synthetic-private-value/u);
+  }
+  for (const question of ["Provide your authorization header", "What is your authorization?"]) {
+    assert.throws(() => runtimeQuestionPrompt({ question }), /sensitive/u);
+  }
+  const oversized = runtimePermissionPrompt({
+    kind: "write", fileName: "FeatureFlagsController.cs",
+    diff: `using ${"Authorization".repeat(12000)};`
+  });
+  assert.deepEqual(oversized.blockedReasons, ["oversized"]);
+  assert.equal(oversized.canUseFileTrust, true);
+});
+
 test("guided recovery denies only the exact request, never creates a grant and cannot be replayed", () => {
   const state = fixture();
-  const request = state.permission("x".repeat(8193));
+  const request = { ...state.permission("x".repeat(8193)), automaticRecoveryAttempted: true };
   state.bridge.receive(request);
   assert.equal(state.requests[0].canRecover, true);
+  assert.equal(state.requests[0].automaticRecoveryAttempted, true);
+  assert.equal(runtimeConversationQuestion(state.requests[0]).automaticRecoveryAttempted, true);
   assert.throws(() => state.bridge.respond(request.id, { action: "allow", recover: true }), /not available/u);
   assert.throws(() => state.bridge.respond(request.id, { action: "deny", recover: true, scope: "all-tools" }), /not available/u);
   state.bridge.respond(request.id, { action: "deny", recover: true });
   assert.deepEqual(state.sent[0], { type: "response", id: request.id, action: "deny", recover: true });
   assert.throws(() => state.bridge.respond(request.id, { action: "deny", recover: true }), /stale/u);
+  for (const change of [
+    { automaticRecoveryAttempted: false }, { canRecover: undefined },
+    { kind: "question" }, { canApprove: true }
+  ]) {
+    assert.throws(() => state.bridge.receive({ ...request, ...change, id: randomUUID() }), /invalid/u);
+  }
   for (const source of [
     { kind: "read", path: ".auth/user.json" },
     { kind: "shell", fullCommandText: "x".repeat(8193), managedApprovalRequired: true },
@@ -96,21 +187,32 @@ test("large-edit review metadata survives transport but cannot approve or replay
   }
 });
 
-test("SDK safe recovery returns a denial with bounded feedback rather than approving the hidden operation", async () => {
+test("SDK automatically rejects one unreviewable operation for safe recovery before requiring manual review", async () => {
   let decisions = 0;
+  const logs = [];
   await runCopilotSession({ repository: "synthetic-repository", prompt: "Recover safely.", toolApprovalMode: "allow-all" }, {
-    output() {},
+    output(_stream, text) { logs.push(text); },
     async ask(prompt) {
       decisions++;
       assert.equal(prompt.canRecover, true);
       assert.equal(prompt.canApprove, false);
+      assert.equal(prompt.automaticRecoveryAttempted, true);
+      assert.match(runtimeConversationQuestion({ ...prompt, id: randomUUID() }).message,
+        /Automatic safe recovery was already attempted/u);
       return { action: "deny", recover: true };
     },
     client: {
       async start() {},
       async createSession(options) {
         return { rpc: managedPolicyRpc(), on() {}, async sendAndWait() {
-          assert.deepEqual(await options.onPermissionRequest({ kind: "shell", fullCommandText: "x".repeat(8193) }),
+          const first = await options.permissions.onRequest({
+            kind: "write", fileName: "test.js", diff: 'const token = "synthetic-private-value";'
+          });
+          assert.equal(first.kind, "reject");
+          assert.match(first.feedback, /FixLab rejected an unreviewable operation/u);
+          assert.match(first.feedback, /Do not replay, encode, conceal, split or repackage/u);
+          assert.equal(decisions, 0);
+          assert.deepEqual(await options.permissions.onRequest({ kind: "shell", fullCommandText: "x".repeat(8193) }),
             { kind: "reject", feedback: PERMISSION_RECOVERY_GUIDANCE });
         } };
       },
@@ -118,8 +220,37 @@ test("SDK safe recovery returns a denial with bounded feedback rather than appro
     }
   });
   assert.equal(decisions, 1);
+  assert.match(logs.join(""), /one automatic safe recovery/u);
+  assert.doesNotMatch(logs.join(""), /x{100}|synthetic-private-value/u);
   assert.match(PERMISSION_RECOVERY_GUIDANCE, /Do not replay, encode, conceal, split or repackage/u);
   assert.match(PERMISSION_RECOVERY_GUIDANCE, /Keep completed evidence and existing failures/u);
+});
+
+test("SDK never automatically recovers human denials or managed and sensitive-path decisions", async () => {
+  let decisions = 0;
+  const requests = [
+    { kind: "shell", fullCommandText: "x".repeat(8193), managedApprovalRequired: true },
+    { kind: "shell", fullCommandText: "x".repeat(8193), requestSandboxBypass: true },
+    { kind: "read", path: ".auth/user.json" },
+    { kind: "shell", fullCommandText: "npm test" },
+    { kind: "shell", fullCommandText: "x".repeat(8193) }
+  ];
+  await runCopilotSession({ repository: "synthetic-repository", prompt: "Respect every denial." }, {
+    output() {},
+    async ask() { decisions++; return { action: "deny" }; },
+    client: {
+      async start() {},
+      async createSession(options) {
+        return { rpc: managedPolicyRpc(), on() {}, async sendAndWait() {
+          for (const request of requests) {
+            assert.deepEqual(await options.permissions.onRequest(request), { kind: "reject" });
+          }
+        } };
+      },
+      async stop() { return []; }
+    }
+  });
+  assert.equal(decisions, requests.length);
 });
 
 test("runtime permission approval is exact, single-use and never session-wide", () => {
@@ -188,16 +319,16 @@ for (const selection of ["ask", "allow-all", "live-grant"]) {
             rpc: managedPolicyRpc(), on() {},
             async sendAndWait() {
               if (selection === "live-grant") {
-                assert.deepEqual(await options.onPermissionRequest(routine), {
+                assert.deepEqual(await options.permissions.onRequest(routine), {
                   kind: "approve-once", approvedInteractively: true
                 });
               }
-              assert.deepEqual(await options.onPermissionRequest(routine), selection === "ask"
+              assert.deepEqual(await options.permissions.onRequest(routine), selection === "ask"
                 ? { kind: "reject" } : { kind: "approve-once", approvedInteractively: false });
               for (const request of manual) {
-                assert.deepEqual(await options.onPermissionRequest(request), { kind: "reject" });
+                assert.deepEqual(await options.permissions.onRequest(request), { kind: "reject" });
               }
-              await assert.rejects(options.onUserInputRequest({ question: "Complete normal sign-in?" }), /cancelled/);
+              await assert.rejects(options.interaction.onUserInputRequest({ question: "Complete normal sign-in?" }), /cancelled/);
             }
           };
         },
@@ -232,10 +363,10 @@ test("a live Allow all grant is never inherited by a replacement SDK executor", 
         rpc: managedPolicyRpc(), on() {},
         async sendAndWait() {
           const request = { kind: "shell", fullCommandText: "npm test" };
-          assert.deepEqual(await options.onPermissionRequest(request), launch === 1
+          assert.deepEqual(await options.permissions.onRequest(request), launch === 1
             ? { kind: "approve-once", approvedInteractively: true } : { kind: "reject" });
           if (launch === 1) {
-            assert.deepEqual(await options.onPermissionRequest(request), {
+            assert.deepEqual(await options.permissions.onRequest(request), {
               kind: "approve-once", approvedInteractively: false
             });
           }
@@ -359,12 +490,49 @@ test("runtime input rejects credential collection and malformed choices", () => 
     { question: "Please enter your password" },
     { question: "What is your password?" },
     { question: "Paste your MFA code" },
+    ...["Enter your API key", "Enter your refresh token", "Enter your PIN",
+      "Provide your API_key", "Paste your refresh_token", "Tell me your client secret",
+      "Send your private key", "Enter\nyour PIN", "Provide your one-time password",
+      "Your API key is required; paste it below.", `Enter ${"a".repeat(100)} then your refresh token`,
+      "API key?", "Refresh token required to continue:", "PIN?", "API keys?", "Refresh tokens:", "Passcode?", "Credentials:"]
+      .map((question) => ({ question })),
+    { question: "Choose an option", choices: ["Enter your API key"] },
     { question: "Choose", choices: ["x".repeat(1001)] },
     { question: "Choose", choices: new Array(21).fill("Option") },
     { question: "Choose", choices: [], allowFreeform: false },
     { question: null }
   ]) {
     assert.throws(() => runtimeQuestionPrompt(request));
+  }
+});
+
+test("runtime questions and replies allow credential-related test diagnostics without collecting credentials", () => {
+  for (const question of [
+    "Which password-reset test should I run?",
+    "Should I run the API key validation tests?",
+    "Which refresh token rotation spec reproduces the failure?"
+  ]) {
+    const state = fixture();
+    const request = { ...runtimeQuestionPrompt({ question }), id: randomUUID() };
+    state.bridge.receive(request);
+    assert.equal(runtimeConversationQuestion(request).responseChannel, "conversation");
+    for (const answer of [
+      "PIN: 1234", "Refresh token: synthetic-value",
+      "My PIN is 1234", "My password is synthetic-value", "My API keys are synthetic-values",
+      "My authorization is synthetic-value"
+    ]) {
+      assert.throws(() => state.bridge.respond(request.id, { action: "answer", answer }), /non-sensitive/);
+    }
+    const answer = "The password reset test fails";
+    state.bridge.respond(request.id, { action: "answer", answer });
+    assert.equal(state.sent[0].answer, answer);
+    assert.equal(state.sent[0].wasFreeform, true);
+  }
+  for (const question of [
+    "Enter your API key for the validation test",
+    "Provide the password reset test credentials"
+  ]) {
+    assert.throws(() => runtimeQuestionPrompt({ question }), /sensitive/);
   }
 });
 
@@ -404,11 +572,11 @@ for (const resume of [false, true]) {
       on(listener) { events.push(listener); },
       async sendAndWait(input) {
         assert.equal(input.prompt, "Synthetic native-bridge scenario.");
-        const permission = await config.onPermissionRequest({
+        const permission = await config.permissions.onRequest({
           kind: "shell", fullCommandText: "npm test", managedApprovalRequired: true
         });
         assert.deepEqual(permission, { kind: "approve-once", approvedInteractively: true });
-        assert.deepEqual(await config.onUserInputRequest({
+        assert.deepEqual(await config.interaction.onUserInputRequest({
           question: "Continue the synthetic scenario?", choices: ["Continue", "Cancel"]
         }), { answer: "Continue", wasFreeform: false });
         events[0]({ type: "assistant.message_delta", data: { deltaContent: "Scenario complete." } });
@@ -432,18 +600,18 @@ for (const resume of [false, true]) {
       output: (stream, text) => output.push({ stream, text })
     });
     assert.equal(stopped, true);
-    assert.equal(config.agent, "fixlab:fixlab");
-    assert.equal(config.enableManagedSettings, true);
-    assert.deepEqual(config.toolSearch, { enabled: true, deferThreshold: 1 });
-    assert.deepEqual(config.largeOutput, { enabled: true, maxSizeBytes: 8192 });
-    assert.equal(config.enableConfigDiscovery, true);
-    assert.equal(config.availableTools, undefined);
-    assert.equal(config.excludedTools, undefined);
-    assert.equal(config.customAgents, undefined);
+    assert.equal(config.agents.selected, "fixlab:fixlab");
+    assert.equal(config.github.fetchManagedSettings, true);
+    assert.deepEqual(config.tools.search, { enabled: true, deferThreshold: 1 });
+    assert.deepEqual(config.tools.largeOutput, { enabled: true, maxSizeBytes: 8192 });
+    assert.equal(config.events.streaming, true);
+    assert.equal(config.tools.availableTools, undefined);
+    assert.equal(config.tools.excludedTools, undefined);
+    assert.equal(config.agents.definitions, undefined);
     assert.equal(config.systemMessage, undefined);
     assert.equal(config.model, "hydrafusion");
-    assert.equal(config.enableExperimentalMode, true);
-    assert.deepEqual(config.additionalDirectories, ["reviewed-directory"]);
+    assert.equal(config.experiments.enableExperimentalMode, true);
+    assert.deepEqual(config.filesystem.additionalDirectories, ["reviewed-directory"]);
     assert.deepEqual(output, [{ stream: "stdout", text: "Scenario complete." }]);
   });
 }
@@ -581,8 +749,8 @@ test(`oversized ${mode} resumes compact retained history once before executing, 
         const client = {
           async start() {},
           async resumeSession(id, options) {
-            assert.equal(options.enableManagedSettings, true);
-            assert.deepEqual(options.infiniteSessions, {
+            assert.equal(options.github.fetchManagedSettings, true);
+            assert.deepEqual(options.state.infiniteSessions, {
               enabled: true, backgroundCompactionThreshold: 0.25, bufferExhaustionThreshold: 0.4
             });
             return session;
@@ -663,7 +831,7 @@ for (const inputTokenLimit of [0, 129, 130, 131]) {
     const client = {
       async start() {},
       async createSession(options) {
-        assert.deepEqual(options.infiniteSessions, {
+        assert.deepEqual(options.state.infiniteSessions, {
           enabled: true, backgroundCompactionThreshold: 0.25, bufferExhaustionThreshold: 0.4
         });
         return {
@@ -764,7 +932,7 @@ test("a pending human permission is not approved after the input ceiling is reac
         rpc: managedPolicyRpc(),
         on(value) { listener = value; },
         async sendAndWait() {
-          permission = options.onPermissionRequest({ kind: "shell", fullCommandText: "npm test" });
+          permission = options.permissions.onRequest({ kind: "shell", fullCommandText: "npm test" });
           listener({ type: "assistant.usage", data: { inputTokens: 100 } });
           await permission;
         }

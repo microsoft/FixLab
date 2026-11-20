@@ -1,5 +1,6 @@
 import { clearLine, createInterface, cursorTo } from "node:readline";
 import { stripVTControlCharacters } from "node:util";
+import { runtimeConversationQuestion } from "./runtime-requests.js";
 
 const DEFAULT_LOG_COUNT = 20;
 const MAX_LOG_COUNT = 100;
@@ -102,10 +103,15 @@ export function formatJobStatus(job) {
     return "No FixLab job is available.";
   }
   const lines = [
-    `Job ${job.id}: ${job.status} (${formatDuration(job.durationMs)})`,
+    `Job ${job.id}: ${job.executionState ?? job.status} (${formatDuration(job.durationMs)})`,
     `Request: ${job.request}`,
     `PR readiness: ${job.pullRequestReadiness?.message ?? "unknown"}`
   ];
+  if (job.runtimeRequests?.length) {
+    const question = runtimeConversationQuestion(job.runtimeRequests[0]);
+    lines.push(`Action needed: ${question.message}`,
+      "Review the live request in the dashboard browser panel; comments and retry commands cannot answer or approve it.");
+  }
   for (const [stage, result] of Object.entries(job.stages ?? {})) {
     lines.push(
       `  ${stage}: ${result.status}${result.message ? ` - ${result.message}` : ""}`
@@ -239,7 +245,7 @@ export async function runChat({
         -1,
         ...(currentJob.logs ?? []).map((entry) => Number(entry.index))
       );
-      lastStatus = currentJob.status;
+      lastStatus = currentJob.executionState ?? currentJob.status;
       announceMessage(formatJobStatus(currentJob));
       writeMessages(messages);
       return currentJob;
@@ -254,9 +260,13 @@ export async function runChat({
         announceMessage(`[${entry.stream}] ${message}`);
       }
     }
-    if (currentJob.status !== lastStatus) {
-      announceMessage(`[status] ${lastStatus} -> ${currentJob.status}`);
-      lastStatus = currentJob.status;
+    const executionState = currentJob.executionState ?? currentJob.status;
+    if (executionState !== lastStatus) {
+      announceMessage(`[status] ${lastStatus} -> ${executionState}`);
+      lastStatus = executionState;
+      if (currentJob.runtimeRequests?.length) {
+        announceMessage(formatJobStatus(currentJob));
+      }
     }
     if (announce) {
       announceMessage(formatJobStatus(currentJob));

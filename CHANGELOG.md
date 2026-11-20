@@ -76,6 +76,13 @@ All notable changes to FixLab are documented in this file.
 
 ## 0.7.0 - 2026-10-05
 
+- Make **Copilot Default** the dashboard model selector's initial choice and
+  expose **HydraFusion** as an explicit research-preview alternative.
+- Require the first FixLab stage marker before any model tool call so
+  HydraFusion reports dashboard stage progress instead of batching it at the
+  end of its orchestration.
+- Parse adjacent rendered FixLab markers independently so model output
+  coalescing cannot hide later stages or make completed jobs appear incomplete.
 - Add an Agency-like `fixlab <repository>` interactive entry point for
   conversational setup, diagnosis, repair, and validation.
 - Add `fixlab chat` as a terminal client for the active dashboard session,
@@ -106,6 +113,11 @@ All notable changes to FixLab are documented in this file.
   machine-specific helper script.
 - Add a plan-first, checksum-verified portable Node.js repair for incoherent
   NVM installations without changing NVM or the permanent system `PATH`.
+- Refuse to execute unowned portable runtimes, verify `npm.cmd` with a real
+  operation, and keep portable-repair fallback commands directly runnable.
+- Add `fixlab dashboard --stop` with an instance-specific local control token
+  and symlink-safe control record so users can gracefully stop only the
+  FixLab-owned dashboard.
 - Keep the Node 18 compatibility test suite runnable on the declared minimum
   runtime while using a newer supported runtime for development Playwright.
 - Keep backend-first validation and transient synthesized-Playwright cleanup

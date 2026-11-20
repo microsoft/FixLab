@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  constants,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   statSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { componentRetrievalGuidance } from "../dashboard/affected-surface.js";
 import { createInterface } from "node:readline/promises";
@@ -22,7 +26,7 @@ import {
   configuredValidationEnvironments,
   configuredTestSynthesis,
   createDashboardServer,
-  createAgencyExecutor,
+  createRuntimeExecutor,
   DEFAULT_DASHBOARD_PORT,
   FIXLAB_RUNTIMES,
   HYDRAFUSION_MODEL,
@@ -45,21 +49,34 @@ import { runStructuredCommand } from "./structured-command.js";
 import {
   applyWorktreeSetup,
   browserConfigurationErrors,
+  buildQuerySetupPrompt,
   planWorktreeSetup,
-  REPOSITORY_PROMPT_NAMES
+  REPOSITORY_PROMPT_NAMES,
+  setupPath
 } from "../dashboard/repository-setup.js";
 import { runValidationGate } from "./validation-gate-client.js";
+import { applySharedSetup, planSharedSetup } from "../dashboard/shared-worktree.js";
+import { quoteWindowsArgument } from "../dashboard/windows-executor.js";
 import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
-import { ticketAutomationPlan, watchTickets, executeTicketAgent } from "../dashboard/ticket-automation.js";
-import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { ticketAutomationPlan, watchTickets, executeTicketAgent, reviewInterruptedTicket, reconcileInterruptedTicket } from "../dashboard/ticket-automation.js";
+import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, PERSISTENT_DEV_API_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, SCENARIO_VALIDATION_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
+import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
+import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand } from "../dashboard/issue-plans.js";
+import { runSessionRecoveryCommand } from "../dashboard/session-recovery.js";
+import { createExecutorLease } from "../dashboard/executor-lease.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
   ".github",
   "fixlab",
   "repository-profile.json"
+);
+const profileExampleRelativePath = join(
+  ".github",
+  "fixlab",
+  "repository-profile.example.json"
 );
 const promptNames = REPOSITORY_PROMPT_NAMES;
 const vscodeAgentName = "fixlab-autofix.agent.md";
@@ -88,21 +105,27 @@ function printUsage() {
 
 Usage:
   fixlab <repository> [--runtime <agency|copilot>] [--model <model>]
-  fixlab onboard [repository] [--from <source-checkout>] [--yes] [--authenticate] [--start-dashboard] [--runtime <agency|copilot>] [--model <model>]
+  fixlab onboard [repository] [--from <source-checkout> | --reuse-setup] [--yes] [--authenticate] [--start-dashboard] [--runtime <agency|copilot>] [--model <model>]
   fixlab init [repository]
   fixlab notifications [repository] [--yes]
   fixlab prepare [repository] [--yes]
   fixlab doctor [repository] [--runtime <agency|copilot>]
   fixlab setup-playwright [repository] [--yes]
+  fixlab setup-queries [repository] --environment <name> [--yes] [--runtime <agency|copilot>] [--model <model>]
   fixlab authenticate [repository] [--yes]
   fixlab linked-api-proof [repository] [--authenticate|--proof] [--yes]
   fixlab portal-api-proof [repository] [--authenticate|--proof] --yes
+  fixlab issue-plan [repository] --environment <name> [--plan <file|->] [--execute] [--allow-production-evidence] [--allow-dev-writes]
+  fixlab recover-sessions [repository] [--review-token <value> --confirm-quiescent --yes]
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
+  fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>
   fixlab run [repository] [--runtime <agency|copilot>] [--model <model>] [--environment <name>] [--] [request...]
-  fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]
+  fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--allow-production-evidence] [--yes --allow-all-tools]
+  fixlab watch-review [repository] --ticket <id>
+  fixlab watch-recover [repository] --ticket <id> --decision <accept|retry|leave> --review-token <value> --yes
   fixlab validate [repository] --pr <number> [--runtime <agency|copilot>] [--model <model>]
-  fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--runtime <agency|copilot>] [--model <model>]
+  fixlab dashboard [repository] [--prepare [--yes]] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--stop] [--runtime <agency|copilot>] [--model <model>]
   fixlab chat [repository] [--port <number>] [--runtime <agency|copilot>] [--model <model>]
   fixlab keep-awake --minutes <minutes>
   fixlab --help
@@ -119,6 +142,8 @@ Commands:
   doctor    Check required tools and repository configuration.
   setup-playwright
             Plan or install Playwright; API-only profiles need no browser.
+  setup-queries
+            Review or repair verified read-only query coverage in repository adapters.
   authenticate
             Plan or run the repository-owned browser or API authentication command.
   linked-api-proof
@@ -126,10 +151,12 @@ Commands:
   portal-api-proof
             Run the portal-owned in-memory APIRequestContext authentication helper.
   exec      Run a command with compact structured output and private evidence.
+  issue-plan Describe, compile or explicitly execute bounded trace/browser issue plans.
+  recover-sessions Review obsolete dashboard registrations and confirm stopped-owner recovery.
   gate      Run a profile-defined validation gate owned by a dashboard job.
   run       Launch the FixLab agent for a request.
   validate  Launch validation-only mode for a pull request.
-  dashboard Start the local FixLab dashboard (127.0.0.1:${DEFAULT_DASHBOARD_PORT}).
+  dashboard Start or stop the local FixLab dashboard (127.0.0.1:${DEFAULT_DASHBOARD_PORT}).
   chat      Chat with the active dashboard job, starting it when necessary.
   keep-awake
             Temporarily prevent system sleep for a bounded number of minutes.
@@ -472,7 +499,7 @@ function checkPlaywright(repository, profile) {
   return { packageCheck, browserCheck };
 }
 
-function init(repository) {
+function initializeProfile(repository) {
   const destination = join(repository, profileRelativePath);
   let created = 0;
   if (existsSync(destination)) {
@@ -493,15 +520,38 @@ function init(repository) {
       );
     }
   } else {
+    const examplePath = join(repository, profileExampleRelativePath);
+    const example = lstatSync(examplePath, { throwIfNoEntry: false });
+    let templatePath = join(packageRoot, "templates", "repository-profile.json");
+    if (example) {
+      if (!example.isFile()) {
+        throw new Error(`Repository profile example must be a regular file: ${examplePath}`);
+      }
+      const contents = readFileSync(examplePath, "utf8");
+      let profile;
+      try {
+        profile = JSON.parse(contents);
+      } catch (error) {
+        throw new Error(`Repository profile example is not valid JSON: ${examplePath}`, { cause: error });
+      }
+      if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
+        throw new Error(`Repository profile example must contain a JSON object: ${examplePath}`);
+      }
+      templatePath = examplePath;
+    }
     mkdirSync(dirname(destination), { recursive: true });
-    copyFileSync(
-      join(packageRoot, "templates", "repository-profile.json"),
-      destination
-    );
+    copyFileSync(templatePath, destination, constants.COPYFILE_EXCL);
     console.log(`Created ${destination}`);
+    if (example) {
+      console.log(`Reused repository-owned profile example: ${examplePath}`);
+    }
     created += 1;
   }
+  return created;
+}
 
+function init(repository) {
+  let created = initializeProfile(repository);
   const promptDirectory = join(repository, ".github", "prompts");
   mkdirSync(promptDirectory, { recursive: true });
   for (const promptName of promptNames) {
@@ -731,7 +781,8 @@ function prepare(repository, approved) {
   const commands = profile.validation?.commands ?? {};
   const steps = [
     ["frontend", commands.frontendRestore],
-    ["backend", commands.backendRestore]
+    ["backend", commands.backendRestore],
+    ["browser", commands.browserRestore]
   ]
     .filter(([, command]) => typeof command === "string" && command.trim())
     .map(([application, command]) => ({
@@ -739,13 +790,16 @@ function prepare(repository, approved) {
       command: command.trim(),
       workingDirectory: resolve(
         repository,
-        profile.applications?.[application]?.workingDirectory ?? "."
+        application === "browser"
+          ? profile.browserAutomation?.workingDirectory ??
+            profile.applications?.frontend?.workingDirectory ?? "."
+          : profile.applications?.[application]?.workingDirectory ?? "."
       )
     }));
 
   if (steps.length === 0) {
     console.error(
-      "Repository profile has no frontendRestore or backendRestore command."
+      "Repository profile has no frontendRestore, backendRestore or browserRestore command."
     );
     printTroubleshooting();
     return 1;
@@ -942,7 +996,7 @@ function setupPlaywright(repository, approved) {
   return 0;
 }
 
-function authenticate(repository, approved) {
+function authenticate(repository, approved, { reuseExisting = false } = {}) {
   const { profile, error } = loadProfile(repository);
   if (error) {
     console.error(
@@ -986,9 +1040,16 @@ function authenticate(repository, approved) {
     return 1;
   }
 
-  const command = authentication.command.trim();
+  const existingState = Array.isArray(authentication.statusPaths) && authentication.statusPaths.length > 0 &&
+    authentication.statusPaths.every((path) => typeof path === "string" && existsSync(
+      reuseExisting ? setupPath(workingDirectory, path) : resolve(workingDirectory, path)
+    ));
+  const reusing = reuseExisting && browserAutomation.mode !== "api" && existingState &&
+    typeof authentication.proofCommand === "string" && authentication.proofCommand.trim();
+  const command = reusing ? authentication.proofCommand.trim() : authentication.command.trim();
   const authenticationEnvironment = authentication.environment ?? {};
   console.log(`${authenticationLabel} authentication plan:`);
+  if (reusing) {console.log("  Reuse existing state in place; run fresh repository-owned proof before accepting sign-in.");}
   console.log(`  command: ${redactCommandForDisplay(command)}`);
   console.log(`  working directory: ${workingDirectory}`);
   const environmentNames = Object.keys(authenticationEnvironment);
@@ -1011,6 +1072,7 @@ function authenticate(repository, approved) {
     windowsHide: true
   });
   if (result.status !== 0) {
+    if (reusing) {console.error("Existing sign-in could not be verified. No automatic login retry was made; review the proof failure or run fixlab authenticate with --yes for human sign-in.");}
     console.error(`${authenticationLabel} authentication failed with exit code ${result.status ?? 1}.`);
     printTroubleshooting();
     return result.status ?? 1;
@@ -1027,7 +1089,7 @@ function authenticate(repository, approved) {
     return 1;
   }
 
-  console.log(browserAutomation.mode === "api"
+  console.log(reusing ? "Existing browser sign-in verified; each job still requires fresh environment-bound proof." : browserAutomation.mode === "api"
     ? "API authentication helper completed and its status is present; this does not replace the owning job's fresh API proof."
     : "Browser authentication helper completed and required state is present; this does not prove sign-in. Run the repository-owned authenticated browser proof for the selected job and environment.");
   return 0;
@@ -1056,6 +1118,8 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   let selectedEnvironment;
   let workflow;
   let testEvidence;
+  let analysisEvidence;
+  let issuePlans;
   try {
     workflow = configuredWorkflow(profile);
     selectedEnvironment = validateTargetEnvironment(
@@ -1063,6 +1127,8 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
       configuredValidationEnvironments(profile)
     );
     testEvidence = configuredTestSynthesis(profile, "", undefined, selectedEnvironment);
+    analysisEvidence = configuredAnalysisEvidence(repository, profile, selectedEnvironment);
+    issuePlans = issuePlanConfiguration(repository, profile, selectedEnvironment);
     if (choices.useDeployedBackend && (!/^(dev|development|ppe|sit|uat)$/iu.test(selectedEnvironment) ||
         testEvidence.unitTestsOnly)) {
       throw new Error("--deployed-backend requires an explicitly selected, profile-approved DEV/SIT/UAT/PPE environment permitting live access.");
@@ -1083,11 +1149,19 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   }
 
   const guidance = [
+    ...(analysisEvidence.length ? [analysisEvidenceContext(analysisEvidence)] : []),
+    issuePlanContext(issuePlans),
     COPILOT_EXECUTION_GUIDANCE,
     ...(request ? [RUNTIME_RECOVERY_GUIDANCE] : []),
     // Interactive sessions use packaged guidance; request prompts go through stdin.
     ...(request && profile.validation?.liveTestsRequired !== false &&
-      profile.browserAutomation?.mode !== "api" ? [READ_ONLY_POST_GUIDANCE] : []),
+      profile.browserAutomation?.mode !== "api" && !testEvidence.persistentDevApi ? [READ_ONLY_POST_GUIDANCE] : []),
+    ...(request && testEvidence.persistentDevApi ? [PERSISTENT_DEV_API_GUIDANCE] : []),
+    ...(request && profile.validation?.liveTestsRequired !== false &&
+      profile.browserAutomation?.mode !== "api" ? [PORTAL_SCREENSHOT_GUIDANCE] : []),
+    ...(request && !choices.deferValidation && !choices.skipLiveTests &&
+      profile.validation?.liveTestsRequired !== false &&
+      profile.browserAutomation?.mode !== "api" ? [SCENARIO_VALIDATION_GUIDANCE] : []),
     ...(request ? [componentRetrievalGuidance(profile, request)] : []),
     ...(profile.validation?.liveTestsRequired === false ? [UNIT_TEST_ONLY_GUIDANCE] : []),
     ...(readOnly ? [TRANSIENT_PLAYWRIGHT_GUIDANCE] : []),
@@ -1116,6 +1190,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
       : "Use strict delivery: all applicable local gates and required approvals remain mandatory before readiness. Honor the saved draft/ready publication choice. Read-only runs never create or update a PR.",
     "Do not delete or edit transient test artifacts while validation is discovering or executing them; wait for owned validation to finish before cleanup.",
     "Before validation in a new isolated worktree, plan `fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME`. After scoped setup approval, add `--yes`. The source profile declares non-sensitive configuration in `worktreeSetup.files`. Never copy credentials or browser state. Missing configuration, authentication or denied runtime access is a blocker for the dependent check; do not retry unchanged approvals or grant blanket path access. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration; report missing prerequisites as blocked.",
+    "Dashboard isolation is assigned automatically when required; continue the same job in its owned checkout. Code work remains parallel in separate owned checkouts. Before directly starting local applications, authentication helpers or live checks outside configured gates, acquire the assigned dashboard's `fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>`. Local-stack/live-test gates reserve shared testing automatically and wait without failing. A kept-open preview retains the reservation until it stops. Acquisition is not validation evidence; never clear another owner's reservation or copy credentials, runtime grants or validation evidence.",
     "Prefix FixLab-created pull-request titles with `FLAB:` followed by a concise coding-change description. Use the repository's PR template with clear Markdown sections for the problem, changes, validation and risks, and accurate validation checkboxes.",
     readOnly
       ? "Do not publish a pull request or change its draft status in read-only mode."
@@ -1177,10 +1252,61 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   }
   const result = spawnSync(runtime, invocation.args, {
     cwd: repository,
+    env: { ...process.env, FIXLAB_HELPER_ROOT: packageRoot,
+      FIXLAB_REPOSITORY: repository, FIXLAB_DEV_API_ENVIRONMENT: selectedEnvironment ?? "" },
     stdio: forwardsPrompt ? ["pipe", "inherit", "inherit"] : "inherit",
     input: forwardsPrompt ? invocation.input : undefined,
     shell: process.platform === "win32"
   });
+  return result.status ?? 1;
+}
+
+function setupQueries(args) {
+  const parsed = parseRuntimeArguments(args);
+  if (parsed.error) { throw new Error(parsed.error); }
+  let repositoryArgument;
+  let environment;
+  let approved = false;
+  for (let index = 0; index < parsed.args.length; index += 1) {
+    const value = parsed.args[index];
+    if (value === "--environment" && environment === undefined &&
+        parsed.args[index + 1] && !parsed.args[index + 1].startsWith("-")) {
+      environment = parsed.args[++index];
+    } else if (value === "--yes" && !approved) {
+      approved = true;
+    } else if (!value.startsWith("-") && repositoryArgument === undefined) {
+      repositoryArgument = value;
+    } else {
+      throw new Error("Usage: fixlab setup-queries [repository] --environment <name> [--yes] [--runtime <agency|copilot>] [--model <model>]");
+    }
+  }
+  const repository = resolveRepository(repositoryArgument);
+  const { profile, error } = loadProfile(repository);
+  if (error) { throw new Error(`Cannot review query setup because ${error}.`); }
+  const selectedEnvironment = validateTargetEnvironment(environment ?? "", configuredValidationEnvironments(profile)).toLowerCase();
+  const prompt = buildQuerySetupPrompt({ environment: selectedEnvironment, approved });
+  const evidence = configuredTestSynthesis(profile, "", undefined, selectedEnvironment);
+  if (profile.browserAutomation?.dataSafety?.productionAllowed !== false ||
+      evidence.apiOnly || evidence.unitTestsOnly || evidence.productionDatabaseReadOnly ||
+      !["non-production-read-only", "non-production-approved"].includes(evidence.source)) {
+    throw new Error("Query setup requires an existing approved non-production browser read scope; it cannot override API-only, unit-only, synthetic-only or production policy.");
+  }
+  if (!findExecutable(parsed.runtime)) {
+    throw new Error(`Cannot review query setup because ${parsed.runtime} is unavailable. Install and authenticate the selected runtime first.`);
+  }
+  console.log(`FixLab query setup: ${approved ? "reviewed repair" : "plan only"} (${selectedEnvironment})`);
+  const runtimeArgs = [
+    ...(parsed.runtime === "agency" ? ["copilot"] : []),
+    "--plugin-dir", packageRoot, "--agent", "fixlab:fixlab",
+    ...(parsed.runtime === "copilot" ? copilotModelArguments(parsed.model) : []),
+    "--interactive", prompt
+  ];
+  const result = spawnSync(parsed.runtime,
+    process.platform === "win32" ? runtimeArgs.map(quoteWindowsArgument) : runtimeArgs,
+    { cwd: repository, stdio: "inherit", shell: process.platform === "win32" });
+  if (result.error) {
+    console.error(`Query setup runtime could not start: ${result.error.message}`);
+  }
   return result.status ?? 1;
 }
 
@@ -1251,8 +1377,23 @@ function parseDashboardArguments(args) {
   let port = DEFAULT_DASHBOARD_PORT;
   let open = false;
   let keepAwakeMinutes = 0;
+  let stop = false;
+  let prepareRequested = false;
+  let preparationApproved = false;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
+    if (argument === "--stop") {
+      stop = true;
+      continue;
+    }
+    if (argument === "--prepare") {
+      prepareRequested = true;
+      continue;
+    }
+    if (argument === "--yes") {
+      preparationApproved = true;
+      continue;
+    }
     if (argument === "--open") {
       open = true;
       continue;
@@ -1298,11 +1439,17 @@ function parseDashboardArguments(args) {
     }
     repositoryArgument = argument;
   }
+  if (preparationApproved && !prepareRequested) {
+    return { error: "dashboard --yes requires --prepare" };
+  }
   return {
     repository: resolveRepository(repositoryArgument),
     port,
     open,
-    keepAwakeMinutes
+    keepAwakeMinutes,
+    stop,
+    prepareRequested,
+    preparationApproved
   };
 }
 
@@ -1334,6 +1481,160 @@ function parseChatArguments(args) {
   return { port, repositoryArgument };
 }
 
+function dashboardControlPath(repository) {
+  const identity = createHash("sha256")
+    .update(resolve(repository))
+    .digest("hex")
+    .slice(0, 20);
+  return join(
+    tmpdir(),
+    "fixlab-dashboard-control",
+    identity,
+    "dashboard.json"
+  );
+}
+
+function dashboardControlDirectory(repository, create) {
+  const controlPath = dashboardControlPath(repository);
+  const root = dirname(dirname(controlPath));
+  const directory = dirname(controlPath);
+  for (const candidate of [root, directory]) {
+    if (!existsSync(candidate)) {
+      if (!create) {
+        return { controlPath, directoryExists: false };
+      }
+      try {
+        mkdirSync(candidate, { mode: 0o700 });
+      } catch (error) {
+        if (error.code !== "EEXIST") {
+          throw error;
+        }
+      }
+    }
+    const status = lstatSync(candidate);
+    if (status.isSymbolicLink() || !status.isDirectory()) {
+      throw new Error(
+        `dashboard control directory is not a trusted local directory: ${candidate}`
+      );
+    }
+  }
+  return { controlPath, directoryExists: true };
+}
+
+function assertDashboardControlFile(controlPath) {
+  const status = lstatSync(controlPath);
+  if (status.isSymbolicLink() || !status.isFile()) {
+    throw new Error(
+      `dashboard control record is not a trusted local file: ${controlPath}`
+    );
+  }
+}
+
+function writeDashboardControl(repository, port, token) {
+  const { controlPath } = dashboardControlDirectory(repository, true);
+  writeFileSync(
+    controlPath,
+    JSON.stringify({
+      version: 1,
+      repository: resolve(repository),
+      host: "127.0.0.1",
+      port,
+      pid: process.pid,
+      token
+    }),
+    { flag: "wx", mode: 0o600 }
+  );
+  assertDashboardControlFile(controlPath);
+  return controlPath;
+}
+
+function removeDashboardControl(controlPath, token) {
+  try {
+    assertDashboardControlFile(controlPath);
+    const record = JSON.parse(readFileSync(controlPath, "utf8"));
+    if (record.token === token) {
+      unlinkSync(controlPath);
+      return true;
+    }
+  } catch {
+    // A missing or replaced record does not belong to this dashboard instance.
+  }
+  return false;
+}
+
+async function stopDashboard(repository) {
+  let controlPath;
+  let directoryExists;
+  try {
+    ({ controlPath, directoryExists } = dashboardControlDirectory(
+      repository,
+      false
+    ));
+  } catch (error) {
+    console.error(`Cannot use FixLab dashboard stop control: ${error.message}`);
+    return 1;
+  }
+  if (!directoryExists || !existsSync(controlPath)) {
+    console.log(`No running FixLab dashboard is registered for ${repository}.`);
+    return 0;
+  }
+
+  let record;
+  try {
+    assertDashboardControlFile(controlPath);
+    record = JSON.parse(readFileSync(controlPath, "utf8"));
+  } catch (error) {
+    console.error(
+      `FixLab dashboard control record is invalid: ${controlPath} (${error.message})`
+    );
+    return 1;
+  }
+  if (
+    record.version !== 1 ||
+    record.repository !== resolve(repository) ||
+    record.host !== "127.0.0.1" ||
+    !Number.isSafeInteger(record.port) ||
+    record.port < 1 ||
+    record.port > 65535 ||
+    typeof record.token !== "string" ||
+    !/^[0-9a-f-]{36}$/iu.test(record.token)
+  ) {
+    console.error(`FixLab dashboard control record is invalid: ${controlPath}`);
+    return 1;
+  }
+
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${record.port}/api/control/stop`,
+      {
+        method: "POST",
+        headers: { "X-FixLab-Shutdown-Token": record.token },
+        signal: AbortSignal.timeout(5000)
+      }
+    );
+    if (response.status !== 202) {
+      console.error(
+        `FixLab dashboard refused the stop request (HTTP ${response.status}).`
+      );
+      return 1;
+    }
+  } catch {
+    if (removeDashboardControl(controlPath, record.token)) {
+      console.log(
+        `No running FixLab dashboard was found; removed stale control record for ${repository}.`
+      );
+      return 0;
+    }
+    console.error(
+      `No running FixLab dashboard was found, but its control record could not be removed: ${controlPath}`
+    );
+    return 1;
+  }
+
+  console.log(`Stopping FixLab dashboard for ${repository}.`);
+  return 0;
+}
+
 function parseOnboardArguments(args) {
   const runtimeArguments = parseRuntimeArguments(args);
   if (runtimeArguments.error) {
@@ -1345,8 +1646,13 @@ function parseOnboardArguments(args) {
   let source;
   let authenticateBrowser = false;
   let startDashboard = false;
+  let reuseSetup = false;
   for (let index = 0; index < runtimeArguments.args.length; index += 1) {
     const argument = runtimeArguments.args[index];
+    if (argument === "--reuse-setup") {
+      reuseSetup = true;
+      continue;
+    }
     if (argument === "--from") {
       const value = runtimeArguments.args[++index];
       if (!value || value.startsWith("-")) {
@@ -1376,11 +1682,13 @@ function parseOnboardArguments(args) {
     repositoryArgument = argument;
   }
 
+  if (source && reuseSetup) {return { error: "Choose --reuse-setup for one existing checkout or --from for a separate worktree, not both" };}
   return {
     repository: resolveRepository(repositoryArgument),
     runtime: runtimeArguments.runtime,
     model: runtimeArguments.model,
     source,
+    reuseSetup,
     approved,
     authenticateBrowser,
     startDashboard
@@ -1392,6 +1700,7 @@ async function onboard({
   runtime,
   model,
   source,
+  reuseSetup,
   approved,
   authenticateBrowser,
   startDashboard
@@ -1404,6 +1713,18 @@ async function onboard({
   console.log(`  runtime: ${runtime}`);
   if (model) {
     console.log(`  model: ${model}`);
+  }
+  if (reuseSetup) {
+    const plan = planSharedSetup(repository);
+    console.log(`Reuse existing setup in this checkout; new jobs use branches from ${plan.configuration.remote}/${plan.configuration.baseBranch}.`);
+    console.log(`Branch prefix: ${plan.configuration.prefix}; automatic source stashing: ${plan.configuration.autoStash ? "enabled by existing profile" : "off"}.`);
+    console.log("Preserve dependencies, authentication helpers and private browser state in place. Do not copy credentials or start a job.");
+    if (plan.profile.worktreeSetup.bindExpectedCommit) {console.log("Bind the ignored local profile to the selected job branch commit; fresh job proof remains required.");}
+    if (!approved) {
+      console.log("No files or commands changed. Review the existing profile and rerun with --reuse-setup --yes.");
+      return 0;
+    }
+    applySharedSetup(plan);
   }
 
   if (source) {
@@ -1432,10 +1753,10 @@ async function onboard({
   console.log("");
   console.log("Review this repository-owned profile before approving setup:");
   console.log(`  ${profilePath}`);
-  console.log("Optional tagged-ticket defaults: review `fixlab watch` for Agency-based ADO bug/story/feature investigation, draft PRs when code changes are warranted, or Discussion feedback otherwise. Onboarding never starts the watcher or grants publication/tool access.");
+  console.log("Optional tagged-ticket defaults: review `fixlab watch` for Agency or Copilot ADO bug/story/feature investigation, draft PRs when code changes are warranted, or Discussion feedback otherwise. Onboarding never starts the watcher or grants publication/tool access.");
   console.log("");
 
-  if (!profileExisted) {
+  if (!profileExisted && !lstatSync(join(repository, profileExampleRelativePath), { throwIfNoEntry: false })) {
     console.log("FixLab created a new example profile.");
     console.log(
       "Update its frontend/backend paths, commands, ports, environments, and authentication settings."
@@ -1465,7 +1786,7 @@ async function onboard({
     console.log(`Runtime path approval required for linked dependencies: ${directory}`);
   }
 
-  const preparationPlan = prepare(repository, false);
+  const preparationPlan = reuseSetup ? 0 : prepare(repository, false);
   if (preparationPlan !== 0) {
     return preparationPlan;
   }
@@ -1496,7 +1817,8 @@ async function onboard({
     console.log("Approved only the listed linked dependency directories; runtime deny rules remain in force.");
   }
 
-  const preparationResult = prepare(repository, true);
+  if (reuseSetup) {console.log("Existing dependencies preserved. Branch-specific tests must verify them; run fixlab prepare only when restore is needed.");}
+  const preparationResult = reuseSetup ? 0 : prepare(repository, true);
   if (preparationResult !== 0) {
     return preparationResult;
   }
@@ -1505,7 +1827,7 @@ async function onboard({
     return playwrightResult;
   }
   if (authenticateBrowser) {
-    const authenticationResult = authenticate(repository, true);
+    const authenticationResult = authenticate(repository, true, { reuseExisting: reuseSetup });
     if (authenticationResult !== 0) {
       return authenticationResult;
     }
@@ -1557,19 +1879,53 @@ async function dashboard(
   shouldOpen,
   runtime,
   keepAwakeMinutes = 0,
-  model = ""
+  model = "",
+  prepareRequested = false,
+  preparationApproved = false
 ) {
+  if (!existsSync(join(repository, profileRelativePath)) &&
+      lstatSync(join(repository, profileExampleRelativePath), { throwIfNoEntry: false })) {
+    initializeProfile(repository);
+  }
   const readiness = inspectRepository(repository);
   if (!readiness.repositoryReady) {
     console.error(`Cannot start FixLab dashboard: ${readiness.error}`);
     return 1;
   }
+  if (prepareRequested) {
+    if (!readiness.configurationReady) {
+      console.error(`Cannot prepare FixLab dashboard: ${readiness.error}`);
+      return 1;
+    }
+    const preparationId = randomUUID();
+    const lease = preparationApproved
+      ? createExecutorLease(repository, preparationId).acquire(preparationId)
+      : null;
+    try {
+      for (const step of [prepare, setupPlaywright]) {
+        const result = step(repository, preparationApproved);
+        if (result !== 0) {
+          return result;
+        }
+      }
+    } finally {
+      lease?.release();
+    }
+    if (!preparationApproved) {
+      console.log("No dashboard started. Review the preparation plan and rerun with --prepare --yes.");
+      return 0;
+    }
+  }
+  const shutdownToken = randomUUID();
+  let close;
   const dashboardServer = createDashboardServer({
     repository,
     packageRoot,
     runtime,
     model,
-    preflight: runJobPreflight
+    preflight: runJobPreflight,
+    shutdownToken,
+    onShutdown: () => close?.()
   });
   let address;
   try {
@@ -1603,22 +1959,39 @@ async function dashboard(
       return 1;
     }
   }
-  console.log("Press Ctrl+C to stop the local dashboard.");
+  console.log(
+    'Press Ctrl+C or run "fixlab dashboard --stop" from the repository directory to stop the local dashboard.'
+  );
+  let controlPath;
+  try {
+    controlPath = writeDashboardControl(repository, address.port, shutdownToken);
+  } catch (error) {
+    stopKeepAwake(keepAwakeHandle);
+    await dashboardServer.close();
+    console.error(
+      `Cannot register FixLab dashboard stop control: ${error.message}`
+    );
+    return 1;
+  }
   if (shouldOpen) {
     openBrowser(address.url);
   }
 
   let closing = false;
-  const close = async () => {
+  close = async () => {
     if (closing) {
       return;
     }
     closing = true;
     stopKeepAwake(keepAwakeHandle);
-    await dashboardServer.close();
+    try {
+      await dashboardServer.close();
+    } finally {
+      removeDashboardControl(controlPath, shutdownToken);
+    }
   };
-  process.once("SIGINT", close);
-  process.once("SIGTERM", close);
+  process.once("SIGINT", () => void close());
+  process.once("SIGTERM", () => void close());
   return 0;
 }
 
@@ -1796,6 +2169,12 @@ async function startDashboardForChat({
 }
 
 async function main(args) {
+  if (args[0] === "recover-sessions") {
+    return runSessionRecoveryCommand(args.slice(1));
+  }
+  if (args[0] === "issue-plan") {
+    return runIssuePlanCommand(args.slice(1));
+  }
   const [command, ...rest] = args;
   if (!command || command === "--help" || command === "-h") {
     printUsage();
@@ -1809,6 +2188,10 @@ async function main(args) {
       return 1;
     }
     return onboard(parsed);
+  }
+
+  if (command === "setup-queries") {
+    return setupQueries(rest);
   }
 
   if (command === "init") {
@@ -1825,6 +2208,42 @@ async function main(args) {
     return 0;
   }
 
+  if (command === "watch-review" || command === "watch-recover") {
+    let repositoryArgument;
+    const options = {};
+    for (let index = 0; index < rest.length; index += 1) {
+      const value = rest[index];
+      if (["--ticket", "--decision", "--review-token"].includes(value)) {
+        const argument = rest[++index];
+        if (!argument || argument.startsWith("-") || options[value] !== undefined) {
+          throw new Error(`Recovery requires one value after ${value}.`);
+        }
+        options[value] = argument;
+      } else if (value === "--yes") {
+        options.confirmed = true;
+      } else if (!value.startsWith("-") && !repositoryArgument) {
+        repositoryArgument = value;
+      } else {
+        throw new Error("Usage: fixlab watch-review [repository] --ticket <id>, or watch-recover with --decision <accept|retry|leave> --review-token <value> --yes.");
+      }
+    }
+    if (!/^[1-9]\d{0,14}$/u.test(options["--ticket"] ?? "")) {
+      throw new Error("Recovery requires a positive --ticket ID.");
+    }
+    if (command === "watch-review" && (options.confirmed || options["--decision"] || options["--review-token"])) {
+      throw new Error("watch-review is read-only; recovery decisions require watch-recover.");
+    }
+    const repository = resolveRepository(repositoryArgument);
+    const input = {
+      workItemId: Number(options["--ticket"]), decision: options["--decision"],
+      reviewToken: options["--review-token"], confirmed: options.confirmed === true
+    };
+    console.log(JSON.stringify(command === "watch-review"
+      ? await reviewInterruptedTicket(repository, input)
+      : await reconcileInterruptedTicket(repository, input), null, 2));
+    return 0;
+  }
+
   if (command === "watch") {
     const parsed = parseRuntimeArguments(rest);
     if (parsed.error) {
@@ -1832,6 +2251,7 @@ async function main(args) {
     }
     let repositoryArgument;
     let environment;
+    let resumeWorkItemId;
     const flags = new Set();
     for (let index = 0; index < parsed.args.length; index += 1) {
       const value = parsed.args[index];
@@ -1840,12 +2260,18 @@ async function main(args) {
         if (!environment || environment.startsWith("-")) {
           throw new Error("watch requires a value after --environment.");
         }
-      } else if (["--yes", "--once", "--allow-all-tools", "--resolve-on-completion"].includes(value)) {
+      } else if (value === "--resume-ticket") {
+        const id = parsed.args[++index];
+        if (resumeWorkItemId !== undefined || !/^[1-9]\d*$/u.test(id ?? "") || !Number.isSafeInteger(Number(id))) {
+          throw new Error("watch --resume-ticket requires one positive safe work-item ID.");
+        }
+        resumeWorkItemId = Number(id);
+      } else if (["--yes", "--once", "--allow-all-tools", "--resolve-on-completion", "--allow-production-evidence"].includes(value)) {
         flags.add(value);
       } else if (!value.startsWith("-") && !repositoryArgument) {
         repositoryArgument = value;
       } else {
-        throw new Error("Usage: fixlab watch [repository] --runtime agency --environment <name> [--once] [--resolve-on-completion] [--yes --allow-all-tools]");
+        throw new Error("Usage: fixlab watch [repository] --runtime <agency|copilot> [--model <model>] --environment <name> [--once] [--resolve-on-completion] [--allow-production-evidence] [--yes --allow-all-tools]");
       }
     }
     const repository = resolveRepository(repositoryArgument);
@@ -1855,17 +2281,22 @@ async function main(args) {
     }
     const plan = ticketAutomationPlan(repository, profile, {
       environment, runtime: parsed.runtime,
+      allowProductionEvidence: flags.has("--allow-production-evidence"),
       resolveOnCompletion: flags.has("--resolve-on-completion") || profile.ticketAutomation?.resolveOnCompletion === true
     });
     console.log(JSON.stringify({
       organization: plan.organization, project: plan.project, repository: plan.repository,
-      tag: plan.tag, areaPaths: plan.areaPaths, targetBranch: plan.targetBranch, environment: plan.environment,
+      tag: plan.tag, assignee: plan.assignee, areaPaths: plan.areaPaths, targetBranch: plan.targetBranch, environment: plan.environment,
+      runtime: parsed.runtime, model: parsed.model || null,
+      migrations: plan.migrations,
+      productionEvidence: plan.productionEvidence,
+      allowProductionEvidence: plan.allowProductionEvidence,
       pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,
       resolution: plan.resolveOnCompletion
         ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
         : "No work-item state changes.",
       requiresConfirmation: true,
-      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. No business-data writes, production, merges or deployments.`
+      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. ${plan.allowProductionEvidence ? "Only the displayed ticket/correlation-bound production diagnostic readers are approved; no production application testing, business-data writes, merges or deployments." : "No business-data writes, production, merges or deployments."}`
     }, null, 2));
     if (!flags.has("--yes")) {
       console.log("Plan only. Review this scope, then add --yes --allow-all-tools to start. Installing or onboarding alone never starts a watcher.");
@@ -1878,12 +2309,15 @@ async function main(args) {
     try {
       await watchTickets({
         repository, plan, once: flags.has("--once"), confirmed: true,
+        resumeWorkItemId,
         allowAllTools: flags.has("--allow-all-tools"), signal: controller.signal,
-        execute: async ({ request, onActivity }) => {
+        execute: async ({ request, onActivity, sessionId, resume, onSession }) => {
           const result = await launch(repository, request, parsed.runtime, environment, parsed.model, false, "", {
             ticketAutomation: true,
             execute: ({ repository: checkout, prompt }) => executeTicketAgent({
-              executor: createAgencyExecutor({ packageRoot }), repository: checkout, prompt,
+              executor: createRuntimeExecutor({ packageRoot, runtime: parsed.runtime, model: parsed.model, native: false }),
+              repository: checkout, prompt,
+              ...(sessionId ? { sessionId } : {}), resume: resume === true, onSession,
               runtimeDirectories: [packageRoot], signal: controller.signal,
               onActivity,
               idleTimeoutMs: (profile.validation?.agentIdleTimeoutMinutes ?? 20) * 60000
@@ -2038,13 +2472,18 @@ async function main(args) {
       console.error(parsed.error);
       return 1;
     }
+    if (parsed.stop) {
+      return stopDashboard(parsed.repository);
+    }
     return dashboard(
       parsed.repository,
       parsed.port,
       parsed.open,
       runtimeArguments.runtime,
       parsed.keepAwakeMinutes,
-      runtimeArguments.model
+      runtimeArguments.model,
+      parsed.prepareRequested,
+      parsed.preparationApproved
     );
   }
 

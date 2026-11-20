@@ -530,6 +530,29 @@ button.secondary {
   overflow-x: auto;
 }
 
+#watcher-grid table {
+  min-width: 42rem;
+  table-layout: fixed;
+}
+
+#watcher-grid th:first-child {
+  width: 7rem;
+}
+
+#watcher-grid th:last-child {
+  width: 14rem;
+}
+
+#watcher-grid td {
+  overflow-wrap: anywhere;
+}
+
+.watcher-title {
+  display: block;
+  margin-bottom: .5rem;
+  font-weight: 600;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1197,6 +1220,10 @@ pre {
   border: 1px solid #e6e2ee;
   border-radius: 14px;
   background: rgba(255, 255, 255, .72);
+}
+
+#watcher-group[open] {
+  grid-column: 1 / -1;
 }
 
 .inspector-group > summary,

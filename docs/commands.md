@@ -1,5 +1,18 @@
 # FixLab commands
 
+## Dashboard ownership recovery
+
+`fixlab recover-sessions [repository]` previews obsolete dashboard registrations.
+After verifying that the listed old dashboards and all their child resources
+stopped, use the returned `--review-token <value> --confirm-quiescent --yes` to
+archive that exact reviewed snapshot. Live/ambiguous owners and remaining
+execution/testing reservations block confirmation. Jobs and validation results
+are not changed or resumed. New provably quiescent, exited owners are recovered
+automatically during scoped discovery; legacy records require review.
+See [ownership recovery](repository-onboarding.md#obsolete-dashboard-registrations).
+
+## Delivery defaults
+
 New editing jobs use efficient delivery automatically: focused regression
 checks and reviewed diff, then an authorized draft PR. Broader local unit tests
 and optional builds are not automatically requested. Repository Settings saves
@@ -45,6 +58,10 @@ Local-fix and PR claims still require the matching checkout and application.
 
 ## Interactive repository shell
 
+Issue-specific trace lookups and transient browser reproductions use
+[`fixlab issue-plan`](issue-plans.md). Plans are compiled for preview by default;
+live execution and approved DEV writes require explicit flags.
+
 ```text
 fixlab <repository> [--runtime <agency|copilot>]
 ```
@@ -61,11 +78,33 @@ known and should execute without first entering the interactive conversation.
 fixlab onboard [repository] [--yes] [--authenticate] [--start-dashboard] [--runtime <agency|copilot>]
 ```
 
-The first run creates the repository profile and stops before using generic
-placeholder paths. After the profile is configured, a plan-only run prints the
+The first run reuses `.github/fixlab/repository-profile.example.json` when the
+repository supplies it, copying it unchanged to the local
+`repository-profile.json`. Existing local profiles are never overwritten;
+invalid repository examples fail rather than falling back to generic settings.
+Repositories without an example receive the generic profile and stop before
+using placeholder paths. With a repository-owned example or an existing
+configured profile, a plan-only run prints the
 repository-owned restore and Playwright commands. `--yes` approves those
 commands, `--authenticate` runs the repository-owned interactive browser login,
 and `--start-dashboard` starts the dashboard only after Doctor passes.
+
+Direct `fixlab dashboard <repository>` also activates a repository-owned example
+when the local profile is absent. Opening the dashboard does not restore
+dependencies, start applications or jobs, sign in, or grant data/tool access.
+It creates only the local profile, not additional repository agent/prompt files.
+
+For first-time dependency setup, run
+`fixlab dashboard <repository> --prepare` to review the restore and Playwright
+plan. Add `--yes --open` to run it and then open the dashboard. Preparation holds
+the repository's execution lease and stops on any failed command or verification;
+it never starts applications, authentication, or a job. An optional
+`validation.commands.browserRestore` runs in the configured browser directory,
+allowing repositories to restore their locked browser dependencies before the
+existing Playwright readiness check.
+Setup validates configuration without requiring an existing sign-in, so a
+fresh clone can be prepared first. The dashboard reports pending authentication
+separately; live-profile validation and execution still require authentication.
 
 `fixlab init` installs these prompt files under `.github/prompts` without
 overwriting repository-owned versions.
@@ -123,8 +162,17 @@ executor. The dashboard supplies this command with the correct job and port.
 It returns a nonzero exit code for failed, cancelled, timed-out, or stale
 validation. It does not accept arbitrary commands or an arbitrary repository.
 The repository must be the checkout selected when starting that dashboard.
-For an isolated checkout, onboard it and start its dashboard before the job;
-an agent-created sibling cannot substitute evidence for the assigned source.
+The dashboard automatically provisions and assigns owned checkouts for
+explicitly isolated editing jobs or detached checkouts outside shared mode.
+Continue the same job through its assigned dashboard; an arbitrary sibling
+cannot substitute evidence for that checkout.
+
+Isolated code jobs run concurrently. Local-stack/live gates and managed
+application/authentication startup wait automatically for the repository's
+shared local-testing reservation. Before direct native startup or live checks,
+use the job-supplied command with `--resource local-testing` instead of `--gate`.
+This acquisition is not validation evidence. Stop cancels a queued wait or an
+owned setup; a kept-open preview retains testing ownership until stopped.
 
 Configure each gate in the repository profile:
 
@@ -407,7 +455,7 @@ approves an action or passes a validation gate. See
 ## Local dashboard command
 
 ```text
-fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>]
+fixlab dashboard [repository] [--port <number>] [--open|--no-open] [--keep-awake-minutes <minutes>] [--stop]
 ```
 
 The command starts the packaged local UI on `127.0.0.1:4317` by default without
@@ -456,8 +504,25 @@ revision-bound; it expires on stop, hold, completion or restart. No browser guar
 is disabled and no production, API-only or explicit read-only restriction is
 waived. See [POST configuration and approval](security.md#individually-confirmed-non-production-post).
 
+With reviewed `dataSafety.post.<environment>.baseUrls`, the POST checkbox offers
+**all selected-environment POST requests, including writes**, using those
+API bases and the existing helper, separately for DEV, SIT, UAT or PPE.
+It requires no endpoint/test-record list or repeated confirmation, but authorizes
+POST only. Other methods require the separate broader write approval. Old
+endpoint-scoped API clients do not inherit this wider scope.
+
+Connected `job-start` supports these explicit POST confirmations together with
+`toolApprovalMode: "allow-all"` and `allowAllConfirmed: true`. It uses the current
+instance/repository/job identity rather than a browser Origin. Native permission
+decisions and human authentication remain separate.
+
 A missing allowlist entry is a policy blocker, not an unavailable backend.
-Request a narrow configuration review; do not disable the guard, allow all POSTs,
+Offer `fixlab setup-queries REPOSITORY --environment ENV --runtime copilot`
+for a separate plan-first review of the full verified query scope. After the
+user reviews the proposed files and offline tests, `--yes` authorizes the scoped
+policy/adapter repair, not product changes, live API calls or business writes.
+See [query setup](repository-onboarding.md) for setup boundaries.
+Do not disable the guard, allow all POSTs,
 use another client to bypass it, or silently substitute synthetic records.
 Read-only jobs cannot edit configuration; approved changes need a fresh reviewed
 context/job. Save, Submit, Approve and autosave retain their write controls.
@@ -658,6 +723,13 @@ stops. It does not change permanent power-plan settings or unlock the desktop;
 interactive browser and authentication steps may still require an unlocked
 screen.
 
+Use `fixlab dashboard [repository] --stop` from another terminal to request a
+graceful shutdown. FixLab stores an instance-specific local control token and
+will stop only the dashboard that created that record; it does not terminate
+unrelated Node.js processes. Control directories and records must be regular
+local filesystem entries; FixLab rejects symbolic-link or junction
+substitution instead of following it.
+
 The user supplies only the bug or required enhancement. The agent loads
 validation context from the repository profile and autonomously owns contract
 generation, diagnosis or affected-surface inspection, the smallest required
@@ -739,10 +811,11 @@ section:
 
 ```powershell
 fixlab watch "C:\source\application" --runtime agency --environment dev
+fixlab watch "C:\source\application" --runtime copilot --model gpt-5.3-codex --environment dev
 ```
 
 This prints a plan only: checkout-derived ADO organization/project/repository,
-reviewed area paths, tag, target branch, environment and installed helper
+reviewed area paths, tag, target branch, environment, runtime/model and installed helper
 directory. Set the profile's `pullRequests.defaultTargetBranch` and
 `ticketAutomation.areaPaths` first. The default trigger is the exact `FixLab`
 tag, the interval is 300 seconds, and the outcome is `draft-pr-or-discussion`.
@@ -755,7 +828,14 @@ fixlab watch "C:\source\application" --runtime agency --environment dev --yes --
 ```
 
 Adding `FixLab` to an active Bug, User Story, Feature or Product Backlog Item
-in a configured area or descendant makes it eligible at the next poll.
+assigned to the signed-in Azure DevOps user, in a configured area or descendant,
+makes it eligible at the next poll. The query uses `[System.AssignedTo] = @Me`:
+it follows the ADO identity authenticating the watcher, not Windows or GitHub
+login, and does not hard-code an alias. Unassigned and other users' items are
+excluded. Assignment is freshly verified on ticket loads, including before
+execution/feedback and during recovery or handoff. Reassignment stops further
+watcher work on that ticket; it does not erase its journal or an interrupted
+ownership reservation. Existing history is preserved for audit.
 The first poll includes existing eligible tagged items. Only one investigation
 runs per poll. A justified fix produces a work-item-linked **draft PR** plus
 Discussion feedback; otherwise the existing ticket receives diagnosis,
@@ -763,7 +843,51 @@ evidence, limitations and next steps, not an empty PR or a new story.
 Meaningful ticket edits or new human Discussion comments can trigger another
 investigation. FixLab's own feedback does not retrigger it.
 
-Open **Watcher jobs** in the existing dashboard to see read-only attempt history,
+Discussion feedback uses three short sections: **Summary**, **Changes and
+validation**, and **Next action**. Expect two summary sentences and a few compact
+bullets, not a long paragraph or a full implementation plan. Detailed cause,
+completed/proposed work and evidence remain expandable in **Watcher jobs**.
+The executor reports these separately; missing evidence remains unknown.
+A proposed cause is not promoted to a confirmed cause, planned work is not completed
+work, and skipped or unreported checks are not passed.
+
+#### Approve a dedicated migration
+
+Large features and unapproved migrations remain analysis-only. A repository owner
+can explicitly approve implementation for a particular ticket and existing source
+directories in the repository profile:
+
+```json
+{
+  "ticketAutomation": {
+    "migrations": [
+      { "workItemId": 42, "allowedPaths": ["frontend"] }
+    ]
+  }
+}
+```
+
+Merge this setting with the existing tag/area configuration; do not replace the
+profile. At most 20 unique work-item approvals and 1–8 repository-relative
+directories per approval are accepted. Root, hidden, traversal, missing and linked
+paths are rejected. The printed watcher plan discloses every migration approval.
+Ticket text cannot grant this permission.
+
+Change configuration only between attempts, let the old watcher stop normally
+when its reviewed profile changes, then review and restart the watcher. The
+approved migration requires an isolated worktree, compatible dependency/lockfile
+updates where necessary, complete in-scope diff review, unit tests, type-checking
+and a production build before draft publication. Repository instructions and
+existing read-only data, authentication and publication controls still apply.
+This is not blanket permission for dependency/security work or other tickets.
+
+Adding or changing a ticket's migration approval creates a new deduplication
+fingerprint only for that ticket, retaining its earlier analysis. An unchanged
+approval does not repeatedly queue work. Revocation alone does not queue work;
+historical approval hashes may remain for deduplication but never authorize
+execution. New ticket revisions without a current approval are analysis-only.
+
+Open **Watcher jobs** in the existing dashboard to see attempt history,
 timestamps, safe activity, recorded checks, actual resolution status and
 work-item/verified PR links. This does not start a watcher or grant permissions.
 Finished means feedback was recorded, not that tests passed. Check/scenario
@@ -771,6 +895,147 @@ messages are agent-reported, not independent runner proof. Old attempts may
 have basic history only. Detailed history retains the latest 20 attempts,
 20 activity and 10 check updates per attempt; raw console output is not stored.
 Worker status is the last reported state, not a process health check.
+Work-item links show the ADO ID and a safely bounded title. New attempts retain
+their title; older missing titles are read from ADO for at most 20 recent attempts
+and cached in memory for five minutes without rewriting the journal. If ADO is
+unavailable, IDs remain visible with an explicit title-lookup warning.
+
+#### Continue a completed investigation locally
+
+Select **Continue in FixLab** on a completed attempt with retained findings.
+FixLab refreshes the scoped ticket and related PRs without changing the watcher.
+Review the findings, dependencies, environment and target branch, confirm the
+scope, then select **Prepare local job**. Review the normal job form and submit
+it separately; preparing it never starts execution.
+
+The normal queue, workspace review, executor lease, permission prompts and
+publication gates still apply. Broad tool/write grants and deferred-validation
+choices are not inherited. Changed ticket/profile/helper evidence requires a
+fresh review. A recorded attempt can link to only one retained local job;
+continue that job instead of creating duplicates. Existing active/failed jobs
+are not repurposed. Interrupted or legacy attempts require their own recovery.
+Cross-layer features can use **Scoped feature / cross-team work**: implement the
+approved portion, keep missing external contracts as explicit blockers and
+resume the same job. Work in another repository requires separate review.
+Reconcile existing PRs before publishing; do not create an empty/duplicate PR.
+
+#### Incident evidence helpers
+
+Configure existing reviewed repository-owned JavaScript helpers in the profile:
+
+```json
+{
+  "analysis": {
+    "evidenceSources": [
+      { "id": "incident-records", "kind": "cosmos", "environment": "dev", "helper": "tools/read-incident.mjs" },
+      { "id": "incident-traces", "kind": "traces", "environment": "sit", "helper": "tools/read-traces.mjs" }
+    ]
+  }
+}
+```
+
+These are illustrative paths, not bundled connectors. Supply real helpers and
+their repository-owned usage, approved identities and data-plane read-only
+enforcement first. At most ten unique sources are allowed; helpers must be
+bounded regular, unlinked repository modules, not credential/state files.
+The environment must be explicitly configured and non-production.
+
+Watcher, direct CLI and dashboard launches discover only matching sources,
+including their source revision, without executing them. Dashboard continuation
+rediscovers current helpers; watcher helper changes invalidate its reviewed
+session. Normal runtime permissions, authentication, unit-only/API-only policies
+and data-safety controls remain authoritative. Metadata is not read-only proof
+or a permission grant. Use bounded IDs/time windows/fields and retain sanitized
+source/correlation findings, not raw records.
+
+Host Copilot MCP connections are not automatically inherited. Existing MCP
+tools must separately be available and authorized in the executing runtime.
+No Cosmos credentials, connection strings or production scope are configured
+by this feature. Direct production helpers are not supported by
+`analysis.evidenceSources`; the existing separately approved local-API
+production-read-only exception is unchanged.
+Missing access or row-level evidence remains a blocker, not proof that SAP
+rejected an item or a reason to invent a code fix.
+
+For an explicitly approved production incident, the watcher has a separate
+opt-in configuration:
+
+```json
+{
+  "analysis": {
+    "productionReadOnlyEvidence": [{
+      "id": "incident-records",
+      "kind": "cosmos",
+      "environment": "production",
+      "readOnly": true,
+      "workItemId": 42,
+      "correlationId": "CR-123",
+      "helper": "tools/read-production-incident.mjs",
+      "helperSha256": "<64 lowercase hexadecimal characters from reviewed source>"
+    }]
+  }
+}
+```
+
+Supply a real reviewed helper, not the illustrative path/hash. Review its
+identity, fixed query/field/container scope, read-only transport, redirect and
+response limits, and sanitized failures. The helper must accept and validate
+`--source`, `--ticket`, `--correlation` and `--revision`, rejecting unknown
+arguments, other IDs and source changes before authentication or networking.
+It must not accept arbitrary SQL/KQL, endpoints or mutation operations. At most
+ten unique Cosmos/trace readers are supported. Each entry binds one exact
+ticket and correlation; no wildcard production grant is supported.
+
+Review the disclosed plan, then explicitly start the watcher with
+`--allow-production-evidence --yes --allow-all-tools` in addition to its normal
+repository, runtime and non-production `--environment`. Without the separate
+flag no production reader is exposed. Matching readers are provided only to
+their bound ticket; other tickets and direct CLI/dashboard jobs inherit nothing.
+Try independently approved trace readers when a Cosmos container denies access,
+retaining both actual outcomes. Normal runtime permissions and human sign-in
+still apply; never change roles or identity automatically.
+
+The helper hash is checked during discovery and session revalidation. Changed
+source requires review and an updated approved hash, then a watcher restart.
+Newly approved reader revisions cause one re-investigation of their bound
+ticket, preserving completed attempts and comments. Removing/revoking approval
+does not reuse historical permission or automatically launch another attempt.
+This does not change DEV write policy, permit production application testing,
+or grant production through ticket comments or a parent Copilot conversation.
+
+#### Review an interrupted attempt
+
+Open the attempt in **Watcher jobs**, select **Review interrupted attempt**, and
+inspect its ticket, retained result/checks, matching local branches, linked PRs
+and ownership status. Check the review confirmation before choosing **Accept
+recorded result**, **Authorize safe retry**, or **Leave blocked**.
+The same review is available without the dashboard:
+
+```powershell
+fixlab watch-review "C:\source\application" --ticket 42
+fixlab watch-recover "C:\source\application" --ticket 42 --decision retry --review-token "<reviewToken from watch-review>" --yes
+```
+
+Decisions are `accept`, `retry` and `leave`. Use the token from your actual fresh
+review, not the placeholder. Changes to the journal, profile, ticket, linked PRs
+or matching branches require another review. The previous watcher lock and
+canonical executor reservation must already be absent; retained/unknown ownership
+blocks recovery. Reconnect to its owner to confirm termination. Never delete
+locks, leases or edit the journal to work around that check.
+
+Acceptance requires a retained successful result for the unchanged ticket;
+drafts must still pass provider verification. Analysis/check records remain
+agent-reported, so review their evidence yourself. A legacy missing result
+cannot be accepted. An active linked PR prevents retry: inspect and reconcile
+that PR first. Local branch discovery is limited to 20 names containing the
+ticket ID, not proof that no other work exists.
+
+Every confirmed decision is saved against the original attempt (up to 20
+decisions per attempt); history and artifacts are preserved. Recovery does not
+post Discussion feedback, resolve work items, alter Git or start an executor.
+After retry authorization, separately restart the watcher with its normal
+reviewed `--yes --allow-all-tools` session. Leaving blocked retains the barrier.
+Recovery does not grant tool permissions or bypass organization policy.
 
 To opt into automatic investigation handoff, first review the plan with
 `--resolve-on-completion`, then add the normal session confirmations:
@@ -782,7 +1047,12 @@ fixlab watch "C:\source\application" --runtime agency --environment dev --resolv
 
 The equivalent reviewed profile setting is `ticketAutomation.resolveOnCompletion: true`.
 This sets `Resolved` only after a verified draft PR or an explicitly confirmed
-cause with evidence and next steps. It never resolves an access blocker,
+cause with evidence and next steps, or an analysis-only story whose request and
+acceptance criteria are fully answered by evidenced findings. For that story
+path, the executor must return `completedStory: { finding, evidence, reason }`
+with no ongoing or planned implementation. Bugs cannot use this story-only path;
+the existing draft-PR and confirmed-cause rules remain available.
+New watcher Discussion comments include `[Fixlab automation]`. It never resolves an access blocker,
 inconclusive analysis, unverified PR or old completed attempt. Resolved means
 investigation handed off for human review, not a merged/deployed or fully
 live-tested fix. Unsupported workflows remain unchanged and receive an explicit
@@ -792,11 +1062,14 @@ opt-in retain their no-state-change behavior. Resolved items are no longer picke
 Reopening an automatically resolved item at a newer work-item revision permits
 one new attempt even if its problem text is unchanged; own feedback remains deduplicated.
 
-This version requires Agency and a locally authenticated Azure CLI identity
+Install and authenticate the selected Agency or Copilot runtime and a local Azure CLI identity
 with the relevant ADO permissions. IcM enters through a tagged linked ADO
 record, not a direct IcM connector. Watcher intake is text-only. It is not a
 dashboard job, hosted service, webhook or boot-time task: the local command
 must remain running. Ctrl+C stops it; `--once` permits at most one investigation.
+On Windows the owned executor requires the runtime's actual `.exe`, not a shell
+wrapper. Copilot model selection uses `--model`; Agency does not accept that flag.
+The watcher uses owned CLI transport, not the dashboard's interactive native SDK.
 More than 20 eligible candidates explicitly stops the scan; narrow the tag or
 areas instead of silently omitting tickets.
 

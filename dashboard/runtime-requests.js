@@ -8,28 +8,52 @@ export function validateToolApprovalMode(value = "ask") {
   }
   return value;
 }
-const secret = /authorization|bearer\s|(?:password|passwd|secret|token|cookie|api[_-]?key)\s*["':=]|(?:gh[pousr]_|github_pat_|eyJ)[A-Za-z0-9_-]{16,}|https?:\/\/[^/\s]+:[^/\s]+@|[?&](?:sig|code|key|access_token|client_secret)=|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
-const credentialQuestion = /(?:enter|provide|paste|type|share|input|tell|send|copy|what is|what's).{0,80}(?:password|verification code|one.time code|MFA code|access token|cookie|secret)/i;
+const secret = /bearer\s|(?:password|passwd|secret|token|cookie|api[_-]?key)\s*["':=]|(?:gh[pousr]_|github_pat_|eyJ)[A-Za-z0-9_-]{16,}|https?:\/\/[^/\s]+:[^/\s]+@|[?&](?:sig|code|key|access_token|client_secret)=|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
+const credentialAssignment = /(?<![\w-])([\w-]+)(?:\s+header)?(?:(?:\\*["'])?\s*[:=]|\s+is\s+\S)/gi;
+const credentialQuestion = /\b(?:password|passphrase|passwd|passcode|credential|authorization(?:\s+header)?|verification\s+code|one[ -]time\s+(?:code|password)|(?:MFA|2FA|security|recovery|backup)\s+code|OTP|TOTP|PIN|(?:access|refresh|id|session|authentication)\s*[_-]?\s*token|API\s*[_-]?\s*key|private\s*[_-]?\s*key|client\s*[_-]?\s*secret|cookie|secret)s?\b/i;
+const credentialSolicitation = /\b(?:enter|paste|provide|send|share|supply|submit|type|input|give|tell|what\s+(?:is|are)|required|needed)\b/i;
+const credentialTest = new RegExp(`${credentialQuestion.source}(?:[-\\s]+(?:reset|validation|rotation|expiration))?[-\\s]+(?:tests?|specs?)\\b`, "gi");
+const credentialValue = new RegExp(`${credentialQuestion.source}(?:\\s*[:=]|\\s+(?:is|are)\\s+\\S)`, "i");
 const credentialPath = /(?:^|[\\/])(?:\.auth|\.edge-profile|\.ssh|\.aws|\.azure|\.env(?:\.[^\\/]*)?|credentials(?:\.[^\\/]*)?)(?:[\\/]|$)/i;
 const permissionBlockReasons = {
   unsupported: "The runtime supplied an unsupported or incomplete request.",
-  oversized: "The complete review exceeds the 8192-character display limit.",
-  "sensitive-path": "The destination may contain credentials or browser state.",
-  "sensitive-content": "The details contain credential-like text, which can include authentication-related source code.",
-  "control-characters": "The details contain unsupported control characters."
+  oversized: "The complete review exceeds the 8192-character display limit. Use Review source-edit access when offered, or an existing reviewed runner/helper; do not split or repackage this operation.",
+  "sensitive-path": "The destination may contain credentials or browser state. Complete sign-in in the normal browser; do not grant access to private state as a workaround.",
+  "sensitive-content": "The details contain credential-like values or assignments. Use an existing reviewed authentication helper; never paste credentials or resend the hidden content.",
+  "control-characters": "The details contain unsupported control characters. Use an existing reviewed runner/helper; do not encode or repackage this operation."
 };
 
-export const PERMISSION_RECOVERY_GUIDANCE =
-  "The user denied this exact operation and requested safe recovery of the blocked stage. " +
+const SAFE_RECOVERY_GUIDANCE =
   "Do not replay, encode, conceal, split or repackage the rejected operation to evade review. " +
   "Reuse existing reviewed repository-owned tests, configured runner commands and authentication helpers. " +
   "Do not create or modify credential-handling code as a workaround. Keep completed evidence and existing failures. " +
   "Human sign-in, managed policy and normal permissions remain required. This grants no new file access, " +
   "external writes or publication. If a safe prerequisite is unavailable, explain the exact blocker and stop that stage.";
 
+export const PERMISSION_RECOVERY_GUIDANCE =
+  "The user denied this exact operation and requested safe recovery of the blocked stage. " +
+  SAFE_RECOVERY_GUIDANCE;
+
+export const AUTOMATIC_PERMISSION_RECOVERY_GUIDANCE =
+  "FixLab rejected an unreviewable operation and requested one safe recovery for this executor. " +
+  SAFE_RECOVERY_GUIDANCE;
+
+function hasCredentialLikeText(value) {
+  if (secret.test(value)) { return true; }
+  for (const [, name] of value.matchAll(credentialAssignment)) {
+    if (/authorization/i.test(name)) { return true; }
+  }
+  return false;
+}
+
 export function safeRuntimeText(value, limit = 8192) {
   return typeof value === "string" && value.length <= limit &&
-    !secret.test(value) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
+    !hasCredentialLikeText(value) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
+}
+
+function requestsCredentials(value) {
+  return credentialQuestion.test(value) &&
+    (credentialSolicitation.test(value) || credentialQuestion.test(value.replace(credentialTest, "")));
 }
 
 export function validateSourceEditReview(value) {
@@ -116,7 +140,7 @@ export function runtimePermissionPrompt(request) {
     ...(!supported ? ["unsupported"] : []),
     ...(details.length > 8192 ? ["oversized"] : []),
     ...(sensitivePath ? ["sensitive-path"] : []),
-    ...(secret.test(details) ? ["sensitive-content"] : []),
+    ...(hasCredentialLikeText(details) ? ["sensitive-content"] : []),
     ...(hasControlCharacters ? ["control-characters"] : [])
   ];
   const canRecover = !reviewable && supported && !sensitivePath &&
@@ -147,9 +171,9 @@ export function runtimePermissionPrompt(request) {
 export function runtimeQuestionPrompt(request) {
   const choices = request?.choices ?? [];
   if (!safeRuntimeText(request?.question, 4000) ||
-      credentialQuestion.test(request.question) ||
+      requestsCredentials(request.question) ||
       !Array.isArray(choices) || choices.length > 20 ||
-      choices.some((choice) => !safeRuntimeText(choice, 1000))) {
+      choices.some((choice) => !safeRuntimeText(choice, 1000) || requestsCredentials(choice))) {
     throw new Error("Copilot requested sensitive, unsupported or oversized input. Complete authentication in the normal browser; never enter credentials in FixLab.");
   }
   if (choices.length === 0 && request.allowFreeform === false) {
@@ -165,6 +189,42 @@ export function runtimeQuestionPrompt(request) {
   };
 }
 
+export function runtimeConversationQuestion(request) {
+  const canAnswer = request.kind === "question" &&
+    [request.title, request.details, ...request.choices].every((value) =>
+      safeRuntimeText(value, 4000) && !requestsCredentials(value) && !/https?:\/\//i.test(value));
+  if (canAnswer) {
+    return {
+      kind: "runtime-question",
+      requestId: request.id,
+      message: request.details,
+      choices: [...request.choices],
+      allowFreeform: request.allowFreeform,
+      responseChannel: "conversation",
+      actions: ["answer"]
+    };
+  }
+  const reasons = (request.blockedReasons ?? []).map((reason) => permissionBlockReasons[reason]).filter(Boolean);
+  return {
+    kind: "runtime-input",
+    requestId: request.id,
+    message: request.kind === "question"
+      ? "Copilot is waiting for input containing details reserved for the dashboard. Review and answer the exact question in its browser panel; no answer or approval is inferred."
+      : `Copilot is waiting for a native permission decision in the dashboard's browser panel. ${reasons.join(" ")} ${
+        request.automaticRecoveryAttempted === true
+          ? "Automatic safe recovery was already attempted once. Resolve the remaining prerequisite using the guidance above; further recovery requires an explicit dashboard decision."
+        : request.canRecover === true
+          ? "Deny and request safe recovery is available there; it denies this operation without granting access or replaying it."
+          : "Review the exact request there; connected conversation replies cannot grant runtime permissions."
+      }`,
+    ...(reasons.length ? { blockedReasons: [...request.blockedReasons] } : {}),
+    ...(request.automaticRecoveryAttempted === true ? { automaticRecoveryAttempted: true } : {}),
+    canRecover: request.canRecover === true,
+    responseChannel: "dashboard",
+    actions: []
+  };
+}
+
 export function createRuntimeRequestBridge({ send, onChange }) {
   const pending = new Map();
   const publish = () => onChange([...pending.values()]);
@@ -177,6 +237,8 @@ export function createRuntimeRequestBridge({ send, onChange }) {
           !safeRuntimeText(value.title, 200) || !safeRuntimeText(value.details) ||
           !Array.isArray(value.choices) || value.choices.length > 20 ||
           value.choices.some((choice) => !safeRuntimeText(choice, 1000)) ||
+          (value.kind === "question" &&
+            [value.title, value.details, ...value.choices].some((text) => requestsCredentials(text))) ||
           typeof value.canApprove !== "boolean" ||
           typeof value.allowFreeform !== "boolean" ||
           (value.perAction !== undefined &&
@@ -191,6 +253,9 @@ export function createRuntimeRequestBridge({ send, onChange }) {
           (value.canRecover !== undefined &&
             (value.canRecover !== true || value.kind !== "permission" ||
               value.canApprove || !value.blockedReasons?.length)) ||
+          (value.automaticRecoveryAttempted !== undefined &&
+            (value.automaticRecoveryAttempted !== true || value.kind !== "permission" ||
+              value.canApprove || value.canRecover !== true)) ||
           (value.sourceEditReview !== undefined &&
             (!value.sourceEditReview || value.kind !== "permission" || value.canApprove || value.canRecover !== true ||
               value.blockedReasons?.length !== 1 || value.blockedReasons[0] !== "oversized" ||
@@ -215,6 +280,7 @@ export function createRuntimeRequestBridge({ send, onChange }) {
         ...(value.perAction === true ? { perAction: true } : {}),
         ...(value.blockedReasons ? { blockedReasons: [...value.blockedReasons] } : {}),
         ...(value.canRecover === true ? { canRecover: true } : {}),
+        ...(value.automaticRecoveryAttempted === true ? { automaticRecoveryAttempted: true } : {}),
         ...(value.sourceEditReview ? { sourceEditReview: validateSourceEditReview(value.sourceEditReview) } : {}),
         ...(value.canAllowAll === true ? { canAllowAll: true } : {}),
         ...(value.grantScope ? { grantScope: value.grantScope } : {})
@@ -253,7 +319,7 @@ export function createRuntimeRequestBridge({ send, onChange }) {
           result = { ...result, answer: request.choices[choice], wasFreeform: false };
         } else if (choice === undefined && request.allowFreeform &&
             safeRuntimeText(answer, 4000) && answer.trim() &&
-            !credentialQuestion.test(answer)) {
+            !credentialValue.test(answer)) {
           result = { ...result, answer, wasFreeform: true };
         } else {
           throw new Error("Select an available choice or supply a non-sensitive answer.");
