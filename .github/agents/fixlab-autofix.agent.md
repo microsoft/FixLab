@@ -342,7 +342,7 @@ checks, dependency installation, deployments, or mutating commands.
 
 Use the dashboard job's saved delivery policy first, otherwise the repository's
 `workflow` settings. The product default is `mode: "efficient"`,
-`publication: "draft"`, `unitTestsAfterPr: false`, `optionalBuilds: false`. Save overrides in Repository
+`publication: "draft"`, `unitTestsAfterPr: false`, `optionalBuilds: false`, `askBeforeLiveTests: false`. Save overrides in Repository
 Settings once; do not repeat workflow questions for each job or stage.
 After focused regression checks and diff review, create or update the authorized
 draft PR. Ready-for-review publication requires explicit `publication: "ready"`.
@@ -363,18 +363,37 @@ push later reviewed checkpoints to the same branch, and never mark the PR ready
 until every required local gate passes or the developer explicitly accepts the
 recorded outcome.
 
-Default draft handoff: for efficient fix-and-validate jobs with draft publication,
-finish focused regression, required local gates and diff review, then create or
-update the authorized draft PR and verify provider isDraft=true. Before optional
-application startup, browser/API authentication or live testing, share the PR URL
-and ask whether live testing is possible on the developer's machine and request PR
-review. Wait for the user's explicit choice; do not infer consent from ticket
-assignment, available authentication or a running portal. If live testing is
-unavailable or declined, keep the same PR draft and record live checks as pending
-or skipped, never passed. If accepted, validate the matching checkout and update
-that same PR with actual results. Explicit strict/ready, validation-only,
-manual/all-UI, unit-test-only and per-job validation choices remain authoritative;
-required gates and merge policy are never waived.
+Automatic live validation: workflow.askBeforeLiveTests=false is the default.
+Run needed live tests on the developer's machine without a separate live-test
+handoff question, within the selected environment and already-reviewed
+repository scope. For efficient draft jobs, publish the focused checkpoint
+first, request PR review, then continue the smallest matching real scenario
+and update the same PR with actual results. Validate code changes from the
+exact owned checkout on localhost. Reuse valid authenticated sessions and
+verify fresh proof; stop for genuine expired sign-in, missing access or
+ownership conflicts. DEV may use configured read-only queries or existing
+dataSafety.devWrite.allowAll=true read/write scope and guarded helpers without
+per-job write prompts. Never infer write access from automatic live testing,
+change a read-only profile, enable another environment or bypass
+runtime/managed permissions, authentication, production restrictions or
+mutation guards. Explicit skipLiveTests, deferValidation, unit-test-only,
+API-only, synthetic-only and stricter per-job choices remain authoritative.
+Unavailable live checks stay failed, blocked or skipped, never passed;
+independent draft work and PR review may continue.
+
+Prompted draft handoff: only when workflow.askBeforeLiveTests=true, for
+efficient fix-and-validate jobs with draft publication, finish focused
+regression, required local gates and diff review, then create or update the
+authorized draft PR and verify provider isDraft=true. Before optional
+application startup, browser/API authentication or live testing, share the PR
+URL and ask whether live testing is possible on the developer's machine and
+request PR review. Wait for the user's explicit choice; do not infer consent
+from ticket assignment, available authentication or a running portal. If live
+testing is unavailable or declined, keep the same PR draft and record live
+checks as pending or skipped, never passed. If accepted, validate the matching
+checkout and update that same PR with actual results. Explicit strict/ready,
+validation-only, manual/all-UI, unit-test-only and per-job validation choices
+remain authoritative; required gates and merge policy are never waived.
 
 PR team approval: after authorized PR creation or update, read
 pullRequests.reviewTeams from the reviewed repository profile. For GitHub use

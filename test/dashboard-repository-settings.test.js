@@ -38,7 +38,7 @@ test("repository onboarding previews without writes and creates only missing rev
     const profile = JSON.parse(readFileSync(join(repository, SETUP_PROFILE_PATH), "utf8"));
     assert.equal(profile.pullRequests.branchNaming.userId, "synthetic-user");
     assert.deepEqual(profile.workflow, {
-      mode: "efficient", publication: "draft", unitTestsAfterPr: false, optionalBuilds: false
+      mode: "efficient", publication: "draft", unitTestsAfterPr: false, optionalBuilds: false, askBeforeLiveTests: false
     });
     assert.equal(profile.browserAutomation.dataSafety.productionAllowed, false);
     assert.equal(configuredTestSynthesis(profile, "", undefined, "dev").source, "non-production-read-only");
@@ -66,21 +66,24 @@ test("repository settings preserve undisplayed configuration and never expose en
     profile.browserAutomation.authentication.environment = { SYNTHETIC_PRIVATE: "noncredential-private-sentinel" };
     profile.pullRequests.requireConfirmation = false;
     profile.workflow.publication = "ready";
+    profile.workflow.askBeforeLiveTests = true;
     profile.customContract = { retained: true };
     delete profile.browserAutomation.testSynthesis.devReadOnly;
     delete profile.browserAutomation.testSynthesis.ppeReadOnly;
     profile.environments = { dev: { syntheticContract: "preserved" } };
     writeFileSync(path, JSON.stringify(profile));
     const inspected = inspectRepositorySettings(repository);
+    assert.equal(inspected.values.askBeforeLiveTests, true);
     assert.doesNotMatch(JSON.stringify(inspected), /noncredential-private-sentinel|SYNTHETIC_PRIVATE/);
     const preview = plan(repository, { name: "Updated synthetic repository",
-      efficientWorkflow: false, optionalBuilds: true, unitTestsAfterPr: false }, false);
+      efficientWorkflow: false, optionalBuilds: true, unitTestsAfterPr: false,
+      askBeforeLiveTests: false }, false);
     assert.deepEqual(preview.files, [SETUP_PROFILE_PATH]);
     applyRepositorySettings(preview, "synthetic-settings-owner");
     const updated = JSON.parse(readFileSync(path, "utf8"));
     assert.equal(updated.name, "Updated synthetic repository");
     assert.deepEqual(updated.workflow, {
-      mode: "strict", publication: "ready", unitTestsAfterPr: false, optionalBuilds: true
+      mode: "strict", publication: "ready", unitTestsAfterPr: false, optionalBuilds: true, askBeforeLiveTests: false
     });
     assert.deepEqual(updated.customContract, { retained: true });
     assert.equal(updated.pullRequests.requireConfirmation, false);

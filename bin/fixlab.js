@@ -1186,6 +1186,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     })] : []),
     choices.deferValidation ? "Explicit unverified draft overrides the default focused-check-before-publication checkpoint; preserve every actual gate outcome." : !readOnly && workflow.mode === "efficient"
       ? efficientWorkflowGuidance(workflow, { dashboard: false,
+        automaticLiveTesting: Boolean(request),
         postPrLiveReview: Boolean(request) && allowsPostPrLiveReview({ mode: "fix-and-validate", workflow, testEvidence, ...choices }) })
       : "Use strict delivery: all applicable local gates and required approvals remain mandatory before readiness. Honor the saved draft/ready publication choice. Read-only runs never create or update a PR.",
     "Do not delete or edit transient test artifacts while validation is discovering or executing them; wait for owned validation to finish before cleanup.",
