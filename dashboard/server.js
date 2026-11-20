@@ -669,7 +669,7 @@ export function normalizeEngineeringSummary(value) {
 }
 
 const ENGINEERING_SUMMARY_GUIDANCE =
-  '- At the reviewed fix checkpoint and before finishing, emit FIXLAB_SUMMARY| followed by one-line JSON: problem, expectedBehavior, actualBehavior, rootCause, codeFix (explain the actual change and why), changedFiles[], regression[], risks[], workarounds[], commit (hex or empty). Required: problem, rootCause, codeFix. Use relative file paths, bounded strings, no secrets/private URLs. Preserve the original bug-to-fix explanation across retries; update only for new evidence. Separate historical, skipped and unverified tests from actual passes; report no-change outcomes honestly.';
+  '- At the reviewed fix checkpoint and before finishing emit FIXLAB_SUMMARY|one-line JSON: problem, expectedBehavior, actualBehavior, rootCause, codeFix (change/why), changedFiles[], regression[], risks[], workarounds[], commit (hex/empty). Require problem/rootCause/codeFix; bounded strings, relative paths, no secrets/private URLs. Preserve bug-to-fix explanation across retries; update only for new evidence. Distinguish historical/skipped/unverified tests from passes; report no-change honestly.';
 
 function dashboardSnapshot(job) {
   return {
@@ -1242,18 +1242,18 @@ export function buildJobPrompt({
 - First emit FIXLAB_STAGE|intake|running|Accepted the request and starting intake.
 - Emit running before stage tools and terminal outcome before advancing; never defer/batch markers.
 - FIXLAB_STAGE|stage|status|message. Stages: ${FIXLAB_STAGES.join(", ")}. Statuses: pending, running, passed, skipped, blocked, failed. Unmarked/skipped never means passed.
-- Markers: literal assistant response lines, never shell/files/tools/code blocks/tables.
-- FIXLAB_ACTIVITY|stage|summary: evidence/decisions, not chain-of-thought; at most two per stage unless a new blocker. No credentials/private data.
+- Markers: literal assistant response lines. Never generate markers through shell, files, tools, code blocks or tables.
+- FIXLAB_ACTIVITY|stage|summary: evidence/decisions, not hidden chain-of-thought; at most two per stage unless a new blocker. No credentials/private data.
 - FIXLAB_TEST|source|mutation-mode|scenario: emit on scenario selection and data/mutation changes. Sources: ${[...testDataSources].join(", ")}. Mutation modes: ${[...mutationModes].join(", ")}.
-- FIXLAB_BUG|id|outcome|owner|summary: each expected bug before terminal pr. IDs: ${bugResults.map((bug) => bug.id).join(", ") || "none"}. Outcomes: ${[...bugOutcomeStatuses].join(", ")}. Owners: application, upstream-system, data, deployment, unknown. Correctly surfaced upstream errors needing no correction: external/upstream-system.
-- Preserve exact command errors. No task_complete/final until every expected FIXLAB_BUG and terminal FIXLAB_STAGE line is emitted.`;
+- FIXLAB_BUG|id|outcome|owner|summary: required machine-readable output per expected bug before the terminal pr stage. IDs: ${bugResults.map((bug) => bug.id).join(", ") || "none"}. Outcomes: ${[...bugOutcomeStatuses].join(", ")}. Owners: application, upstream-system, data, deployment, unknown. Correctly surfaced upstream errors needing no correction: external with owner upstream-system.
+- Preserve exact command errors. Do not call task_complete or return the final response until every expected FIXLAB_BUG and terminal FIXLAB_STAGE line is emitted.`;
   const pullRequestGuidance = readOnly
     ? "- Pull-request strategy is informational in read-only mode; do not create or update pull requests."
     : efficient
       ? `- Use ${pullRequestStrategy === "per-bug" ? "a separate branch and PR for each bug; never combine unrelated changes" : "one common PR for the reviewed combined change"}. Publish after the focused checkpoint, then run saved post-PR checks.`
     : pullRequestStrategy === "per-bug"
       ? "- Process each selected bug as an isolated delivery unit: separate code, focused tests, browser evidence, commit and authorized draft PR. Apply the delivery policy below per bug; never combine unrelated changes."
-      : "- One common-PR batch: implement every selected fix; protect the combined diff with focused regression. Apply the delivery policy to one authorized PR.";
+      : "- One common-PR batch: every selected fix, combined focused regression, one authorized PR under the delivery policy.";
   const uiScenarioGuidance = postPrLiveReview
     ? "- Live application startup and the focused Playwright journey wait until the draft PR is published and the user explicitly accepts live testing."
     : apiOnly
@@ -1263,8 +1263,8 @@ export function buildJobPrompt({
 - Start the required applications once when safe, preserve each scenario result, and attach non-sensitive screenshot evidence for the complete UI run.`
     : "";
   const environmentGuidance = targetEnvironment
-    ? `- Selected environment: ${targetEnvironment}. Use exactly that repository-approved environment for profile-defined startup and live tests. Do not silently fall back to local or another environment; unavailable, unauthenticated or unsafe targets block the stage with the exact prerequisite.
-- Tests, type-checks and builds stay local unless the profile says otherwise.`
+    ? `- Selected environment: ${targetEnvironment}. Use exactly that repository-approved environment for startup/live tests. Do not silently fall back to local or another environment; unavailable/unauthenticated/unsafe targets block with exact prerequisites.
+- Tests, type-checks and builds stay local unless profile-approved otherwise.`
     : "- No environment override was selected. Use the repository profile's safe default and never select production.";
   const scenarioGuidance = !apiOnly && !testEvidence.unitTestsOnly && !skipLiveTests && !unverifiedDraft
     ? SCENARIO_VALIDATION_GUIDANCE : "";
@@ -1287,7 +1287,7 @@ ${syntheticFallbackAllowed ? `- If the selected backend is unreachable, authenti
 - Do not replace an expected empty-state assertion with synthetic data. Use fallback only when records are required to exercise the reported behavior and the selected backend cannot supply them.
 - When fallback occurs, emit a FIXLAB_ACTIVITY line explaining why, intercept all mutations, and emit FIXLAB_TEST with source synthetic-intercepted and mutation mode intercepted. A synthetic pass proves the UI behavior only; do not claim the selected backend or its data was validated.`
     : "- This run does not permit synthetic interception. Preserve unavailable-data/access diagnostics, block only dependent scenarios, and continue independent approved scenarios without changing the selected data policy."}`
-      : "- Use the configured test data source and mutation mode. For synthetic-intercepted tests, fulfill business-data reads locally, intercept every mutating request, and assert the intended request count and payload without changing an external record.";
+      : "- Use configured data/mutation policy. Synthetic-intercepted: fulfill business reads locally, intercept every mutating request, assert request count/payload; never change external records.";
   const videoGuidance = apiOnly
     ? "- Preserve sanitized API assertion results, not browser screenshots, videos or credential-bearing traces."
     : recordPlaywrightVideo
@@ -1314,8 +1314,7 @@ ${process.platform === "win32" ? "- Windows executor children are job-contained 
 - Skip broad test suites and full builds unless the repository profile requires them or user-visible/risk evidence makes them necessary.
 - Preserve review, live-test, and pull-request evidence, and make no unrelated changes.
 ${requestType === "feature" ? "- Implement the user-approved feature scope rather than returning a plan solely because it crosses layers. Confirm unclear contracts and other teams' dependencies; keep them as explicit blockers in this same resumable job. Another repository requires its own reviewed job and permissions." : ""}`
-    : `- Generate a concise fix contract from the reported behavior and expected outcome.
-- Diagnose/reproduce with repository evidence; never claim an unproven cause or reproduction. Use the smallest focused reproduction.`;
+    : "- Fix contract: reported/expected behavior; smallest evidence-backed reproduction. Never claim unproven cause or reproduction.";
   if (playwrightOnly) {
     return `FixLab output protocol (follow before any tool call):
 - First emit FIXLAB_STAGE|intake|running|Accepted the request and starting intake.
@@ -1408,7 +1407,8 @@ ${!readOnly && !unverifiedDraft ? AUTONOMOUS_RECOVERY_GUIDANCE : ""}
 ${setupRecovery.length ? `Offline setup diagnostics to repair when needed for this task:\n${JSON.stringify(setupRecovery)}` : ""}
 - Reproduce on an approved app; start a stack only for changed code. Deployed baselines never prove unpublished fixes.
 - New worktree: review \`fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME\`; add \`--yes\` after scoped setup approval. Copy only non-sensitive \`worktreeSetup.files\`. Never copy credentials or browser state. Missing setup/auth/access blocks dependents; do not retry unchanged approvals or grant blanket path access. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration.
-- Inspect git status/diff and task-relevant symbols/files. Reuse this job/session; reread, reinstall or repeat checks only for new evidence.
+- Inspect git status and effective diff; search task-relevant symbols and files only.
+- Reuse this job/session context. Do not reread unchanged files, repeat diagnosis, reinstall available dependencies or repeat broad checks without new evidence.
 - Treat commit changes and repository-profile or instruction changes as invalidation boundaries.
 ${readOnly ? "" : requestGuidance}
 ${readOnly ? "" : pullRequestGuidance}
@@ -1418,7 +1418,7 @@ ${environmentGuidance}
 ${videoGuidance}
 ${manualLocalhostGuidance}
 ${readOnly ? "" : branchNamingGuidance}
-- ${readOnly ? "Do not edit files other than job-owned transient Playwright journeys and runner evidence. Do not create commits, push branches, create pull requests, or update pull requests." : "Make the smallest complete change; no edit when evidence shows none is needed."}
+- ${readOnly ? "Do not edit files other than job-owned transient Playwright journeys and runner evidence. Do not create commits, push branches, create pull requests, or update pull requests." : "Make the smallest complete change. Make no code change when none is needed."}
 ${readOnly ? "" : ENGINEERING_SUMMARY_GUIDANCE}
 ${readOnly ? TRANSIENT_PLAYWRIGHT_GUIDANCE : ""}
 ${readOnly ? "" : `- Saved delivery workflow: ${unverifiedDraft ? "explicit unverified draft; local and live checks are deferred, not passed" : efficient ? `efficient; focused checks before the ${workflow.publication === "ready" ? "ready-for-review" : "draft"} PR, broader checks only by saved preference or explicit selection` : "strict; all applicable configured gates remain required for full validation and ready publication"}. Saved job policy overrides product defaults.`}
@@ -1428,19 +1428,19 @@ ${readOnly ? "" : `- Saved delivery workflow: ${unverifiedDraft ? "explicit unve
 - Do not delete or edit transient test artifacts while validation is discovering or executing them; wait for owned validation to finish before cleanup.
 - ${playwrightOnly ? "Skip source diagnosis, separate reproduction, implementation, diff review, and non-browser validation. Mark diagnosis, reproduce, fix, and review skipped with the reason Playwright-only mode was selected." : "Inspect the affected surface; self-review the effective diff for correctness, scope and unrelated changes."}
 - ${unverifiedDraft ? "Do not run local checks or live tests for this explicitly unverified draft. Preserve every gate as not run or its actual previous outcome." : playwrightOnly ? "Run only setup commands strictly required to launch the profile-defined applications and focused Playwright journey. Do not reinstall dependencies that are already available." : "Run the focused repository-owned tests, type-checks, and builds needed for the affected surface and risk. Preserve exact results."}
-- Run verbose tests/builds/lint/type/package checks through \`fixlab exec --stage <stage> -- <command> [args...]\`. PowerShell drops unquoted \`--\`: use \`'--'\`. Never wrap in \`cmd /c\`; non-interactive execution denies it. Keep compact results; open private evidence only for exact diagnostics.
-- \`--reuse\`: deterministic local validation only; unchanged command/args, Git state, cwd, profile and stage. Never reuse startup/health/auth/Playwright/live/external-data checks, installs, deployments or mutations.
+- Run verbose tests/builds/lint/type/package checks via \`fixlab exec --stage <stage> -- <command> [args...]\`. PowerShell drops unquoted \`--\`: use \`'--'\`; never wrap \`fixlab exec\` in \`cmd /c\`. Keep compact results; private evidence for exact diagnostics only.
+- \`--reuse\`: deterministic local validation only; unchanged command/args, Git state, cwd, profile/stage. Never reuse startup, health, authentication, Playwright/live/external-data checks, installs, deployments or mutations.
 - ${postPrLiveReview ? "After the user accepts post-PR live testing, run the independently ready focused live gate and preserve unrelated blockers separately." : "Do not skip Playwright merely because an unrelated non-browser test, build, or backend startup is failed or blocked. Run the live gate when frontend, authentication, safe data and journey are independently ready; retain the other blocker."}
-- Use local-stack only for profile-defined application startup and health. Do not mark local-stack failed because a separate test, type-check, lint, or production build failed; retain exact diagnostics separately and run independently ready browser checks.
+- Use local-stack only for profile-defined application startup and health. Do not mark local-stack failed because a separate test, type-check, lint, or production build failed; preserve those diagnostics separately.
 - Reuse an equivalent repository Playwright journey; otherwise synthesize the smallest scenario with measurable assertions for expected behavior before execution.
 - Treat a synthesized Playwright scenario as a transient validation artifact. Remove its source file and any validation-only configuration edits before diff review, commit, push or PR creation.
 - Do not add a newly generated authenticated test such as \`*.auth.spec.ts\` to the product change unless the user explicitly requests permanent browser-test coverage or repository instructions require that exact persisted test.
 - Existing repository-owned Playwright tests may be changed only when the reported product behavior directly requires that regression update; do not broaden the pull request to repair unrelated or stale browser journeys.
 ${testDataGuidance}
-${readOnly ? "" : unverifiedDraft ? UNVERIFIED_DRAFT_GUIDANCE : efficient ? efficientWorkflowGuidance(workflow, { postPrLiveReview }) : `- After focused regression, transient cleanup and diff review, commit/push the authorized checkpoint and create/update one draft PR before independent validation finishes.
-- Parallelize independent checks when supported; update the same draft PR with actual checks, risks and reviewed checkpoints.
-- Keep draft/validation-in-progress for pending, blocked, failed or unaccepted skipped checks/approvals. Ready/pr passed requires gates passed or policy-accepted outcomes.`}
-- ${readOnly ? "Never publish or change PR draft status in read-only mode." : workflow?.publication === "draft" ? "Keep PR draft; verify provider isDraft=true before publication passed. Ready needs separate review; strict required checks remain mandatory." : "After required local validation and approval gates pass or policy explicitly accepts their outcomes, publish the authorized PR by marking it ready for review. Do not wait for remote PR CI or build completion before publication. Use `gh pr ready <number>` or `az repos pr update --id <id> --draft false`; read provider isDraft=false. Verify the PR is no longer draft before reporting the PR stage passed. Report remote checks as pending, not passed, and leave merge policies intact. Failed publication/readback means pr blocked/failed, never passed."}
+${readOnly ? "" : unverifiedDraft ? UNVERIFIED_DRAFT_GUIDANCE : efficient ? efficientWorkflowGuidance(workflow, { postPrLiveReview }) : `- After focused regression, transient cleanup and diff review, commit/push the authorized checkpoint; create or update a draft pull request before remaining independent validation completes.
+- Start long-running independent validation commands in parallel when supported; update the same PR with actual results/risks/checkpoints, never duplicate.
+- Keep the pull request draft and clearly marked validation-in-progress for pending/blocked/failed/unaccepted skipped gates or approvals. Mark ready/pr passed only after required gates pass or repository policy explicitly accepts the outcome.`}
+- ${readOnly ? "Do not publish a pull request or change its draft status in read-only mode." : workflow?.publication === "draft" ? "Keep PR draft; verify provider isDraft=true before publication passed. Ready needs separate review; strict required checks remain mandatory." : "After required local validation and approval gates pass or policy explicitly accepts their outcomes, publish the authorized PR by marking it ready for review. Do not wait for remote PR CI or build completion before publication. Use `gh pr ready <number>` or `az repos pr update --id <id> --draft false`; read provider isDraft=false. Verify the PR is no longer draft before reporting the PR stage passed. Report remote checks as pending, not passed, and leave merge policies intact. If publication or state verification fails, report the PR stage blocked or failed."}
 ${readOnly ? "" : "- Prefix PR titles with FLAB: and a concise change summary. Use the repository PR template, clear Markdown problem/change/validation/risk sections and accurate checkboxes."}
 ${readOnly ? "" : CONCISE_PR_GUIDANCE}
 ${readOnly ? "" : USER_FRIENDLY_UPDATE_GUIDANCE}
@@ -1448,14 +1448,14 @@ ${readOnly ? "" : PR_LEARNING_GUIDANCE}
 ${!readOnly && workflow?.reviewTeams?.length ? `${PR_TEAM_REVIEW_GUIDANCE}\nReviewed team identities: ${JSON.stringify(workflow.reviewTeams)}. Profile changes require a fresh review.` : ""}
 ${workItemValidationEvidenceGuidance({ mode, testEvidence, skipLiveTests, deferValidation })}
 - ${PORTAL_SCREENSHOT_GUIDANCE}
-- ${postPrLiveReview ? "Only after live-test acceptance, start profile-defined apps and validate the matching PR checkout; deployed baselines never prove unpublished changes." : "Start profile-defined apps and run its live test in the approved environment; never invent or hardcode environments."}
+- ${postPrLiveReview ? "Only after live-test acceptance, start profile-defined apps and validate the matching PR checkout; deployed baselines never prove unpublished changes." : "Start only applications defined by the repository profile; execute its repository-defined live test in the approved environment. Do not invent or hardcode environment choices."}
 - ${playwrightOnly ? "Record setup/auth/startup, Playwright results, skips, blockers and risks." : "Record diagnosis/surface, diff, review, local/startup/live results, skips, blockers and risks."}
-- Human interaction: only ${postPrLiveReview ? "post-PR live-test choice/PR review, " : ""}authentication, unsafe-data/deployment/PR approvals or blockers unresolvable from repository evidence.
-- Human blockers: emit FIXLAB_STAGE|stage|blocked|exact action and affected bugs; skip dependents and exit. Dashboard input resumes this session.
+- Human interaction: only ${postPrLiveReview ? "post-PR live-test choice/PR review, " : ""}authentication, unsafe-data approval, deployment/PR approval or irreducible blockers.
+- Human blockers: emit FIXLAB_STAGE|stage|blocked|exact action and affected bugs; skip dependents, exit; dashboard input resumes.
 - Finish independent safe checks before waiting; retain exact blockers, skip only dependents.
-- Keep messages/logs concise: relevant evidence and exact errors, never unbounded raw prompt output.
+- Keep messages/logs concise; preserve exact errors; do not feed unbounded raw output back into prompts.
 - Keep execution local unless the profile and existing approval explicitly require an allowed external action.
-- Never create empty PRs. All external/no-change/expected/duplicate/already-fixed bugs: skip fix/pr and explain each outcome.
+- Do not create an empty pull request. All external/no-change/expected/duplicate/already-fixed: skip fix/pr and explain each.
 ${validateOnly ? "- The fix and pr stages must be explicitly skipped unless they fail for another reason." : ""}
 ${playwrightOnly ? "- The diagnosis, reproduce, fix, review, and pr stages must be explicitly skipped unless a required setup or browser-validation blocker makes the applicable stage blocked or failed." : ""}
 ${testEvidence.unitTestsOnly ? `\nRepository unit-test-only override:\n${UNIT_TEST_ONLY_GUIDANCE}\nRecorded reason: ${testEvidence.liveTestsDeferredReason}` : ""}
