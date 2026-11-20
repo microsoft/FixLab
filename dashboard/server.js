@@ -866,6 +866,9 @@ function restoreDashboardJob(snapshot, repository) {
     screenshotPaths: [],
     cacheSummary: loadCacheSummary(restored.cacheContext)
   });
+  if (restored.status === "queued") {
+    restored.pendingPrompt = restored.initialPrompt;
+  }
   return restored;
 }
 
@@ -3828,6 +3831,17 @@ export function createDashboardServer({
       (job) => job.id !== resumableSnapshot.id
     );
   }
+  const queuedSnapshots = persistedJobs
+    .filter((job) => job.status === "queued" &&
+      (job.runtime ?? (job.model ? "copilot" : "")) === runtime)
+    .slice(0, MAX_QUEUED_JOBS);
+  for (const snapshot of queuedSnapshots) {
+    queuedJobs.push(restoreDashboardJob(snapshot, resolvedRepository));
+  }
+  if (queuedSnapshots.length > 0) {
+    const queuedIds = new Set(queuedSnapshots.map((job) => job.id));
+    persistedJobs = persistedJobs.filter((job) => !queuedIds.has(job.id));
+  }
 
   function dashboardHistory() {
     const liveIds = new Set([
@@ -4705,6 +4719,8 @@ export function createDashboardServer({
       question, workspaceReview
     };
   }
+
+  startNextJob();
 
   const server = createServer(async (request, response) => {
     const requestUrl = new URL(

@@ -678,8 +678,9 @@ profile-defined startup and live testing, evidence collection, and the gated
 pull-request outcome. It asks for human interaction only for authentication,
 unsafe-data approval, deployment or pull-request approval, or genuine blockers.
 The job form also exposes the repository profile's allowed non-production
-environments. A user can explicitly select environments such as DEV or SIT for
-profile-defined application startup and Playwright live testing. The server
+environments. A user can explicitly select profile-defined environments such
+as DEV, SIT, Test, or UAT for application startup and Playwright live testing;
+FixLab does not assume every user can access the same shared system. The server
 rejects values outside the profile allowlist and production aliases. The agent
 must use the selected environment exactly or block with the missing
 prerequisite; it cannot silently fall back to local or another environment.
@@ -793,6 +794,10 @@ failed jobs pause queue advancement so the same session remains resumable. A
 user may explicitly dismiss a failed job without resuming it; FixLab preserves
 the failed outcome in dashboard history, performs no repository mutation for
 that job, and starts the next queued job.
+Persisted waiting jobs are restored in their original order after a dashboard
+restart, retain their UUID runtime session IDs, and remain paused behind a
+restored blocked or failed active job. If no blocking job remains, queue
+execution resumes automatically.
 Waiting jobs can be removed by queue position or job ID before execution. The
 dashboard records the job as cancelled, deletes only its FixLab-owned
 screenshot artifacts, renumbers the remaining queue, and never interrupts the

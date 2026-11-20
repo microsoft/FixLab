@@ -374,6 +374,16 @@ test("Copilot models are validated and retained in fresh and resumed invocations
   }
 });
 
+test("repository profile template offers configurable test and UAT environments", () => {
+  const profile = JSON.parse(
+    readFileSync(join(packageRoot, "templates", "repository-profile.json"), "utf8")
+  );
+
+  assert.equal(profile.environments.includes("test"), true);
+  assert.equal(profile.environments.includes("uat"), true);
+  assert.equal(profile.environments.includes("production"), false);
+});
+
 test("Agency executor keeps long prompts out of process arguments", () => {
   const prompt = `Fix this batch:\n${"x".repeat(40000)}`;
   const invocation = buildAgencyInvocation({
@@ -6484,6 +6494,92 @@ test("dashboard recovers an orphaned running job as failed and resumable", async
     assert.equal(status.body.job.canResume, true);
     assert.equal(status.body.job.stages.intake.status, "failed");
     assert.match(status.body.job.error, /without an owned executor process/);
+  } finally {
+    await second.dashboard.close();
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("dashboard restores queued jobs in order after restart", async () => {
+  const repository = createGitRepository();
+  const first = await startDashboard(repository, () => ({
+    completion: Promise.resolve({ code: 1 }),
+    terminate() {}
+  }));
+  let currentJobId;
+  let firstQueuedJobId;
+  let secondQueuedJobId;
+
+  try {
+    const started = await jsonRequest(first.url, "/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: "Fail this active job before restart.",
+        requestType: "bug-fix",
+        mode: "fix-and-validate"
+      })
+    });
+    currentJobId = started.body.job.id;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const firstQueued = await jsonRequest(first.url, "/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: "Run this restored job first.",
+        requestType: "small-enhancement",
+        mode: "fix-and-validate"
+      })
+    });
+    firstQueuedJobId = firstQueued.body.queuedJob.id;
+
+    const secondQueued = await jsonRequest(first.url, "/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: "Run this restored job second.",
+        requestType: "bug-fix",
+        mode: "validate-only"
+      })
+    });
+    secondQueuedJobId = secondQueued.body.queuedJob.id;
+    await jsonRequest(first.url, "/api/status");
+  } finally {
+    await first.dashboard.close();
+  }
+
+  const executorCalls = [];
+  const second = await startDashboard(repository, (input) => {
+    executorCalls.push(input);
+    return { completion: new Promise(() => {}), terminate() {} };
+  });
+  try {
+    const restored = await jsonRequest(second.url, "/api/status");
+    assert.equal(restored.body.job.id, currentJobId);
+    assert.equal(restored.body.job.status, "failed");
+    assert.deepEqual(
+      restored.body.queue.map((job) => job.id),
+      [firstQueuedJobId, secondQueuedJobId]
+    );
+    assert.deepEqual(
+      restored.body.queue.map((job) => job.position),
+      [1, 2]
+    );
+
+    const dismissed = await jsonRequest(second.url, "/api/job/dismiss", {
+      method: "POST"
+    });
+    assert.equal(dismissed.response.status, 202);
+    assert.equal(dismissed.body.job.id, firstQueuedJobId);
+    assert.equal(dismissed.body.job.status, "running");
+    assert.deepEqual(
+      dismissed.body.queue.map((job) => job.id),
+      [secondQueuedJobId]
+    );
+    assert.equal(executorCalls.length, 1);
+    assert.match(executorCalls[0].prompt, /Run this restored job first/);
+    assert.equal(executorCalls[0].sessionId, firstQueuedJobId);
   } finally {
     await second.dashboard.close();
     rmSync(repository, { recursive: true, force: true });
