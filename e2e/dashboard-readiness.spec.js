@@ -424,6 +424,65 @@ test("persistent DEV setup hides job permissions and forwards authenticated real
   }
 });
 
+test("DEV browser scope guards block real writes after unsuccessful localhost traffic", async ({ browser }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-dev-http-failure-"));
+  const calls = [];
+  const application = createServer((request, response) => {
+    if (request.url === "/api/items") {
+      calls.push(request.method);
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end('{"error":"Normal application authentication required"}');
+    } else {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end("<!doctype html><html><body>Owned DEV browser fixture</body></html>");
+    }
+  });
+  let session;
+  try {
+    await new Promise(resolve => application.listen(0, "127.0.0.1", resolve));
+    const applicationUrl = `http://127.0.0.1:${application.address().port}`;
+    const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+    profile.environments = ["dev"];
+    profile.applications.frontend.port = application.address().port;
+    profile.applications.frontend.healthUrl = applicationUrl;
+    profile.browserAutomation.dataSafety.devWrite = {
+      allowAll: true, origins: ["https://api.dev.example.test"],
+      scope: "api://example-service/access", sessionHelper: "dev-session.mjs", browserProxyPaths: ["/api"]
+    };
+    mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    writeFileSync(join(directory, "dev-session.mjs"), "export const syntheticFixture = true;");
+    for (const mutationMode of ["none", "intercepted"]) {
+      await expect(createDevBrowserContext(browser, {
+        repository: directory, targetEnvironment: "dev", mutationMode
+      })).rejects.toThrow(/per-run mutation/u);
+    }
+    session = await createDevBrowserContext(browser, {
+      repository: directory, targetEnvironment: "dev"
+    });
+    const unauthenticatedPage = await session.context.newPage();
+    await unauthenticatedPage.goto(applicationUrl);
+    const rejected = await unauthenticatedPage.evaluate(async () => {
+      const response = await fetch("/api/items");
+      return { status: response.status, body: await response.json() };
+    });
+    expect(rejected).toEqual({ status: 401, body: { error: "Normal application authentication required" } });
+    await expect(session.assertHealthy()).rejects.toThrow(/HTTP 401/u);
+    const failedReadCount = calls.length;
+    const subsequentWrite = await unauthenticatedPage.evaluate(() =>
+      fetch("/api/items", { method: "POST" }).then(() => "forwarded", () => "blocked"));
+    expect(subsequentWrite).toBe("blocked");
+    expect(calls.length).toBe(failedReadCount);
+    expect(calls).toEqual(["GET"]);
+    await expect(session.close()).rejects.toThrow(/HTTP 401/u);
+    session = null;
+  } finally {
+    await session?.context.close();
+    await new Promise((resolve, reject) => application.close(error => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("editing from an isolated checkout follows the same job and recovers watcher-only profile changes", async ({ page }) => {
   test.setTimeout(60000);
   const directory = mkdtempSync(join(tmpdir(), "fixlab-owned-workspace-ui-"));

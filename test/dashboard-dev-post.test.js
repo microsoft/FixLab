@@ -643,8 +643,53 @@ test("persistent DEV access never overrides API-only, unit-only or production-ba
   }
 });
 
+test("DEV browser guards reject stricter per-run mutation scopes before creating a context", async t => {
+  const state = fixture(t);
+  state.profile.applications = { frontend: { healthUrl: "http://localhost:3000" } };
+  state.profile.browserAutomation.dataSafety.devWrite = {
+    allowAll: true, origins: ["https://api.dev.example.test"],
+    scope: "api://example-service/access", sessionHelper: "session.mjs"
+  };
+  state.save();
+  const browser = { async newContext() { throw new Error("Unexpected browser context creation."); } };
+  for (const mutationMode of ["none", "intercepted", "invalid", null]) {
+    await assert.rejects(createDevBrowserContext(browser, {
+      repository: state.repository, targetEnvironment: "dev", mutationMode
+    }), /per-run mutation/u);
+  }
+  for (const selectedMutationMode of ["none", "intercepted", "invalid", null]) {
+    await assert.rejects(createDevBrowserContext(browser, {
+      repository: state.repository, targetEnvironment: "dev", selectedMutationMode
+    }), /per-run mutation/u);
+  }
+  const previous = process.env.FIXLAB_DEV_API_MUTATION_MODE;
+  const previousSelection = process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE;
+  try {
+    for (const mutationMode of ["none", "intercepted", "invalid"]) {
+      process.env.FIXLAB_DEV_API_MUTATION_MODE = mutationMode;
+      await assert.rejects(createDevBrowserContext(browser, {
+        repository: state.repository, targetEnvironment: "dev", mutationMode: "approved-write"
+      }), /per-run mutation/u);
+    }
+    process.env.FIXLAB_DEV_API_MUTATION_MODE = "approved-write";
+    process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE = "none";
+    await assert.rejects(createDevBrowserContext(browser, {
+      repository: state.repository, targetEnvironment: "dev", selectedMutationMode: ""
+    }), /per-run mutation/u);
+  } finally {
+    if (previous === undefined) { delete process.env.FIXLAB_DEV_API_MUTATION_MODE; }
+    else { process.env.FIXLAB_DEV_API_MUTATION_MODE = previous; }
+    if (previousSelection === undefined) { delete process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE; }
+    else { process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE = previousSelection; }
+  }
+});
+
 test("DEV browser guards revoke changed setup and never retry ambiguous mutations", async t => {
-  for (const mode of ["network", "redirect", "configuration", "server"]) {
+  for (const [mode, status, firstMethod] of [
+    ["network", 200, "POST"], ["redirect", 302, "POST"], ["configuration", 200, "POST"],
+    ["server", 500, "POST"], ["unauthorized", 401, "POST"], ["conflict", 409, "POST"],
+    ["rejected", 422, "POST"], ["read", 400, "GET"]
+  ]) {
     const state = fixture(t);
     state.profile.applications = { frontend: { healthUrl: "http://localhost:3000" } };
     state.profile.browserAutomation.dataSafety.devWrite = {
@@ -659,18 +704,20 @@ test("DEV browser guards revoke changed setup and never retry ambiguous mutation
         async routeWebSocket() {}, async close() {} };
     } }, { repository: state.repository, targetEnvironment: "DEV" });
     if (mode === "configuration") { writeFileSync(state.helper, "export const changed = true;"); }
+    let method = firstMethod;
     const route = {
-      request: () => ({ url: () => state.url, method: () => "POST",
+      request: () => ({ url: () => state.url, method: () => method,
         resourceType: () => "xhr", redirectedFrom: () => null }),
       async fetch() { sent++; if (mode === "network") { throw new Error("private diagnostic"); }
-        return { status: () => mode === "server" ? 500 : 302 }; },
-      async fulfill() { assert.equal(mode, "server", "Redirected or failed transport must not be fulfilled."); },
+        return { status: () => status }; },
+      async fulfill() { assert.ok(status >= 400, "Redirected or failed transport must not be fulfilled."); },
       async abort() {}
     };
     await handler(route);
+    method = "POST";
     await handler(route);
     assert.equal(sent, mode === "configuration" ? 0 : 1);
-    await assert.rejects(session.close(), /changed|redirect|failed|HTTP 500/u);
+    await assert.rejects(session.close(), /changed|redirect|failed|HTTP (?:400|401|409|422|500)/u);
   }
 });
 

@@ -645,7 +645,8 @@ function cacheFingerprint(options, state, environment) {
       stage: options.stage,
       timeoutSeconds: options.timeoutSeconds,
       executionContext: Object.fromEntries(["FIXLAB_HELPER_ROOT", "FIXLAB_REPOSITORY",
-        "FIXLAB_DEV_API_ENVIRONMENT"].map(key => [key, environment[key] ?? ""])),
+        "FIXLAB_DEV_API_ENVIRONMENT", "FIXLAB_DEV_API_MUTATION_MODE",
+        "FIXLAB_DEV_API_SELECTED_MUTATION_MODE"].map(key => [key, environment[key] ?? ""])),
       state
     })
   );

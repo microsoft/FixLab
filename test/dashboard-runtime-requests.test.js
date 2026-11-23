@@ -519,9 +519,15 @@ test("runtime questions and replies allow credential-related test diagnostics wi
     for (const answer of [
       "PIN: 1234", "Refresh token: synthetic-value",
       "My PIN is 1234", "My password is synthetic-value", "My API keys are synthetic-values",
-      "My authorization is synthetic-value"
+      "My authorization is synthetic-value", "My PIN for the DEV account is 1234",
+      "The password for the test account is synthetic-value",
+      "My API key used for DEV is synthetic-value", "The refresh token for DEV: synthetic-value",
+      "My PIN associated with the DEV account is 1234",
+      "The PIN assigned to my DEV account reads 1234"
     ]) {
       assert.throws(() => state.bridge.respond(request.id, { action: "answer", answer }), /non-sensitive/);
+      assert.equal(state.sent.length, 0);
+      assert.equal(state.requests.length, 1);
     }
     const answer = "The password reset test fails";
     state.bridge.respond(request.id, { action: "answer", answer });

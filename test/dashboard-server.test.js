@@ -3300,6 +3300,9 @@ process.stdin.once("data", (chunk) => {
   const valid = config.inputTokenLimit === 100 &&
     config.targetEnvironment === "dev" &&
     process.env.FIXLAB_DEV_API_ENVIRONMENT === "dev" &&
+    process.env.FIXLAB_DEV_API_MUTATION_MODE === "none" &&
+    process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE === "none" &&
+    config.testMutationMode === "none" &&
     process.env.FIXLAB_REPOSITORY === config.repository &&
     process.env.FIXLAB_HELPER_ROOT === config.packageRoot &&
     config.fileAccess.mode === "source-read-write" &&
@@ -3325,6 +3328,7 @@ setInterval(() => {}, 1000);
   try {
     handle = createCopilotExecutor({ packageRoot: runtime })({
       repository, sessionId, prompt: "Synthetic owned budget protocol.", targetEnvironment: "dev",
+      testMutationMode: "none", selectedTestMutationMode: "none",
       postWriteApproval: { jobId: sessionId, environment: "dev", revision: "a".repeat(64), mode: "dev-origin" },
       fileAccess: { mode: "source-read-write", repository: realpathSync.native(repository), jobId: sessionId },
       inputTokenLimit: 100, protectedPaths: [join(repository, "session.js")],
@@ -3345,12 +3349,21 @@ setInterval(() => {}, 1000);
   }
 });
 
-for (const selection of ["intercepted", "none"]) {
-  test(`per-run ${selection} selection reaches only its job and rejects conflicting evidence`, async () => {
+for (const [mode, selection] of [
+  ["playwright-only", "intercepted"], ["playwright-only", "none"],
+  ["validate-only", "intercepted"], ["validate-only", "none"]
+]) {
+  test(`per-run ${selection} selection reaches only its ${mode} job and rejects conflicting evidence`, async () => {
     const repository = createGitRepository();
     const path = join(repository, ".github", "fixlab", "repository-profile.json");
     const profile = validProfile();
     profile.browserAutomation.testSynthesis.defaultDataSource = "non-production-read-only";
+    profile.validation = { gates: [{
+      id: "mutation-scope", command: process.execPath, args: ["--test", "mutation-scope.test.cjs"],
+      workingDirectory: ".", timeoutSeconds: 30
+    }] };
+    writeFileSync(join(repository, "mutation-scope.test.cjs"),
+      `const test=require('node:test');const assert=require('node:assert/strict');test('mutation scope',()=>{assert.equal(process.env.FIXLAB_DEV_API_MUTATION_MODE,${JSON.stringify(selection)});assert.equal(process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE,${JSON.stringify(selection)});});\n`);
     writeFileSync(path, JSON.stringify(profile));
     const original = readFileSync(path, "utf8");
     let input;
@@ -3363,13 +3376,22 @@ for (const selection of ["intercepted", "none"]) {
       const created = await jsonRequest(url, "/api/jobs", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          request: "Synthetic per-run interception scenario.", mode: "playwright-only",
+          request: "Synthetic per-run interception scenario.", mode,
           testMutationMode: selection
         })
       });
       assert.equal(created.response.status, 202, created.body.error);
       assert.equal(created.body.job.testEvidence.mutationMode, selection);
       assert.equal(created.body.job.testEvidence.selectedMutationMode, selection);
+      assert.equal(input.testMutationMode, selection);
+      if (mode === "validate-only") {
+        const gate = await jsonRequest(url, "/api/validation/run", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobId: created.body.job.id, gateId: "mutation-scope", repository })
+        });
+        assert.equal(gate.response.status, 200, gate.body.error);
+        assert.equal(gate.body.status, 0, gate.body.summary);
+      }
       assert.match(input.prompt, selection === "none" ? /explicitly selected live non-production read-only/ : /explicitly selected intercepted validation/);
       input.onOutput("stdout", "FIXLAB_TEST|non-production-approved|approved-write|Invalid broadened evidence.\n");
       for (const stage of FIXLAB_STAGES) {

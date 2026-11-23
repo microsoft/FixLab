@@ -3,10 +3,18 @@ import { persistentDevApiConfiguration } from "./dev-post.js";
 export async function createDevBrowserContext(browser, {
   repository = process.env.FIXLAB_REPOSITORY,
   targetEnvironment = process.env.FIXLAB_DEV_API_ENVIRONMENT,
+  mutationMode = process.env.FIXLAB_DEV_API_MUTATION_MODE || "approved-write",
+  selectedMutationMode = process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE || "",
   contextOptions = {}
 } = {}) {
   if (typeof repository !== "string" || !/^dev$/iu.test(targetEnvironment ?? "")) {
     throw new Error("DEV UI testing requires an explicit repository and DEV environment.");
+  }
+  if (mutationMode !== "approved-write" || selectedMutationMode !== "" ||
+      (process.env.FIXLAB_DEV_API_MUTATION_MODE &&
+        process.env.FIXLAB_DEV_API_MUTATION_MODE !== "approved-write") ||
+      process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE) {
+    throw new Error("Real DEV UI testing is unavailable under this per-run mutation scope; use the configured read-only or intercepted fixture.");
   }
   const plan = persistentDevApiConfiguration(repository);
   if (!plan?.frontendOrigin) {
@@ -91,7 +99,7 @@ export async function createDevBrowserContext(browser, {
           if (status >= 300 && status < 400) {
             throw fail("DEV API redirects are not followed; verify the configured target and authentication.");
           }
-          if (status >= 500) {
+          if (status < 200 || status >= 300) {
             writesStopped = true;
             fail(`DEV API returned HTTP ${status}; no automatic retry was made.`);
           }

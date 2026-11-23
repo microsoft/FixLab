@@ -2165,7 +2165,9 @@ function createExecutor({ command, packageRoot, buildInvocation, defaultModel = 
       };
     }
     const executorEnvironment = { BROWSER: "none", FIXLAB_HELPER_ROOT: packageRoot,
-      FIXLAB_REPOSITORY: repository, FIXLAB_DEV_API_ENVIRONMENT: targetEnvironment ?? "" };
+      FIXLAB_REPOSITORY: repository, FIXLAB_DEV_API_ENVIRONMENT: targetEnvironment ?? "",
+      FIXLAB_DEV_API_MUTATION_MODE: testMutationMode ?? "",
+      FIXLAB_DEV_API_SELECTED_MUTATION_MODE: selectedTestMutationMode ?? "" };
     const containment = process.platform === "win32"
       ? spawnWindowsExecutor({ executable, args: invocation.args, repository, environment: executorEnvironment })
       : null;
@@ -5486,7 +5488,9 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
           body.repository,
           loadRepositoryProfile(resolvedRepository),
           { jobId: job.id, environment: { FIXLAB_HELPER_ROOT: packageRoot,
-            FIXLAB_REPOSITORY: resolvedRepository, FIXLAB_DEV_API_ENVIRONMENT: job.targetEnvironment ?? "" } }
+            FIXLAB_REPOSITORY: resolvedRepository, FIXLAB_DEV_API_ENVIRONMENT: job.targetEnvironment ?? "",
+            FIXLAB_DEV_API_MUTATION_MODE: job.testEvidence.mutationMode,
+            FIXLAB_DEV_API_SELECTED_MUTATION_MODE: job.testEvidence.selectedMutationMode ?? "" } }
         );
         job.validationCompletion = completion.catch(() => {});
         job.refreshIdleWatchdog();

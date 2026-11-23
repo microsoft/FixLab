@@ -272,6 +272,10 @@ managed/sandbox restrictions, sensitive paths and offered source-edit review
 remain manual. Ordinary authorization source identifiers are reviewable, but
 authorization assignments/headers, credential values and solicitations remain
 protected. Reason-specific next steps never reveal the rejected payload.
+Free-form replies also apply the credential-request filter, including account
+or usage qualifiers, while retaining the credential-test diagnostic exception.
+This answer-specific check does not narrow ordinary authorization source-edit
+review.
 
 ### Persistent DEV browser and API access
 
@@ -287,6 +291,11 @@ read-only or intercepted. Native jobs receive a fresh revision-bound internal
 `fixlab_dev_write` capability; the user does not approve each job. Explicit
 stricter mode selections and API-only, unit-only and production restrictions remain
 authoritative. Normal sign-in/MFA is still required for each developer.
+Executor and validation-gate children receive the job's effective and explicit
+mutation scopes through `FIXLAB_DEV_API_MUTATION_MODE` and
+`FIXLAB_DEV_API_SELECTED_MUTATION_MODE`. The real-write browser helper rejects
+restricted or invalid scopes before creating a context, even if its options
+attempt to widen the inherited scope. Validation caches are bound to both values.
 
 Real React browser flows use the packaged `dashboard/dev-browser.js`
 `createDevBrowserContext` helper. It preserves the application's existing
@@ -299,7 +308,8 @@ authentication separately when needed. Do not record credentials, response bodie
 or credential-bearing traces.
 
 Service workers, unrelated API origins, API redirects and automatic transport
-retries are blocked; failed/ambiguous traffic stops subsequent writes. Profile or
+retries are blocked; every non-2xx API response or failed/ambiguous transport
+stops subsequent writes and fails context health checks. Profile or
 helper changes revoke an active context. Call `assertHealthy` and close the
 context, and assert actual UI/API outcomes separately. Guards require Playwright
 1.48+. They cover browser HTTP traffic, not direct `APIRequestContext`, arbitrary

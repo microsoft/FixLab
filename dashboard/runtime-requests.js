@@ -319,7 +319,7 @@ export function createRuntimeRequestBridge({ send, onChange }) {
           result = { ...result, answer: request.choices[choice], wasFreeform: false };
         } else if (choice === undefined && request.allowFreeform &&
             safeRuntimeText(answer, 4000) && answer.trim() &&
-            !credentialValue.test(answer)) {
+            !credentialValue.test(answer) && !requestsCredentials(answer)) {
           result = { ...result, answer, wasFreeform: true };
         } else {
           throw new Error("Select an available choice or supply a non-sensitive answer.");
