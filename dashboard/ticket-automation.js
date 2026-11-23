@@ -15,12 +15,67 @@ import { apiSessionHelper } from "./api-authentication.js";
 import { setupPath } from "./repository-setup.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence, configuredProductionEvidence, productionEvidenceContext, productionEvidenceFor } from "./analysis-evidence.js";
 import { issuePlanConfiguration, issuePlanContext } from "./issue-plans.js";
+import { prepareJobWorktree } from "./job-worktree.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
 const feedbackLabel = "[Fixlab automation]";
 const supportedTypes = new Set(["Bug", "User Story", "Feature", "Product Backlog Item"]);
 const reportLists = ["changesMade", "inProgress", "plannedWork", "validation", "nextSteps"];
+const commitPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
+
+export function prepareTicketSnapshot({
+  repository, plan, snapshot, signal, onBaseline = () => {}, runGit = spawnSync
+}) {
+  signal?.throwIfAborted();
+  if (!snapshot || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(snapshot.jobId) ||
+      (snapshot.commit !== undefined && !commitPattern.test(snapshot.commit))) {
+    throw new Error("Ticket snapshots require a valid owning job and exact pinned commit.");
+  }
+  const git = args => {
+    const result = runGit("git", args, {
+      cwd: repository, encoding: "utf8", windowsHide: true, timeout: 60000, maxBuffer: 64 * 1024,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" }
+    });
+    signal?.throwIfAborted();
+    if (result.error || result.status !== 0) {
+      throw new Error(`Ticket snapshot ${args[0]} failed (${result.error?.code ?? `Git exit ${result.status}`}); no stale checkout was used.`);
+    }
+    return result.stdout.trim();
+  };
+  git(["check-ref-format", `refs/heads/${plan.targetBranch}`]);
+  let commit = snapshot.commit;
+  if (commit === undefined) {
+    const ref = `refs/fixlab/ticket-baselines/${snapshot.jobId}`;
+    git(["fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+      "origin", `+refs/heads/${plan.targetBranch}:${ref}`]);
+    commit = git(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`]);
+    if (!commitPattern.test(commit)) { throw new Error("The fetched target did not resolve to an exact commit."); }
+    onBaseline(commit);
+  }
+  const naming = plan.profile.pullRequests?.branchNaming;
+  if (naming && (typeof naming.userId !== "string" || !naming.userId.trim() ||
+      typeof naming.prefixTemplate !== "string" || !naming.prefixTemplate.includes("{userId}"))) {
+    throw new Error("Ticket snapshot branch naming requires the reviewed userId and prefixTemplate.");
+  }
+  const branchPrefix = naming ? naming.prefixTemplate.replaceAll("{userId}", naming.userId.trim()) : "fixlab";
+  return prepareJobWorktree({ repository, jobId: snapshot.jobId, baseCommit: commit, branchPrefix });
+}
+
+function ticketVersionComparison(value) {
+  const validEvidence = text => typeof text === "string" && text.trim() &&
+    safeTicketText(text, 1000) && recordedText(text, 1000) !== "[Sensitive detail omitted]";
+  if (!value || !commitPattern.test(value.latestCommit ?? "") ||
+      !["unknown", "needs-fix", "already-fixed"].includes(value.finding) ||
+      !validEvidence(value.evidence) ||
+      (value.deployedCommit !== undefined && value.deployedCommit !== null &&
+        (!commitPattern.test(value.deployedCommit) || !validEvidence(value.deployedEvidence)))) {
+    throw new Error("Version comparison requires the pinned latest commit and bounded deployment/comparison evidence.");
+  }
+  return { latestCommit: value.latestCommit, deployedCommit: value.deployedCommit ?? null,
+    finding: value.finding, evidence: recordedText(value.evidence, 1000),
+    ...(value.deployedCommit ? { deployedEvidence: recordedText(value.deployedEvidence, 1000) } : {}) };
+}
 
 function migrationApprovals(repository, policy) {
   const approvals = policy.migrations === undefined ? [] : policy.migrations;
@@ -232,12 +287,15 @@ export function ticketOutcome(value) {
           return !reportLists.includes(field) || !Array.isArray(detail) || detail.length > 4 ||
             detail.some(text => !validText(text, 200));
         }))) ||
+      (value.versionComparison?.finding === "already-fixed" &&
+        (value.outcome !== "analysis" || value.pullRequestId !== undefined)) ||
       (value.outcome === "draft-pr" &&
         (!Number.isSafeInteger(value.pullRequestId) || value.pullRequestId < 1))) {
     throw new Error("The executor did not provide a valid bounded ticket outcome; no result was published.");
   }
   return {
     outcome: value.outcome, summary: recordedText(value.summary, 6000),
+    ...(value.versionComparison !== undefined ? { versionComparison: ticketVersionComparison(value.versionComparison) } : {}),
     ...(value.authenticationRequired ? { authenticationRequired: {
       provider: "azure-cli", reason: recordedText(value.authenticationRequired.reason, 300)
     } } : {}),
@@ -259,9 +317,16 @@ function ticketFeedback(marker, result, resolveItem) {
   const cause = result.confirmedCause;
   const brief = (text, maximum) => text.length <= maximum
     ? text : `${text.slice(0, maximum - 3).replace(/\s+\S*$/u, "")}...`;
+  const versions = result.versionComparison;
+  const versionLines = versions ? [
+    `Latest target commit: ${versions.latestCommit}`,
+    `Deployed commit: ${versions.deployedCommit ?? "unknown (not established from approved evidence)"}`,
+    `Comparison: ${versions.finding}. ${brief(versions.evidence, 200)}`,
+    ...(versions.deployedEvidence ? [`Deployment evidence: ${brief(versions.deployedEvidence, 200)}`] : [])
+  ] : [];
   if (["blocked", "failed"].includes(result.outcome) && !report && !cause) {
     const summary = brief(result.summary.replace(/\s+/gu, " ").trim(), 240);
-    return `${marker ? `${marker}\n` : ""}Run ${result.outcome}: ${summary}\nNo fix or successful validation is confirmed.`;
+    return `${marker ? `${marker}\n` : ""}Run ${result.outcome}: ${summary}\nNo fix or successful validation is confirmed.${versionLines.length ? `\n${versionLines.join("\n")}` : ""}`;
   }
   const section = (heading, lines) => `## ${heading}\n${lines.map(line => `- ${line}`).join("\n")}`;
   const story = result.completedStory;
@@ -276,6 +341,7 @@ function ticketFeedback(marker, result, resolveItem) {
   const blocks = [
     ...(marker ? [`${marker}\nOutcome: ${result.outcome}`] : []),
     section("Summary", [brief(result.summary, 360), ...(finding ? [brief(finding, 220)] : [])]),
+    ...(versionLines.length ? [section("Code version comparison", versionLines)] : []),
     section("Changes and validation", [
       ...(report?.changesMade?.length ? [brief(report.changesMade[0], 200)] : []),
       ...validation.map(line => brief(line, 180))
@@ -293,7 +359,7 @@ function ticketFeedback(marker, result, resolveItem) {
 
 export async function executeTicketAgent({
   executor, repository, prompt, runtimeDirectories, signal,
-  sessionId = randomUUID(), resume = false, onSession = () => {},
+  sessionId = randomUUID(), resume = false, onSession = () => {}, mode = "fix-and-validate",
   idleTimeoutMs = 20 * 60 * 1000, onOutput = (stream, text) => process[stream].write(text),
   onActivity = () => {}
 }) {
@@ -303,6 +369,9 @@ export async function executeTicketAgent({
   }
   if (typeof executor !== "function") {
     throw new Error("Ticket execution requires an owned executor.");
+  }
+  if (!["fix-and-validate", "validate-only", "playwright-only"].includes(mode)) {
+    throw new Error("Ticket execution requires a supported job mode.");
   }
   if (typeof sessionId !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(sessionId) ||
       typeof resume !== "boolean") {
@@ -389,7 +458,8 @@ export async function executeTicketAgent({
   try {
     handle = executor({
       repository, prompt, sessionId, resume, runtimeDirectories,
-      toolApprovalMode: "allow-all", mode: "fix-and-validate",
+      toolApprovalMode: "allow-all", mode,
+      testMutationMode: "none", selectedTestMutationMode: "none",
       onOutput(stream, text) {
         refresh();
         if (/Denied, no one to approve|Permission denied because no interactive user response/iu.test(text)) {
@@ -462,6 +532,73 @@ export async function executeTicketAgent({
       }
     }
   }
+}
+
+export async function executeVersionedTicketAgent({
+  workspace, phase = "version-review", versionComparison, onPhase = () => {},
+  onComparison = () => {}, execute = executeTicketAgent, ...options
+}) {
+  if (!workspace) { return execute(options); }
+  if (!commitPattern.test(workspace.baseCommit) || !["version-review", "fix"].includes(phase)) {
+    throw new Error("Ticket version review requires its owned pinned snapshot and execution phase.");
+  }
+  if (phase === "fix" && !options.sessionId) {
+    throw new Error("Resuming the fix phase requires its existing owned runtime session.");
+  }
+  const sessionId = options.sessionId ?? randomUUID();
+  const run = (prompt, mode, resume) => execute({
+    ...options, prompt, mode, sessionId, resume,
+    onSession(id) {
+      if (id !== sessionId) { throw new Error("Version review must retain the same owned runtime session."); }
+      options.onSession?.(id);
+    }
+  });
+  let comparison = versionComparison;
+  if (phase === "version-review") {
+    const result = ticketOutcome(await run(`${options.prompt}
+
+This is the read-only VERSION REVIEW phase, before any fix or PR authority takes effect.
+Use this assigned snapshot at exact target commit ${workspace.baseCommit}. Do not pull, switch revisions, create another checkout, edit source, or create/update a PR in this phase.
+Identify the deployed commit for the affected component at the incident time only from the already-approved deployment metadata or correlated telemetry. Existing production-evidence restrictions and normal authentication still apply. If unavailable, explicitly report "deployed version unknown"; never treat main or the current deployment as proof of the incident revision.
+Compare the incident/deployed behavior with this pinned latest target code and check existing fixes. Report finding "already-fixed" only with source-grounded comparison evidence; a deployment gap additionally requires a known, different deployed commit. If the latest code still needs a justified fix, report "needs-fix". Otherwise report "unknown". Do not invent a version or a code change.
+Return outcome "analysis", "blocked" or "failed", never "draft-pr". For analysis include versionComparison:{latestCommit:"${workspace.baseCommit}",deployedCommit:null,finding:"unknown|needs-fix|already-fixed",evidence:"Bounded comparison evidence"}. Replace deployedCommit with an exact Git SHA only when verified, and include deployedEvidence describing the approved source and incident-time evidence. Keep raw records, private endpoints and credentials out of the result.`, "validate-only", options.resume === true));
+    if (result.outcome === "blocked" || result.outcome === "failed") { return result; }
+    if (result.outcome !== "analysis" || !result.versionComparison) {
+      throw new Error("The version-review phase did not provide its required analysis; no fix or PR phase was started.");
+    }
+    comparison = result.versionComparison;
+    if (comparison.latestCommit !== workspace.baseCommit) {
+      throw new Error("The version comparison does not match this ticket's pinned target commit.");
+    }
+    onComparison(comparison);
+    if (comparison.finding !== "needs-fix") {
+      let conclusion = "Deployed version unknown. No new fix or PR phase was started.";
+      if (comparison.deployedCommit) {
+        conclusion = comparison.finding === "already-fixed" && comparison.deployedCommit !== comparison.latestCommit
+          ? "Deployment gap identified; the fix already exists in the pinned target. No duplicate fix PR was created."
+          : "No new fix or PR phase was started.";
+      }
+      return ticketOutcome({ ...result, summary: recordedText(`${conclusion}\n${result.summary}`, 6000) });
+    }
+    onPhase("fix");
+  }
+  comparison = ticketVersionComparison(comparison);
+  if (comparison.latestCommit !== workspace.baseCommit || comparison.finding !== "needs-fix") {
+    throw new Error("Fix execution requires the completed needs-fix review for this same pinned snapshot.");
+  }
+  const result = ticketOutcome(await run(`${options.prompt}
+
+Continue in this same owned checkout and runtime session after the completed version review:
+${JSON.stringify(comparison)}
+The original conditional fix/draft-PR authority now applies only to the justified defect in this pinned code. Preserve completed evidence, existing work and any unknown deployed version. Do not pull, change the baseline, create duplicate worktrees/PRs, or infer production access.`, "fix-and-validate", true));
+  const final = { ...result, versionComparison: result.versionComparison ?? comparison };
+  if (final.versionComparison.latestCommit !== workspace.baseCommit) {
+    throw new Error("The completed investigation changed its pinned version evidence.");
+  }
+  if (!final.versionComparison.deployedCommit) {
+    final.summary = recordedText(`Deployed version unknown.\n${final.summary}`, 6000);
+  }
+  return ticketOutcome(final);
 }
 
 function ticketRequest(item, plan, fingerprints = []) {
@@ -546,11 +683,18 @@ function validateJournal(state, scope) {
           entry.feedbackHistory.length > 20 || entry.feedbackHistory.some(value => !/^[a-f0-9]{64}$/u.test(value)))) ||
         (entry.status === "authentication-pending" &&
           (!entry.sessionId || entry.authenticationRequired?.provider !== "azure-cli")) ||
-        !["running", "feedback-pending", "authentication-pending", "complete", "reconciled"].includes(entry.status) ||
+        (entry.snapshot !== undefined && (!entry.snapshot ||
+          !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(entry.snapshot.jobId ?? "") ||
+          (entry.snapshot.commit !== undefined && !commitPattern.test(entry.snapshot.commit)))) ||
+        (entry.phase !== undefined && !["version-review", "fix"].includes(entry.phase)) ||
+        !["snapshot-pending", "running", "feedback-pending", "authentication-pending", "complete", "reconciled"].includes(entry.status) ||
         (entry.recovery !== undefined && (!Array.isArray(entry.recovery) || entry.recovery.length > 20 ||
           entry.recovery.some(record => !["accept", "retry", "leave"].includes(record.decision) ||
             !Number.isFinite(Date.parse(record.reviewedAt))))))) {
     throw new Error("The automation journal is invalid or belongs to another reviewed scope; inspect it before starting.");
+  }
+  for (const entry of state.entries) {
+    if (entry.versionComparison !== undefined) { ticketVersionComparison(entry.versionComparison); }
   }
 }
 
@@ -584,7 +728,10 @@ function loadAutomationJournal(repository) {
 function saveAutomationJournal(root, path, state, owner) {
   privateFile(path, 1024 * 1024);
   for (const entry of state.entries.slice(0, -20)) {
-    if (["complete", "reconciled"].includes(entry.status)) { delete entry.details; }
+    if (["complete", "reconciled"].includes(entry.status)) {
+      delete entry.details;
+      delete entry.versionComparison;
+    }
   }
   const contents = JSON.stringify(state);
   if (Buffer.byteLength(contents) > 1024 * 1024) {
@@ -635,6 +782,8 @@ export function readTicketAutomationHistory(repository) {
       resolution: resolution && ["pending", "resolved", "blocked"].includes(resolution.status)
         ? { status: resolution.status, message: recordedText(resolution.message ?? "", 200) } : null,
       historyAvailable: Boolean(details), summary: details ? recordedText(details.summary ?? "", 2000) : "",
+      latestCommit: entry.snapshot?.commit ?? null,
+      versionComparison: entry.versionComparison ? ticketVersionComparison(entry.versionComparison) : null,
       report: details?.report ? ticketOutcome({
         outcome: "analysis", summary: "Recorded structured investigation.", report: details.report
       }).report : null,
@@ -743,8 +892,9 @@ async function interruptedReview(repository, { workItemId, client }, ownedLock) 
   const journal = loadAutomationJournal(repository);
   if (!journal.state) { throw new Error("No watcher journal is available for recovery."); }
   const { root, path, state, plan, profileRevision } = journal;
-  const entry = [...state.entries].reverse().find(value => value.id === workItemId && value.status === "running");
-  if (!entry) { throw new Error("No interrupted running attempt exists for this work item."); }
+  const entry = [...state.entries].reverse().find(value =>
+    value.id === workItemId && ["running", "snapshot-pending"].includes(value.status));
+  if (!entry) { throw new Error("No interrupted running or snapshot-pending attempt exists for this work item."); }
   const lock = join(root, "watcher.lock");
   privateFile(lock, 1024);
   const lease = createExecutorLease(repository, randomUUID());
@@ -776,7 +926,7 @@ async function interruptedReview(repository, { workItemId, client }, ownedLock) 
     branches: branches.stdout.trim().split(/\r?\n/u).filter(Boolean).map(value => recordedText(value, 300)),
     branchLimit: 20, pullRequests,
     attempt: readTicketAutomationHistory(repository).attempts.find(attempt =>
-      attempt.workItemId === workItemId && attempt.status === "running"),
+      attempt.workItemId === workItemId && ["running", "snapshot-pending"].includes(attempt.status)),
     canAccept, canRetry,
     acceptMessage: "Accept only this recorded result for the unchanged ticket; no feedback, resolution, Git writes or executor launch.",
     retryMessage: "Authorize a fresh investigation, preserving this attempt and all artifacts. Active linked PRs must be reconciled first. Restart the reviewed watcher separately.",
@@ -869,7 +1019,7 @@ export async function watchTickets({
   repository, plan, once = false, confirmed = false, allowAllTools = false,
   resumeWorkItemId,
   client = createAzureDevOpsTicketClient({ profile: plan.profile }),
-  execute, signal, onEvent = message => console.log(message)
+  execute, prepareSnapshot = prepareTicketSnapshot, signal, onEvent = message => console.log(message)
 }) {
   if (!confirmed || !allowAllTools || typeof execute !== "function") {
     throw new Error("Review the plan, then explicitly pass --yes --allow-all-tools for this watcher session. This permits its selected ticket jobs, not unconfigured production access, business-data writes, merges or deployments.");
@@ -899,6 +1049,7 @@ export async function watchTickets({
     return { helper, helperPath, revision: hash(readFileSync(helperPath)) };
   });
   const approvedConfiguration = hash(JSON.stringify({ profile: approvedProfile, helpers: approvedHelpers }));
+  const snapshotHelpers = [...approvedHelpers, ...(plan.analysisEvidence ?? []), ...(plan.productionEvidence ?? [])];
   const root = join(resolveArtifactRoot(repository), "ticket-automation");
   mkdirSync(root, { recursive: true, mode: 0o700 });
   if (relative(resolve(root), realpathSync(root))) {
@@ -1107,6 +1258,38 @@ export async function watchTickets({
       delete entry.resolutionFeedback;
       request += "\nContinue this same paused investigation in its existing owned runtime session. The user reports completing sign-in; verify it with the smallest approved read. Inspect and preserve the existing worktree, branch, PR and recorded work rather than creating duplicate work. Do not assume authentication fixed a missing database role or that earlier blocked checks passed.";
     }
+    let workspace;
+    if (entry.snapshot || !resume) {
+      if (entry.configuration !== approvedConfiguration ||
+          revisionFor(item, entry).fingerprint !== entry.fingerprint) {
+        throw new Error("The snapshot-pending ticket or its reviewed configuration changed; review it before retrying.");
+      }
+      entry.snapshot ??= { jobId: randomUUID() };
+      entry.phase ??= "version-review";
+      if (!resume) { entry.status = "snapshot-pending"; }
+      save();
+      verifyScope();
+      onEvent(`Work item ${item.id}: ${entry.snapshot.commit ? "retaining its pinned" : "fetching the reviewed target for a new"} isolated snapshot.`);
+      workspace = await prepareSnapshot({
+        repository, plan, snapshot: entry.snapshot, signal,
+        onBaseline(commit) {
+          if (!commitPattern.test(commit) || (entry.snapshot.commit && entry.snapshot.commit !== commit)) {
+            throw new Error("Snapshot preparation changed the pinned investigation commit.");
+          }
+          entry.snapshot.commit = commit;
+          save();
+        }
+      });
+      if (workspace.baseCommit !== entry.snapshot.commit) {
+        throw new Error("The prepared checkout does not match the recorded ticket baseline.");
+      }
+      if (snapshotHelpers.some(({ helper, revision }) =>
+        !existsSync(resolve(workspace.repository, helper)) ||
+        hash(readFileSync(apiSessionHelper(workspace.repository, helper))) !== revision)) {
+        throw new Error("The snapshot does not retain the reviewed helper revisions. Declare the approved non-sensitive setup files or review the conflict; no new helper access was granted.");
+      }
+      configuredProductionEvidence(workspace.repository, loadRepositoryProfile(workspace.repository));
+    }
     entry.status = "running";
     entry.details ??= { summary: "", activity: [], checks: [], omittedActivity: 0 };
     delete entry.finishedAt;
@@ -1114,7 +1297,22 @@ export async function watchTickets({
     verifyScope();
     onEvent(`Work item ${item.id}: ${resume ? "resuming its existing" : "starting one authorized"} ${plan.runtime} investigation.`);
     const result = ticketOutcome(await execute({
+      repository: workspace?.repository ?? repository, workspace, phase: entry.phase,
+      versionComparison: entry.versionComparison,
       item, request, ...(resume ? { sessionId: entry.sessionId, resume: true } : {}),
+      onPhase(phase) {
+        if (phase !== "fix") { throw new Error("The executor supplied an invalid investigation phase."); }
+        entry.phase = phase;
+        save();
+      },
+      onComparison(value) {
+        const comparison = ticketVersionComparison(value);
+        if (comparison.latestCommit !== entry.snapshot?.commit) {
+          throw new Error("Version evidence does not match the ticket's pinned baseline.");
+        }
+        entry.versionComparison = comparison;
+        save();
+      },
       onSession(sessionId) {
         if (typeof sessionId !== "string" ||
             !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(sessionId) ||
@@ -1126,6 +1324,12 @@ export async function watchTickets({
       },
       onActivity: event => record(entry, event)
     }));
+    if (result.versionComparison) {
+      if (result.versionComparison.latestCommit !== entry.snapshot?.commit) {
+        throw new Error("The ticket result changed its pinned version evidence.");
+      }
+      entry.versionComparison = result.versionComparison;
+    }
     if (result.authenticationRequired && !entry.sessionId) {
       throw new Error("The authentication-dependent job has no recorded runtime session; review it before retrying.");
     }
@@ -1168,6 +1372,11 @@ export async function watchTickets({
       const pending = state.entries.find(entry => entry.status === "feedback-pending");
       if (pending) {
         await feedback(pending);
+      } else if (state.entries.some(entry => entry.status === "snapshot-pending")) {
+        const entry = state.entries.find(entry => entry.status === "snapshot-pending");
+        const item = await client.load(entry.id);
+        if (!eligible(item, plan)) { throw new Error("The snapshot-pending work item is outside the reviewed scope."); }
+        await investigate(item, entry);
       } else {
         const interrupted = state.entries.find(entry => entry.status === "running");
         if (interrupted) {
@@ -1211,7 +1420,7 @@ export async function watchTickets({
             throw new Error("The automation journal reached its 1000-execution limit; review and archive it before continuing.");
           }
           const request = ticketRequest(item, plan, feedbackFingerprints(state.entries, id));
-          const entry = { id, title: recordedText(item.title, 200), ...revision, status: "running",
+          const entry = { id, title: recordedText(item.title, 200), ...revision, status: "snapshot-pending",
             runtime: plan.runtime, configuration: approvedConfiguration,
             ...(typeof client.commentIds === "function" ? { feedbackFormat: "readable" } : {}),
             startedAt: new Date().toISOString(),

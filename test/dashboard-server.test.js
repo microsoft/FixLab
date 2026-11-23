@@ -210,6 +210,12 @@ test("parallel checkout preparation retains each response identity and Stop canc
   }
 });
 
+function prepareWatcherFixtureSnapshot({ repository, snapshot, onBaseline }) {
+  const commit = snapshot.commit ?? "1".repeat(40);
+  onBaseline(commit);
+  return { repository, baseCommit: commit, jobId: snapshot.jobId };
+}
+
 test("watcher monitoring exposes only this repository's recorded history and never starts or controls work", async () => {
   const repository = createGitRepository();
   git(repository, ["remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"]);
@@ -223,6 +229,7 @@ test("watcher monitoring exposes only this repository's recorded history and nev
     tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic fixture", comments: [] };
   await watchTickets({
     repository, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    prepareSnapshot: prepareWatcherFixtureSnapshot,
     client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
     execute: async () => ({ outcome: "blocked", summary: "Human sign-in is required; no live tests ran." })
   });
@@ -259,6 +266,7 @@ test("watcher monitoring exposes only this repository's recorded history and nev
     item.title = "Synthetic interrupted fixture";
     await assert.rejects(watchTickets({
       repository, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+      prepareSnapshot: prepareWatcherFixtureSnapshot,
       client: { findTagged: async () => [42], load: async () => item },
       execute() { throw new Error("Synthetic interrupted execution"); }
     }), /Synthetic interrupted/);
@@ -352,6 +360,7 @@ test("reviewed watcher handoff preserves the active job, canonical intake, permi
   };
   await watchTickets({
     repository, plan: ticketAutomationPlan(repository, profile, { environment: "dev" }),
+    prepareSnapshot: prepareWatcherFixtureSnapshot,
     once: true, confirmed: true, allowAllTools: true, onEvent() {}, client: ticketClient,
     execute: async () => ({ outcome: "analysis", summary: "Requires an agreed cross-layer implementation." })
   });

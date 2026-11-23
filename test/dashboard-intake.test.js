@@ -14,7 +14,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test, { mock } from "node:test";
 import {
   createAzureDevOpsLoader,
@@ -29,7 +29,7 @@ import {
   sanitizeAzureDevOpsHtml,
   storeScreenshots
 } from "../dashboard/intake.js";
-import { executeTicketAgent, readTicketAutomationHistory, reviewTicketHandoff, reviewInterruptedTicket, reconcileInterruptedTicket, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
+import { executeTicketAgent, executeVersionedTicketAgent, prepareTicketSnapshot, readTicketAutomationHistory, reviewTicketHandoff, reviewInterruptedTicket, reconcileInterruptedTicket, ticketAutomationPlan, ticketOutcome, watchTickets } from "../dashboard/ticket-automation.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { ANALYSIS_EVIDENCE_GUIDANCE, analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
@@ -100,11 +100,271 @@ function ticketFixture({ readable = false } = {}) {
     repository, profile, plan, item, client, posted,
     run: options => watchTickets({
       repository, plan, client, once: true, confirmed: true, allowAllTools: true,
+      prepareSnapshot: async ({ snapshot, onBaseline }) => {
+        const commit = snapshot.commit ?? "1".repeat(40);
+        onBaseline(commit);
+        return { repository, baseCommit: commit, jobId: snapshot.jobId };
+      },
       onEvent() {}, ...options
     }),
     cleanup: () => rmSync(repository, { recursive: true, force: true })
   };
 }
+
+function snapshotFixture() {
+  const f = ticketFixture();
+  const publisher = join(f.repository, "publisher");
+  const workspaceRoot = join(dirname(f.repository), `${basename(f.repository)}.fixlab-worktrees`);
+  const git = (repository, ...args) => {
+    const result = spawnSync("git", ["-C", repository, ...args], { encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  writeFileSync(join(f.repository, ".gitignore"), "/.github/fixlab/\n/.auth/\n/publisher/\n");
+  writeFileSync(join(f.repository, "baseline.txt"), "startup");
+  git(f.repository, "add", ".gitignore", "baseline.txt");
+  git(f.repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+    "commit", "--quiet", "-m", "startup");
+  const startup = git(f.repository, "rev-parse", "HEAD");
+  git(f.repository, "worktree", "add", "--quiet", "-b", "develop", publisher);
+  const advance = value => {
+    writeFileSync(join(publisher, "baseline.txt"), value);
+    git(publisher, "add", "baseline.txt");
+    git(publisher, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+      "commit", "--quiet", "-m", value);
+    return git(publisher, "rev-parse", "HEAD");
+  };
+  const target = advance("target-one");
+  const runGit = (command, args, options) => {
+    const result = spawnSync(command,
+      args[0] === "fetch" ? args.map(value => value === "origin" ? f.repository : value) : args, options);
+    if (args[0] === "fetch") { assert.equal(result.status, 0, result.stderr); }
+    return result;
+  };
+  const cleanup = f.cleanup;
+  return { ...f, startup, target, git, advance, runGit,
+    prepare: options => prepareTicketSnapshot({ ...options, runGit }),
+    cleanup() {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      cleanup();
+    }
+  };
+}
+
+test("new watcher tickets fetch newer target commits without changing an active snapshot or private state", async () => {
+  const f = snapshotFixture();
+  const workspaces = [];
+  let next;
+  try {
+    mkdirSync(join(f.repository, ".auth"));
+    writeFileSync(join(f.repository, ".auth", "state.json"), "private synthetic fixture");
+    writeFileSync(join(f.repository, "watcher-notes.txt"), "preserve user work");
+    const profile = readFileSync(join(f.repository, ".github", "fixlab", "repository-profile.json"));
+    await f.run({ prepareSnapshot: f.prepare, execute: async ({ workspace, request, onComparison }) => {
+      workspaces.push(workspace);
+      assert.equal(workspace.baseCommit, f.target);
+      assert.equal(readFileSync(join(workspace.repository, "baseline.txt"), "utf8"), "target-one");
+      next = f.advance("target-two");
+      assert.equal(readFileSync(join(workspace.repository, "baseline.txt"), "utf8"), "target-one");
+      return executeVersionedTicketAgent({ workspace, prompt: request, onComparison,
+        execute: async () => ({ outcome: "analysis", summary: "The approved deployed revision predates the existing fix.",
+          versionComparison: { latestCommit: f.target, deployedCommit: f.startup,
+            deployedEvidence: "Approved incident-time deployment manifest.",
+            finding: "already-fixed", evidence: "Compared the pinned target change with the deployed source." } }) });
+    } });
+    f.item.id = 43;
+    f.item.comments = [];
+    await f.run({ prepareSnapshot: f.prepare, execute: async ({ workspace, request, onComparison }) => {
+      workspaces.push(workspace);
+      assert.equal(workspace.baseCommit, next);
+      assert.equal(readFileSync(join(workspace.repository, "baseline.txt"), "utf8"), "target-two");
+      return executeVersionedTicketAgent({ workspace, prompt: request, onComparison,
+        execute: async () => ({ outcome: "analysis", summary: "Next ticket uses the newer target.",
+          versionComparison: { latestCommit: next, finding: "unknown", evidence: "No approved deployment metadata was available." } }) });
+    } });
+    assert.equal(f.git(f.repository, "rev-parse", "HEAD"), f.startup);
+    assert.equal(readFileSync(join(workspaces[0].repository, "baseline.txt"), "utf8"), "target-one");
+    for (const workspace of workspaces) {
+      assert.deepEqual(readFileSync(join(workspace.repository, ".github", "fixlab", "repository-profile.json")), profile);
+      assert.equal(existsSync(join(workspace.repository, ".auth")), false);
+    }
+    assert.equal(readFileSync(join(f.repository, ".auth", "state.json"), "utf8"), "private synthetic fixture");
+    assert.equal(readFileSync(join(f.repository, "watcher-notes.txt"), "utf8"), "preserve user work");
+    const history = readTicketAutomationHistory(f.repository);
+    assert.deepEqual(history.attempts.map(entry => entry.latestCommit).sort(), [f.target, next].sort());
+    assert.match(f.posted[0].text, /Deployment gap identified/u);
+    assert.ok(f.posted[0].text.includes(f.startup) && f.posted[0].text.includes(f.target));
+    assert.match(f.posted[1].text, /Deployed version unknown/u);
+    assert.ok(history.attempts.some(entry => entry.versionComparison?.deployedCommit === f.startup));
+  } finally { f.cleanup(); }
+});
+
+test("a failed ticket fetch never falls back to an old ref and remains retryable before execution", async () => {
+  const f = snapshotFixture();
+  let executions = 0;
+  let jobId;
+  try {
+    await assert.rejects(f.run({
+      prepareSnapshot: options => {
+        jobId = options.snapshot.jobId;
+        f.git(f.repository, "update-ref", `refs/fixlab/ticket-baselines/${jobId}`, f.startup);
+        return prepareTicketSnapshot({ ...options, runGit: (command, args, settings) =>
+          args[0] === "fetch" ? { status: 128, stdout: "", stderr: "Synthetic network failure" }
+            : f.runGit(command, args, settings) });
+      },
+      execute: async () => { executions++; return { outcome: "analysis", summary: "Must not run." }; }
+    }), /fetch failed.*no stale checkout/u);
+    const blocked = readTicketAutomationHistory(f.repository);
+    assert.equal(blocked.attempts[0].status, "snapshot-pending");
+    assert.equal(blocked.attempts[0].latestCommit, null);
+    assert.equal(executions, 0);
+    const review = await reviewInterruptedTicket(f.repository, { workItemId: f.item.id, client: f.client });
+    assert.equal(review.canAccept, false);
+    assert.equal(review.canRetry, true);
+    assert.equal(review.attempt.status, "snapshot-pending");
+    await f.run({ prepareSnapshot: f.prepare, execute: async ({ workspace }) => {
+      executions++;
+      assert.equal(workspace.jobId, jobId);
+      assert.equal(workspace.baseCommit, f.target);
+      return { outcome: "analysis", summary: "Recovered with the fetched target, not stale code." };
+    } });
+    assert.equal(executions, 1);
+    assert.equal(readTicketAutomationHistory(f.repository).attempts.length, 1);
+    assert.equal(f.git(f.repository, "rev-parse", "HEAD"), f.startup);
+  } finally { f.cleanup(); }
+});
+
+test("version review reports existing fixes or unknown deployments without entering the PR phase", async () => {
+  for (const finding of ["already-fixed", "unknown"]) {
+    let calls = 0;
+    const result = await executeVersionedTicketAgent({
+      workspace: { baseCommit: "b".repeat(40) }, prompt: "Bounded synthetic ticket request.",
+      execute: async options => {
+        calls++;
+        assert.equal(options.mode, "validate-only");
+        assert.match(options.prompt, /Do not pull.*create\/update a PR/u);
+        options.onSession(options.sessionId);
+        return { outcome: "analysis", summary: "Compared incident evidence with the pinned source.",
+          versionComparison: { latestCommit: "b".repeat(40), finding, evidence: "Reviewed source and incident behavior.",
+            ...(finding === "already-fixed" ? {
+              deployedCommit: "a".repeat(40), deployedEvidence: "Approved incident-time deployment metadata."
+            } : {}) } };
+      }
+    });
+    assert.equal(calls, 1);
+    assert.equal(result.outcome, "analysis");
+    assert.equal(result.pullRequestId, undefined);
+    assert.match(result.summary, finding === "already-fixed" ? /Deployment gap/ : /Deployed version unknown/);
+  }
+  await assert.rejects(executeVersionedTicketAgent({
+    workspace: { baseCommit: "b".repeat(40) }, prompt: "Synthetic scope.",
+    execute: async () => ({ outcome: "draft-pr", summary: "Premature publication.", pullRequestId: 9 })
+  }), /no fix or PR phase/u);
+  assert.throws(() => ticketOutcome({ outcome: "draft-pr", summary: "Duplicate fix.", pullRequestId: 9,
+    versionComparison: { latestCommit: "b".repeat(40), finding: "already-fixed", evidence: "Existing fix." }
+  }), /valid bounded ticket outcome/u);
+  for (const versionComparison of [
+    { latestCommit: "a".repeat(40), finding: "unknown", evidence: "Wrong baseline." },
+    { latestCommit: "b".repeat(40), deployedCommit: "a".repeat(40),
+      finding: "already-fixed", evidence: "Missing deployment provenance." }
+  ]) {
+    let enteredFix = false;
+    await assert.rejects(executeVersionedTicketAgent({
+      workspace: { baseCommit: "b".repeat(40) }, prompt: "Synthetic scope.",
+      onPhase() { enteredFix = true; },
+      execute: async () => ({ outcome: "analysis", summary: "Unverified comparison.", versionComparison })
+    }), /pinned target commit|deployment\/comparison evidence/u);
+    assert.equal(enteredFix, false);
+  }
+});
+
+test("a fetched snapshot cannot substitute a different incident helper for the reviewed revision", async () => {
+  const f = snapshotFixture();
+  let executions = 0;
+  try {
+    const helper = "read-evidence.mjs";
+    const approved = 'throw new Error("Reviewed helper must not execute during preparation.");';
+    writeFileSync(join(f.repository, helper), approved);
+    writeFileSync(join(f.repository, "publisher", helper), 'throw new Error("Unreviewed target helper.");');
+    f.git(join(f.repository, "publisher"), "add", helper);
+    f.git(join(f.repository, "publisher"), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+      "commit", "--quiet", "-m", "change helper");
+    const profile = { ...f.profile, analysis: { evidenceSources: [
+      { id: "incident-records", kind: "cosmos", environment: "dev", helper }
+    ] } };
+    writeFileSync(join(f.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    const plan = ticketAutomationPlan(f.repository, profile, { environment: "dev" });
+    await assert.rejects(f.run({ plan, prepareSnapshot: f.prepare,
+      execute: async () => { executions++; return { outcome: "analysis", summary: "Must not run." }; }
+    }), /snapshot does not retain the reviewed helper revisions/u);
+    assert.equal(executions, 0);
+    assert.equal(readFileSync(join(f.repository, helper), "utf8"), approved);
+    assert.equal(f.git(f.repository, "rev-parse", "HEAD"), f.startup);
+    assert.equal(readTicketAutomationHistory(f.repository).attempts[0].status, "snapshot-pending");
+  } finally { f.cleanup(); }
+});
+
+test("version evidence retention prunes old completed details but preserves paused fix sessions", async () => {
+  const f = ticketFixture();
+  try {
+    await f.run({ execute: async () => ({ outcome: "analysis", summary: "Synthetic retained investigation." }) });
+    const path = join(f.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    const original = state.entries[0];
+    state.entries = Array.from({ length: 22 }, (_, index) => ({
+      ...structuredClone(original), id: index === 21 ? original.id : 500 + index,
+      snapshot: { jobId: randomUUID(), commit: "1".repeat(40) },
+      versionComparison: { latestCommit: "1".repeat(40), finding: "unknown",
+        evidence: "No approved deployment metadata." }
+    }));
+    const paused = state.entries[0];
+    paused.status = "authentication-pending";
+    paused.phase = "fix";
+    paused.sessionId = randomUUID();
+    paused.authenticationRequired = { provider: "azure-cli", reason: "Approved session expired." };
+    paused.versionComparison.finding = "needs-fix";
+    writeFileSync(path, JSON.stringify(state));
+    await f.run({ execute: async () => { assert.fail("Reading and pruning must not resume a job."); } });
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    assert.deepEqual(saved.entries[0], paused);
+    assert.equal(saved.entries[1].versionComparison, undefined);
+    assert.equal(saved.entries[1].details, undefined);
+    assert.equal(saved.entries[1].snapshot.commit, "1".repeat(40));
+    assert.ok(saved.entries.slice(2).every(entry => entry.versionComparison && entry.details));
+  } finally { f.cleanup(); }
+});
+
+test("fix execution follows the completed pinned version review and retains its session across authentication", async () => {
+  const calls = [];
+  let phase;
+  let comparison;
+  const sessionId = randomUUID();
+  const execute = async options => {
+    calls.push(options);
+    options.onSession(options.sessionId);
+    if (calls.length === 1) {
+      return { outcome: "analysis", summary: "Latest source still contains the defect.",
+        versionComparison: { latestCommit: "b".repeat(40), finding: "needs-fix", evidence: "Focused source analysis." } };
+    }
+    return calls.length === 2
+      ? { outcome: "blocked", summary: "An approved read requires sign-in.",
+        authenticationRequired: { provider: "azure-cli", reason: "Approved CLI session expired." } }
+      : { outcome: "draft-pr", summary: "Focused fix verified and published as draft.", pullRequestId: 9 };
+  };
+  const options = { workspace: { baseCommit: "b".repeat(40) }, prompt: "Synthetic scope.", sessionId, execute,
+    onPhase(value) { phase = value; }, onComparison(value) { comparison = value; } };
+  const blocked = await executeVersionedTicketAgent(options);
+  assert.equal(phase, "fix");
+  assert.equal(blocked.outcome, "blocked");
+  const result = await executeVersionedTicketAgent({ ...options, phase, versionComparison: comparison, resume: true });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls.map(call => call.mode), ["validate-only", "fix-and-validate", "fix-and-validate"]);
+  assert.ok(calls.every(call => call.sessionId === sessionId));
+  assert.equal(calls[1].resume, true);
+  assert.equal(calls[2].resume, true);
+  assert.equal(result.pullRequestId, 9);
+  assert.match(result.summary, /Deployed version unknown/u);
+});
 
 test("incident evidence discovers environment-bound source helpers without executing or granting access", () => {
   const fixture = ticketFixture();

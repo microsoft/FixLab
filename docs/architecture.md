@@ -30,12 +30,32 @@ acknowledgements without silently rerunning interrupted work. This explicitly
 approved local session is separate from dashboard jobs and normal per-executor
 tool consent. Setup only supplies defaults; it never starts a watcher.
 
+New attempts fetch the configured target into a private per-ticket ref without
+updating the watcher's branch, working files or shared remote-tracking refs.
+Owned worktree receipts accept that exact commit and reject a changed baseline
+on recovery. The journal records `snapshot-pending` before preparation and the
+pinned commit before checkout creation; failed fetches never fall back to an old
+ref and can retry before any executor has started. Active/authentication-paused
+attempts keep the same snapshot. Legacy resumes are not silently moved.
+
+The CLI runs a read-only version-review phase before fix/PR authority takes
+effect. A bounded, agent-reported comparison binds latest-code findings to the
+pinned commit and identifies the affected component's incident-time deployed
+revision only from existing approved evidence. Missing deployment evidence is
+explicitly unknown, never inferred from `main`. Existing fixes terminate as
+analysis; only `needs-fix` continues in the same session, retaining its comparison
+through authentication pauses. A deployment gap requires a known, different
+deployed commit. Profile/helper approval, ordinary authentication, read-only
+business-data access and normal publication gates remain unchanged.
+
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
 journal through `GET /api/ticket-automation`; reading never starts or changes
 watcher work. Future attempts retain timestamps, safe structured activity and
 agent-reported check/scenario outcomes. Raw output is not retained. The latest
 20 attempts retain at most 20 activity and 10 check updates each; older entries
 keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown.
+Detailed version comparisons follow the same latest-20-attempt retention;
+pending authentication resumes retain their required phase evidence.
 Last reported worker status is not a process-liveness assertion.
 
 Completed attempts support a separate local-job handoff review. An exact-origin

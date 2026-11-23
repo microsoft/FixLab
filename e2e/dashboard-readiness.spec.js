@@ -33,6 +33,12 @@ let repository;
 let dashboard;
 let baseUrl;
 
+function prepareWatcherFixtureSnapshot({ repository, snapshot, onBaseline }) {
+  const commit = snapshot.commit ?? "1".repeat(40);
+  onBaseline(commit);
+  return { repository, baseCommit: commit, jobId: snapshot.jobId };
+}
+
 async function openWorkflowControls(page, url) {
   await page.goto(url);
   await page.locator('.workspace-navigation [data-open="details-group"]').click();
@@ -585,6 +591,7 @@ test("watcher grid shows work-item titles and text statuses while preserving rev
   const result = new Promise(resolve => { release = resolve; });
   const watching = watchTickets({
     repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    prepareSnapshot: prepareWatcherFixtureSnapshot,
     client,
     execute: async ({ onActivity }) => executeTicketAgent({
       repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
@@ -678,7 +685,12 @@ test("watcher grid shows work-item titles and text statuses while preserving rev
   }
 });
 
-test("interrupted watcher recovery requires review and confirmation and preserves the attempt without launching work", async ({ page }) => {
+for (const preparationFailure of [false, true]) {
+  test(`interrupted watcher ${preparationFailure ? "snapshot preparation" : "execution"} recovery requires review and confirmation without launching work`,
+    async ({ page }) => exerciseWatcherRecovery(page, preparationFailure));
+}
+
+async function exerciseWatcherRecovery(page, preparationFailure) {
   const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-recovery-ui-"));
   const profile = {
     name: "Synthetic recovery fixture", environments: ["dev"],
@@ -697,6 +709,10 @@ test("interrupted watcher recovery requires review and confirmation and preserve
     tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic interrupted fixture", comments: [] };
   await expect(watchTickets({
     repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    prepareSnapshot: options => {
+      if (preparationFailure) { throw new Error("Synthetic interruption"); }
+      return prepareWatcherFixtureSnapshot(options);
+    },
     client: { findTagged: async () => [42], load: async () => item },
     execute() { throw new Error("Synthetic interruption"); }
   })).rejects.toThrow("Synthetic interruption");
@@ -729,7 +745,7 @@ test("interrupted watcher recovery requires review and confirmation and preserve
     await instance.close();
     rmSync(directory, { recursive: true, force: true });
   }
-});
+}
 
 test("browser authentication failure exposes actionable recovery without private helper output", async ({ page }) => {
   const root = mkdtempSync(join(tmpdir(), "fixlab-auth-diagnostic-e2e-"));

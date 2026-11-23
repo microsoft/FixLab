@@ -60,7 +60,7 @@ import { quoteWindowsArgument } from "../dashboard/windows-executor.js";
 import { installNotifications } from "./notifications.js";
 import { linkedApiProofPlan, runLinkedApiProof } from "../dashboard/linked-api-proof.js";
 import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
-import { ticketAutomationPlan, watchTickets, executeTicketAgent, reviewInterruptedTicket, reconcileInterruptedTicket } from "../dashboard/ticket-automation.js";
+import { ticketAutomationPlan, watchTickets, executeVersionedTicketAgent, reviewInterruptedTicket, reconcileInterruptedTicket } from "../dashboard/ticket-automation.js";
 import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, PERSISTENT_DEV_API_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, SCENARIO_VALIDATION_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
 import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand } from "../dashboard/issue-plans.js";
@@ -1108,7 +1108,8 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
     console.error("Production-backed API jobs require dashboard-owned, fresh job-bound authentication and the database read-only check. Use fixlab dashboard or fixlab chat; direct run/validate does not grant production access.");
     return 1;
   }
-  if (profile.worktreeSetup?.mode === "shared" && !readOnly) {
+  if (profile.worktreeSetup?.mode === "shared" && !readOnly &&
+      !(choices.ticketAutomation && choices.ownedTicketSnapshot)) {
     console.error(
       "Shared worktree jobs require dashboard-owned branch acquisition and resumption. Use fixlab dashboard or fixlab chat for this repository."
     );
@@ -2293,6 +2294,8 @@ async function main(args) {
       productionEvidence: plan.productionEvidence,
       allowProductionEvidence: plan.allowProductionEvidence,
       pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,
+      codeBaseline: "Fetch origin's configured target for each new ticket into a private ticket ref; investigate in an owned, commit-pinned snapshot. Resume keeps the same snapshot, never pulls into active work.",
+      versionReview: "Read-only deployed-versus-latest comparison before fix/PR work. Approved incident-time metadata only; otherwise deployed version unknown. Already-fixed findings produce analysis rather than duplicate fix PRs.",
       resolution: plan.resolveOnCompletion
         ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
         : "No work-item state changes.",
@@ -2312,10 +2315,12 @@ async function main(args) {
         repository, plan, once: flags.has("--once"), confirmed: true,
         resumeWorkItemId,
         allowAllTools: flags.has("--allow-all-tools"), signal: controller.signal,
-        execute: async ({ request, onActivity, sessionId, resume, onSession }) => {
-          const result = await launch(repository, request, parsed.runtime, environment, parsed.model, false, "", {
-            ticketAutomation: true,
-            execute: ({ repository: checkout, prompt }) => executeTicketAgent({
+        execute: async ({ repository: snapshotRepository, workspace, phase, versionComparison,
+          onPhase, onComparison, request, onActivity, sessionId, resume, onSession }) => {
+          const result = await launch(snapshotRepository, request, parsed.runtime, environment, parsed.model, false, "", {
+            ticketAutomation: true, ownedTicketSnapshot: Boolean(workspace),
+            execute: ({ repository: checkout, prompt }) => executeVersionedTicketAgent({
+              workspace, phase, versionComparison, onPhase, onComparison,
               executor: createRuntimeExecutor({ packageRoot, runtime: parsed.runtime, model: parsed.model, native: false }),
               repository: checkout, prompt,
               ...(sessionId ? { sessionId } : {}), resume: resume === true, onSession,

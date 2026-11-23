@@ -17,6 +17,7 @@ function fixture() {
   const git = (...args) => {
     const result = spawnSync("git", ["-C", source, ...args], { encoding: "utf8", windowsHide: true });
     assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
   };
   git("init", "--quiet");
   writeFileSync(join(source, "tracked.txt"), "fixture");
@@ -31,8 +32,35 @@ function fixture() {
   };
   writeFileSync(join(source, SETUP_PROFILE_PATH), JSON.stringify(profile));
   writeFileSync(join(source, "frontend", "playwright.local.ts"), "export default {};");
-  return { root, source, repository, profile };
+  return { root, source, repository, profile, git };
 }
+
+test("ticket snapshots use the selected commit and keep older investigations pinned", () => {
+  const f = fixture();
+  try {
+    applyWorktreeSetup(planWorktreeSetup(f));
+    writeFileSync(join(f.repository, "tracked.txt"), "preserve watcher edits");
+    writeFileSync(join(f.source, "tracked.txt"), "new target revision");
+    f.git("add", "tracked.txt");
+    f.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "new target");
+    const selected = f.git("rev-parse", "HEAD");
+    const first = prepareJobWorktree({ repository: f.repository, jobId: randomUUID(), baseCommit: selected });
+    assert.equal(first.baseCommit, selected);
+    assert.equal(readFileSync(join(first.repository, "tracked.txt"), "utf8"), "new target revision");
+    writeFileSync(join(f.source, "tracked.txt"), "next ticket revision");
+    f.git("add", "tracked.txt");
+    f.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "next target");
+    const next = f.git("rev-parse", "HEAD");
+    const second = prepareJobWorktree({ repository: f.repository, jobId: randomUUID(), baseCommit: next });
+    assert.equal(second.baseCommit, next);
+    assert.equal(readFileSync(join(second.repository, "tracked.txt"), "utf8"), "next ticket revision");
+    assert.equal(readFileSync(join(first.repository, "tracked.txt"), "utf8"), "new target revision");
+    assert.equal(readFileSync(join(f.repository, "tracked.txt"), "utf8"), "preserve watcher edits");
+    assert.throws(() => prepareJobWorktree({
+      repository: f.repository, jobId: first.jobId, baseCommit: next
+    }), /commit|revision/u);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
 
 test("detached editing jobs automatically receive a reusable owned checkout without changing the source", () => {
   const f = fixture();

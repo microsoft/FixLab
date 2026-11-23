@@ -834,6 +834,23 @@ After reviewing that scope, explicitly start the session:
 fixlab watch "C:\source\application" --runtime agency --environment dev --yes --allow-all-tools
 ```
 
+Before each new investigation, the watcher fetches the configured target branch
+into a ticket-owned Git ref and pins an isolated, owned checkout to that exact
+commit. It never pulls into the watcher checkout or refreshes an active attempt.
+Authentication resumes retain their original snapshot and runtime session.
+A failed fetch blocks preparation without using cached/stale code; restarting
+the reviewed command can retry that not-yet-executed attempt.
+
+Each new snapshot first receives a read-only version review. The executor
+identifies the affected component's deployed commit at the incident time from
+already-approved deployment metadata or telemetry, or reports **deployed version
+unknown**. `main` and today's deployment are not assumed to represent that
+incident. An evidence-backed existing fix produces analysis and, when the
+deployed commit is known and different, a deployment-gap report instead of a
+duplicate PR. Only a completed `needs-fix` review continues into the same
+session's authorized fix/draft-PR phase. Existing profile/setup approvals are
+retained; private credentials and browser state are not copied.
+
 Adding `FixLab` to an active Bug, User Story, Feature or Product Backlog Item
 assigned to the signed-in Azure DevOps user, in a configured area or descendant,
 makes it eligible at the next poll. The query uses `[System.AssignedTo] = @Me`:
@@ -854,6 +871,8 @@ Discussion feedback uses three short sections: **Summary**, **Changes and
 validation**, and **Next action**. Expect two summary sentences and a few compact
 bullets, not a long paragraph or a full implementation plan. Detailed cause,
 completed/proposed work and evidence remain expandable in **Watcher jobs**.
+Version-reviewed attempts also include a bounded **Code version comparison**
+section with the pinned target, deployed revision or explicit unknown, and evidence.
 The executor reports these separately; missing evidence remains unknown.
 A proposed cause is not promoted to a confirmed cause, planned work is not completed
 work, and skipped or unreported checks are not passed.

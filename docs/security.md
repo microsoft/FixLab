@@ -277,6 +277,18 @@ or usage qualifiers, while retaining the credential-test diagnostic exception.
 This answer-specific check does not narrow ordinary authorization source-edit
 review.
 
+### Watcher version snapshots
+
+Watcher code snapshots are prepared only from the reviewed repository origin
+and configured target branch, into ticket-owned refs and worktrees. Failed
+fetches cannot select stale code; recovery cannot change a recorded baseline.
+Existing setup copying excludes credentials/browser state and blocks conflicting
+configuration. Version review grants no production access or PR authority;
+deployed revisions require bounded approved evidence and otherwise remain
+unknown. Only its completed needs-fix result enables the original scoped fix
+phase. Watcher executor children retain explicit read-only/intercepted business
+mutation restrictions independently of broad configured DEV defaults.
+
 ### Persistent DEV browser and API access
 
 Repository settings can enable **real DEV API reads and all writes** once per

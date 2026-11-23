@@ -60,9 +60,12 @@ export function needsJobWorktree(repository, profile, mode) {
   return branch.status === 1;
 }
 
-export function prepareJobWorktree({ repository, jobId, branchPrefix = "fixlab" }) {
+export function prepareJobWorktree({ repository, jobId, branchPrefix = "fixlab", baseCommit }) {
   if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(jobId)) {
     throw new Error("Automatic checkouts require a valid job ID.");
+  }
+  if (baseCommit !== undefined && !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(baseCommit)) {
+    throw new Error("Automatic checkout baseCommit must be an exact Git commit.");
   }
   const source = realpathSync.native(repository);
   const common = canonicalExecutionRepository(source);
@@ -86,12 +89,18 @@ export function prepareJobWorktree({ repository, jobId, branchPrefix = "fixlab" 
         !/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u.test(receipt.baseCommit ?? "")) {
       throw new Error("Saved checkout ownership or configuration changed; existing work was preserved.");
     }
+    if (baseCommit !== undefined && receipt.baseCommit !== baseCommit) {
+      throw new Error("The saved investigation commit changed; its pinned checkout was preserved.");
+    }
   } else {
     if (existsSync(target)) {
       throw new Error("The proposed checkout already exists without this job's ownership receipt; it will not be borrowed or overwritten.");
     }
     receipt = { jobId, source, repository: target, branch, profileRevision,
-      baseCommit: git(source, ["rev-parse", "--verify", "HEAD^{commit}"]) };
+      baseCommit: git(source, ["rev-parse", "--verify", "--end-of-options", `${baseCommit ?? "HEAD"}^{commit}`]) };
+    if (baseCommit !== undefined && receipt.baseCommit !== baseCommit) {
+      throw new Error("Automatic checkout baseCommit must identify a commit, not another Git object.");
+    }
     mkdirSync(dirname(receiptPath), { recursive: true, mode: 0o700 });
     writeFileSync(receiptPath, JSON.stringify(receipt), { flag: "wx", mode: 0o600 });
   }

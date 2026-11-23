@@ -2804,6 +2804,7 @@ async function refreshWatcherHistory() {
       });
       const heading = document.createElement("summary");
       let status = "Investigation running (last recorded)";
+      if (attempt.status === "snapshot-pending") { status = "Preparing isolated code snapshot (last recorded)"; }
       if (attempt.status === "feedback-pending") { status = "Result ready; feedback pending"; }
       if (attempt.status === "complete") {
         status = `Feedback recorded - ${attempt.outcome || "validation status unknown"}`;
@@ -2921,7 +2922,7 @@ async function refreshWatcherHistory() {
         audit.textContent = `Recovery decision: ${record.decision} at ${new Date(record.reviewedAt).toLocaleString()}.`;
         detail.append(audit);
       }
-      if (attempt.status === "running") {
+      if (["running", "snapshot-pending"].includes(attempt.status)) {
         const reviewButton = document.createElement("button");
         reviewButton.type = "button";
         reviewButton.textContent = "Review interrupted attempt";
