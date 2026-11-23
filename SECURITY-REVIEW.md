@@ -8,10 +8,11 @@ This assessment covers the 13 outstanding bot review threads on
 It is not a repository-wide audit or a claim that the repository is secure.
 
 The assessment found **1 HIGH, 4 MEDIUM, 3 LOW, and 5 false positives**.
-The user selected documentation rather than implementation and authorized
-resolution of non-high-priority threads without fixes. Resolution records an
-explicit deferral or false-positive rationale; it does not mean the reported
-behavior was repaired. The HIGH finding remains unresolved.
+The user initially selected documentation rather than implementation and
+authorized resolution of non-high-priority threads without fixes. Resolution
+records an explicit deferral or false-positive rationale; it does not mean
+those behaviors were repaired. The user subsequently authorized repair of the
+HIGH finding, described below; the original assessment remains historical.
 
 ## Findings
 
@@ -43,10 +44,18 @@ source-write policy also accepted both forms under existing job file trust.
 With a real credential, a runtime-proposed edit can therefore place it into
 publishable source. Gate-output redaction does not protect this approval path.
 
-**Unfixed; keep the review thread open.** A minimal repair should screen these
-forms, including JSON-escaped representations, and preserve harmless
-authorization namespaces and types. Focused regressions should require hidden
-details and denial of both approval and file trust.
+**Remediation follow-up:** the shared credential screen now recognizes indexed
+Authorization assignments, header setters, and valid Basic payloads encoding
+user/password pairs, including JSON-escaped representations. Both permission
+display and source-file trust use this screen. Harmless authorization
+namespaces/types and ordinary Basic-authentication prose remain reviewable.
+
+Two focused regression tests failed before the repair and passed afterward.
+They verify hidden details, denial of both approval and file trust, and actual
+source-write policy denial for short and oversized edits. Existing test files
+were extended; no new test dependency or permission was introduced. Full
+validation and publication results are reported separately on PR125; this
+summary does not claim a full-suite or live-application pass.
 
 ### MEDIUM: DEV browser boundaries
 
@@ -115,4 +124,5 @@ Evidence consists of source tracing and isolated in-memory probes. Playwright
 behavior was checked against installed, lockfile-pinned version 1.63.0, rather
 than upstream default-branch documentation. No full suite, live browser,
 application, deployment, or production-data validation ran for this assessment.
-The summary introduces no executable changes or new permissions.
+The initial summary introduced no executable changes. The subsequent HIGH
+remediation changes credential screening only and grants no new permissions.

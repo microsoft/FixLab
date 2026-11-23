@@ -105,11 +105,13 @@ test("blocked permission diagnostics distinguish causes without exposing origina
 });
 
 test("authorization source identifiers are reviewable without exposing authorization values", () => {
+  const encoded = Buffer.from("synthetic-user:synthetic-value").toString("base64");
   const prompt = runtimePermissionPrompt({
     kind: "write", fileName: "FeatureFlagsController.cs",
-    diff: "using Microsoft.AspNetCore.Authorization;\n[Authorize]\npublic class FeatureFlagsController {}"
+    diff: 'using Microsoft.AspNetCore.Authorization;\n[Authorize]\npublic class FeatureFlagsController {}\nconst mode = "Basic authentication";'
   });
   assert.equal(prompt.canApprove, true);
+  assert.equal(prompt.canUseFileTrust, true);
   const state = fixture();
   state.bridge.receive({ ...prompt, id: randomUUID() });
   assert.equal(state.requests[0].canApprove, true);
@@ -118,11 +120,24 @@ test("authorization source identifiers are reviewable without exposing authoriza
     'const headers = { "Authorization": "synthetic-private-value" };',
     'const authorization = "synthetic-private-value";',
     'const rawAuthorizationHeader = "synthetic-private-value";',
-    'authorization header is synthetic-private-value'
+    'authorization header is synthetic-private-value',
+    'headers["Authorization"] = "Basic synthetic-private-value";',
+    "headers['authorization'] = 'Basic synthetic-private-value';",
+    'headers.set("Authorization", "Basic synthetic-private-value");',
+    'headers.append("AUTHORIZATION", "Basic synthetic-private-value");',
+    'xhr.setRequestHeader("Authorization", "Basic synthetic-private-value");',
+    JSON.stringify({ source: 'headers["Authorization"] = "Basic synthetic-private-value";' }),
+    JSON.stringify(JSON.stringify({ source: 'headers.set("Authorization", "Basic synthetic-private-value");' })),
+    `const value = "Basic ${encoded}";`
   ]) {
-    const hidden = runtimePermissionPrompt({ kind: "write", fileName: "test.js", diff });
-    assert.equal(hidden.canApprove, false);
-    assert.doesNotMatch(hidden.details, /synthetic-private-value/u);
+    for (const padding of ["", " ".repeat(9000)]) {
+      const hidden = runtimePermissionPrompt({ kind: "write", fileName: "test.js", diff: padding + diff });
+      assert.equal(hidden.canApprove, false);
+      assert.equal(hidden.canUseFileTrust, false);
+      assert.ok(hidden.blockedReasons.includes("sensitive-content"));
+      assert.doesNotMatch(hidden.details, /synthetic-private-value/u);
+      assert.equal(hidden.details.includes(encoded), false);
+    }
   }
   for (const question of ["Provide your authorization header", "What is your authorization?"]) {
     assert.throws(() => runtimeQuestionPrompt({ question }), /sensitive/u);

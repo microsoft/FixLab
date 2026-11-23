@@ -9,7 +9,9 @@ export function validateToolApprovalMode(value = "ask") {
   return value;
 }
 const secret = /bearer\s|(?:password|passwd|secret|token|cookie|api[_-]?key)\s*["':=]|(?:gh[pousr]_|github_pat_|eyJ)[A-Za-z0-9_-]{16,}|https?:\/\/[^/\s]+:[^/\s]+@|[?&](?:sig|code|key|access_token|client_secret)=|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
-const credentialAssignment = /(?<![\w-])([\w-]+)(?:\s+header)?(?:(?:\\*["'])?\s*[:=]|\s+is\s+\S)/gi;
+const credentialAssignment = /(?<![\w-])([\w-]+)(?:\s+header)?(?:(?:\\*["'])?\s*(?:\]\s*)?[:=]|\s+is\s+\S)/gi;
+const authorizationHeaderSetter = /\.\s*(?:set|append|setRequestHeader)\s*\(\s*\\*["']authorization\\*["']\s*,/i;
+const basicCredential = /\bbasic\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9+/=])/gi;
 const credentialQuestion = /\b(?:password|passphrase|passwd|passcode|credential|authorization(?:\s+header)?|verification\s+code|one[ -]time\s+(?:code|password)|(?:MFA|2FA|security|recovery|backup)\s+code|OTP|TOTP|PIN|(?:access|refresh|id|session|authentication)\s*[_-]?\s*token|API\s*[_-]?\s*key|private\s*[_-]?\s*key|client\s*[_-]?\s*secret|cookie|secret)s?\b/i;
 const credentialSolicitation = /\b(?:enter|paste|provide|send|share|supply|submit|type|input|give|tell|what\s+(?:is|are)|required|needed)\b/i;
 const credentialTest = new RegExp(`${credentialQuestion.source}(?:[-\\s]+(?:reset|validation|rotation|expiration))?[-\\s]+(?:tests?|specs?)\\b`, "gi");
@@ -39,9 +41,17 @@ export const AUTOMATIC_PERMISSION_RECOVERY_GUIDANCE =
   SAFE_RECOVERY_GUIDANCE;
 
 function hasCredentialLikeText(value) {
-  if (secret.test(value)) { return true; }
+  if (secret.test(value) || authorizationHeaderSetter.test(value)) { return true; }
   for (const [, name] of value.matchAll(credentialAssignment)) {
     if (/authorization/i.test(name)) { return true; }
+  }
+  for (const [, encoded] of value.matchAll(basicCredential)) {
+    // Basic credentials encode user:password, unlike ordinary authentication prose.
+    const decoded = Buffer.from(encoded, "base64");
+    if (decoded.includes(0x3a) &&
+        decoded.toString("base64").replace(/=+$/u, "") === encoded.replace(/=+$/u, "")) {
+      return true;
+    }
   }
   return false;
 }
