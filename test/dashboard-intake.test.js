@@ -33,6 +33,7 @@ import { executeTicketAgent, executeVersionedTicketAgent, prepareTicketSnapshot,
 import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { ANALYSIS_EVIDENCE_GUIDANCE, analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
+import { issuePlanConfiguration } from "../dashboard/issue-plans.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
@@ -825,6 +826,114 @@ test("ticket feedback gives a high-level summary while retaining detailed work a
     }
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("ticket feedback posts bounded approved trace details and retains them without confirming a cause", async () => {
+  const fixture = ticketFixture({ readable: true });
+  try {
+    fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
+      subscriptionId: "12345678-1234-1234-1234-123456789abc",
+      applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10,
+      diagnostics: { endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed."] }
+    }] };
+    writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+    const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+    const policy = issuePlanConfiguration(fixture.repository, fixture.profile, "dev").traces[0];
+    const traceEvidence = { source: policy.id, policyRevision: policy.policyRevision,
+      start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z", rows: [
+        { table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "op-42",
+          operation_ParentId: "|root-42.span.", success: false, resultCode: "500", endpoint: "GET /v1/items/lookup" },
+        { table: "traces", timestamp: "2026-11-19T10:01:01Z", operation_Id: "op-42",
+          operation_ParentId: null, severityLevel: 3, logMessage: "Backend request failed." }
+      ] };
+    await fixture.run({ plan, execute: async ({ request }) => {
+      assert.match(request, /traceEvidence/);
+      return { outcome: "analysis", summary: "Observed a failed request; its cause remains unknown.", traceEvidence };
+    } });
+    const text = fixture.posted[0].text;
+    assert.match(text, /Trace evidence/);
+    for (const value of ["10:01:00", "op-42", "|root-42.span.", "500", "severityLevel=3",
+      "GET /v1/items/lookup", "Backend request failed."]) {
+      assert.ok(text.includes(value), `Missing trace evidence: ${value}`);
+    }
+    const attempt = readTicketAutomationHistory(fixture.repository).attempts[0];
+    assert.equal(attempt.traceEvidence.rows[0].endpoint, "GET /v1/items/lookup");
+    assert.equal(attempt.traceEvidence.rows[1].logMessage, "Backend request failed.");
+    assert.equal(attempt.confirmedCause, null);
+    assert.equal(fixture.item.state, "Active");
+    await fixture.run({ plan, execute() { assert.fail("Own trace feedback must not trigger another attempt."); } });
+    assert.equal(fixture.posted.length, 1);
+  } finally { fixture.cleanup(); }
+});
+
+test("ticket trace evidence rejects unbounded, unrelated and private fields before publication", () => {
+  const traceEvidence = { source: "app-traces", policyRevision: "1".repeat(64),
+    start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z", rows: [
+      { table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "op-42",
+        operation_ParentId: null, success: false, resultCode: "500" }
+    ] };
+  const outcome = { outcome: "analysis", summary: "Correlation is not a confirmed cause." };
+  assert.ok(ticketOutcome({ ...outcome, traceEvidence }).traceEvidence);
+  for (const change of [
+    { rows: Array(11).fill(traceEvidence.rows[0]) }, { rows: [] },
+    { end: "2026-11-19T12:00:00Z" }, { policyRevision: "unreviewed" },
+    { source: undefined }, { omittedDiagnostics: -1 }, { truncated: "yes" },
+    { rows: [{ ...traceEvidence.rows[0], timestamp: "2026-11-19T11:00:00Z" }] },
+    { rows: [{ ...traceEvidence.rows[0], message: "private business payload" }] },
+    { rows: [{ ...traceEvidence.rows[0], endpoint: "https://private.example.test/records?id=42" }] },
+    { rows: [{ ...traceEvidence.rows[0], logMessage: "Authorization: Bearer private-value" }] }
+  ]) {
+    assert.throws(() => ticketOutcome({ ...outcome, traceEvidence: { ...traceEvidence, ...change } }));
+  }
+  for (const field of ["operation_Id", "operation_ParentId"]) {
+    for (const credential of ["client_secret=synthetic-secret", "Bearer:synthetic-token",
+      `Basic:${Buffer.from("synthetic-user:synthetic-password").toString("base64")}`]) {
+      assert.throws(() => ticketOutcome({ ...outcome, traceEvidence: { ...traceEvidence,
+        rows: [{ ...traceEvidence.rows[0], [field]: credential }]
+      } }), { message: "Trace evidence contains invalid metadata." });
+    }
+  }
+  assert.throws(() => ticketOutcome({ ...outcome, traceEvidence: { ...traceEvidence,
+    start: "2026-03-02T10:00:00Z", end: "2026-03-02T10:15:00Z",
+    rows: [{ ...traceEvidence.rows[0], timestamp: "2026-02-30T10:01:00Z" }]
+  } }));
+});
+
+test("ticket trace details reject unapproved sources, revisions, windows and literals before saving or posting", async () => {
+  for (const mismatch of ["source", "revision", "window", "endpoint", "message", "metadata-only"]) {
+    const fixture = ticketFixture();
+    try {
+      fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
+        subscriptionId: "12345678-1234-1234-1234-123456789abc",
+        applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10,
+        ...(mismatch === "metadata-only" ? {} : {
+          diagnostics: { endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed."] }
+        })
+      }] };
+      writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+      const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+      const policy = issuePlanConfiguration(fixture.repository, fixture.profile, "dev").traces[0];
+      const traceEvidence = { source: mismatch === "source" ? "other-traces" : policy.id,
+        policyRevision: mismatch === "revision" ? "2".repeat(64) : policy.policyRevision,
+        start: "2026-11-19T10:00:00Z", end: mismatch === "window" ? "2026-11-19T10:45:00Z" : "2026-11-19T10:15:00Z",
+        rows: mismatch === "message" ? [
+          { table: "traces", timestamp: "2026-11-19T10:01:00Z", operation_Id: "op-42",
+            operation_ParentId: null, severityLevel: 3, logMessage: "Another fixed message." }
+        ] : [
+          { table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "op-42",
+            operation_ParentId: null, success: false, resultCode: "500",
+            endpoint: mismatch === "endpoint" ? "GET /v1/items/other" : "GET /v1/items/lookup" }
+        ]
+      };
+      await assert.rejects(fixture.run({ plan, execute: async () => ({
+        outcome: "analysis", summary: "No confirmed cause.", traceEvidence
+      }) }), /Trace|bounded explicit UTC/u);
+      assert.equal(fixture.posted.length, 0);
+      const state = JSON.parse(readFileSync(join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json")));
+      assert.equal(state.entries[0].result, undefined);
+      assert.equal(state.entries[0].details.traceEvidence, undefined);
+    } finally { fixture.cleanup(); }
   }
 });
 

@@ -56,6 +56,12 @@ agent-reported check/scenario outcomes. Raw output is not retained. The latest
 keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown.
 Detailed version comparisons follow the same latest-20-attempt retention;
 pending authentication resumes retain their required phase evidence.
+Optional structured trace evidence follows the same retention. Watcher feedback
+publishes up to ten observed rows, including timestamps, correlation IDs, codes
+and severity. Endpoint/message details require exact reviewed profile literals;
+unmatched text is omitted before reader output. Source revisions, UTC windows
+and diagnostic membership are revalidated before storage and pending feedback.
+These agent-reported correlations never establish a cause or deployed revision.
 Last reported worker status is not a process-liveness assertion.
 On Windows, atomic journal replacement retries transient reader-sharing errors
 for at most eight attempts with 25 ms between attempts. Other filesystem errors

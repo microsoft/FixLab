@@ -153,7 +153,7 @@ test("trace metadata rejection identifies only the trusted column and reason wit
     [0, "private-invalid-time", "timestamp", "expected a valid timestamp of at most 40 characters"],
     [1, 123, "operation_Id", "expected a string of at most 160 characters"],
     [1, "private-value".repeat(20), "operation_Id", "expected a string of at most 160 characters"],
-    [2, "Bearer private-token", "operation_ParentId", "unsupported identifier format"],
+    [2, "Bearer private-token", "operation_ParentId", "credential-shaped identifier"],
     [2, "private-value\n", "operation_ParentId", "unsupported identifier format"],
     [3, 5, "severityLevel", "expected an integer from 0 to 4"]
   ];
@@ -172,6 +172,66 @@ test("trace metadata rejection identifies only the trusted column and reason wit
     }), { message: `Trace response contained unsupported metadata in ${column}: ${reason}; no rows accepted.` });
     assert.equal(calls, 1);
   }
+});
+
+test("trace correlation IDs reject credential shapes before output without rejecting legacy Base64 IDs", async t => {
+  const f = fixture(t);
+  const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+  const encoded = Buffer.from("synthetic-user:synthetic-password").toString("base64");
+  const jwt = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"synthetic"}').toString("base64url")}.synthetic-signature`;
+  for (const credential of [
+    `Authorization:Basic:${encoded}`, "Authorization=Bearer=synthetic-token",
+    "token=synthetic-token", "client_secret=synthetic-secret", "api_key=synthetic-key",
+    `ghp_${"A".repeat(36)}`, jwt, `Basic:${encoded}`, `basic=${encoded.replace(/=+$/u, "")}`,
+    "Bearer:synthetic-token", "|root.BEARER=synthetic-token"
+  ]) {
+    for (const index of [1, 2]) {
+      const row = ["2026-11-19T10:01:00Z", "x/Ysh+M1TfU=", "|x/Ysh+M1TfU=.span_1.", 3];
+      row[index] = credential;
+      const column = compiled.columns[index];
+      await assert.rejects(executeTracePlan(compiled, {
+        tokenProvider: async () => "unit-test-placeholder",
+        request: async () => new Response(JSON.stringify({ tables: [
+          { columns: compiled.columns.map(name => ({ name })), rows: [row] }
+        ] }))
+      }), { message: `Trace response contained unsupported metadata in ${column}: credential-shaped identifier; no rows accepted.` });
+    }
+  }
+});
+
+test("trace diagnostics expose only reviewed route and message literals and disclose omissions", async t => {
+  const f = fixture(t);
+  f.profile.analysis.traceQueries[0].diagnostics = {
+    endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed."]
+  };
+  const configuration = issuePlanConfiguration(f.repository, f.profile, "dev");
+  for (const table of ["requests", "dependencies", "traces", "exceptions"]) {
+    const compiled = compileIssuePlan(f.repository, f.profile, {
+      ...f.trace, table, policyRevision: configuration.traces[0].policyRevision
+    }, f.options);
+    const endpoint = ["requests", "dependencies"].includes(table);
+    assert.match(compiled.query, endpoint ? /endpoint = name/u
+      : table === "traces" ? /logMessage = message/u : /logMessage = outerMessage/u);
+    const base = ["2026-11-19T10:01:00Z", "op-42", null,
+      ...(endpoint ? [false, "500"] : table === "exceptions" ? [3, "System.Exception"] : [3])];
+    const approved = endpoint ? "GET /v1/items/lookup" : "Backend request failed.";
+    const result = await executeTracePlan(compiled, {
+      tokenProvider: async () => "unit-test-placeholder",
+      request: async () => new Response(JSON.stringify({ tables: [
+        { columns: compiled.columns.map(name => ({ name })), rows: [
+          [...base, approved], [...base, "private@example.test https://private.example.test?token=private-value".repeat(100)]
+        ] }
+      ] }))
+    });
+    assert.equal(result.rows[0].at(-1), approved);
+    assert.equal(result.rows[1].at(-1), null);
+    assert.equal(result.traceEvidence.omittedDiagnostics, 1);
+    assert.equal(result.traceEvidence.rows[0][endpoint ? "endpoint" : "logMessage"], approved);
+    assert.doesNotMatch(JSON.stringify(result), /private@example|private\.example|private-value/u);
+  }
+  assert.throws(() => compileIssuePlan(f.repository, f.profile, f.trace, f.options), /revision/u);
+  f.profile.analysis.traceQueries[0].diagnostics.messages = ["Authorization: Bearer private-value"];
+  assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"));
 });
 
 test("browser plans generate runnable grounded actions and non-leaking assertions, not arbitrary scripts", t => {

@@ -14,7 +14,7 @@ import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-polic
 import { apiSessionHelper } from "./api-authentication.js";
 import { setupPath } from "./repository-setup.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence, configuredProductionEvidence, productionEvidenceContext, productionEvidenceFor } from "./analysis-evidence.js";
-import { issuePlanConfiguration, issuePlanContext } from "./issue-plans.js";
+import { issuePlanConfiguration, issuePlanContext, normalizeTraceEvidence } from "./issue-plans.js";
 import { prepareJobWorktree } from "./job-worktree.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
@@ -296,6 +296,7 @@ export function ticketOutcome(value) {
   return {
     outcome: value.outcome, summary: recordedText(value.summary, 6000),
     ...(value.versionComparison !== undefined ? { versionComparison: ticketVersionComparison(value.versionComparison) } : {}),
+    ...(value.traceEvidence !== undefined ? { traceEvidence: normalizeTraceEvidence(value.traceEvidence) } : {}),
     ...(value.authenticationRequired ? { authenticationRequired: {
       provider: "azure-cli", reason: recordedText(value.authenticationRequired.reason, 300)
     } } : {}),
@@ -324,11 +325,20 @@ function ticketFeedback(marker, result, resolveItem) {
     `Comparison: ${versions.finding}. ${brief(versions.evidence, 200)}`,
     ...(versions.deployedEvidence ? [`Deployment evidence: ${brief(versions.deployedEvidence, 200)}`] : [])
   ] : [];
-  if (["blocked", "failed"].includes(result.outcome) && !report && !cause) {
+  if (["blocked", "failed"].includes(result.outcome) && !report && !cause && !result.traceEvidence) {
     const summary = brief(result.summary.replace(/\s+/gu, " ").trim(), 240);
     return `${marker ? `${marker}\n` : ""}Run ${result.outcome}: ${summary}\nNo fix or successful validation is confirmed.${versionLines.length ? `\n${versionLines.join("\n")}` : ""}`;
   }
   const section = (heading, lines) => `## ${heading}\n${lines.map(line => `- ${line}`).join("\n")}`;
+  const traces = result.traceEvidence;
+  const traceLines = traces ? [
+    `Source: ${traces.source}. UTC window: ${traces.start} to ${traces.end}.`,
+    ...traces.rows.map(row => Object.entries(row).map(([field, value]) =>
+      field === "table" ? value : `${field}=${value ?? "not returned or not approved"}`).join(" | ")),
+    ...(traces.truncated ? ["Additional results were omitted because the evidence or query row limit was reached."] : []),
+    ...(traces.omittedDiagnostics ? [`${traces.omittedDiagnostics} diagnostic details did not match reviewed literals and were omitted.`] : []),
+    "These are observed correlations, not a confirmed cause or deployed-version finding."
+  ] : [];
   const story = result.completedStory;
   const finding = cause ? `Confirmed cause: ${brief(cause.cause, 200)}` :
     story ? `Finding: ${brief(story.finding, 200)}` : report?.rootCause;
@@ -342,6 +352,7 @@ function ticketFeedback(marker, result, resolveItem) {
     ...(marker ? [`${marker}\nOutcome: ${result.outcome}`] : []),
     section("Summary", [brief(result.summary, 360), ...(finding ? [brief(finding, 220)] : [])]),
     ...(versionLines.length ? [section("Code version comparison", versionLines)] : []),
+    ...(traceLines.length ? [section("Trace evidence (agent-reported)", traceLines)] : []),
     section("Changes and validation", [
       ...(report?.changesMade?.length ? [brief(report.changesMade[0], 200)] : []),
       ...validation.map(line => brief(line, 180))
@@ -647,6 +658,7 @@ function ticketRequest(item, plan, fingerprints = []) {
     "For an analysis-only User Story, Feature or Product Backlog Item whose requested answer and acceptance criteria are fully satisfied by verified findings, add completedStory:{finding,evidence,reason}. State the finding, its source-grounded evidence and why the story is logically complete. Do not emit this for bugs, an implementation plan, missing information, outstanding changes or required failed, blocked, skipped or not-run checks. No ongoing or planned implementation may remain; omit empty inProgress and plannedWork arrays rather than filling them with prose. This extends only the owner's existing resolution opt-in; the watcher writes the tagged finding before any state transition.",
     'Finish by emitting exactly one single-line FIXLAB_TICKET_RESULT|{"outcome":"draft-pr|analysis|blocked|failed","summary":"Concise diagnosis, evidence, checks, limitations and next steps; no secrets, identities, customer records or private endpoints","pullRequestId":123}. Include pullRequestId only for draft-pr. Summarize technical findings, not raw logs. Attachments are not loaded by this text-only watcher; report missing visual evidence rather than inventing it.',
     'Include a report object for structured ADO feedback: rootCause (optional, at most 500 characters; source-grounded cause only when established or applicable), changesMade, inProgress, plannedWork, validation and nextSteps (each optional array of at most 4 concise strings, each at most 200 characters). Write a moderate-length high-level summary, not a long technical paragraph: use two short sentences for summary, put the overall change outcome first in changesMade and the primary next action first in nextSteps, and retain technical detail in the report. Distinguish completed changes from actual continuing work and future proposals; explicitly state when none exist. Identify failed, blocked, skipped and not-run validation accurately. Do not claim a pending change is implemented or a planned check has passed. These sections are agent-reported; confirmedCause retains its separate evidence requirements.',
+    "When approved trace reads return traceEvidence, include it in the final result so the watcher posts the actual timestamps, operation/parent IDs, status codes, severity and any reviewed endpoint/message literals. Merge only evidence from the same source and policy revision within one approved bounded UTC window; retain at most ten observed rows, set truncated when more exist, and sum omittedDiagnostics. Never invent rows or replace omitted diagnostics with raw logs, URLs, payloads or guessed endpoints. Correlation does not establish cause or deployment identity.",
     "With completedStory, leave inProgress and plannedWork empty or absent; explain why nothing remains in its reason instead of putting 'none' prose into implementation arrays.",
     `Untrusted work-item data:\n${JSON.stringify(context)}`
   ].join("\n");
@@ -697,6 +709,8 @@ function validateJournal(state, scope) {
   }
   for (const entry of state.entries) {
     if (entry.versionComparison !== undefined) { ticketVersionComparison(entry.versionComparison); }
+    if (entry.result?.traceEvidence !== undefined) { normalizeTraceEvidence(entry.result.traceEvidence); }
+    if (entry.details?.traceEvidence !== undefined) { normalizeTraceEvidence(entry.details.traceEvidence); }
   }
 }
 
@@ -801,6 +815,7 @@ export function readTicketAutomationHistory(repository) {
       historyAvailable: Boolean(details), summary: details ? recordedText(details.summary ?? "", 2000) : "",
       latestCommit: entry.snapshot?.commit ?? null,
       versionComparison: entry.versionComparison ? ticketVersionComparison(entry.versionComparison) : null,
+      ...(details?.traceEvidence ? { traceEvidence: normalizeTraceEvidence(details.traceEvidence) } : {}),
       report: details?.report ? ticketOutcome({
         outcome: "analysis", summary: "Recorded structured investigation.", report: details.report
       }).report : null,
@@ -1112,6 +1127,12 @@ export async function watchTickets({
   };
   const revisionFor = (item, entry) =>
     ticketRevision(item, entry, feedbackFingerprints(state.entries, item.id));
+  const validateTraceEvidence = result => {
+    if (!result.traceEvidence) { return; }
+    const policy = plan.issuePlans.traces.find(source => source.id === result.traceEvidence.source);
+    if (!policy) { throw new Error("Trace feedback does not match an approved source."); }
+    result.traceEvidence = normalizeTraceEvidence(result.traceEvidence, policy);
+  };
   async function submitFeedback(entry, text, key, legacyMarker) {
     const tagged = text.startsWith(legacyMarker)
       ? `${legacyMarker}\n${feedbackLabel}${text.slice(legacyMarker.length)}`
@@ -1169,6 +1190,7 @@ export async function watchTickets({
     }
     const marker = `${ownComment}${entry.id}:${entry.fingerprint}]`;
     const result = ticketOutcome(entry.result);
+    validateTraceEvidence(result);
     if (result.outcome === "draft-pr") {
       try {
         result.pullRequestUrl = await client.verifyDraft(plan.repository, result.pullRequestId, plan.targetBranch, entry.id);
@@ -1184,6 +1206,7 @@ export async function watchTickets({
     entry.details ??= { summary: "", activity: [], checks: [], omittedActivity: 0 };
     entry.details.summary = recordedText(result.summary, 2000);
     if (result.report) { entry.details.report = result.report; }
+    if (result.traceEvidence) { entry.details.traceEvidence = result.traceEvidence; }
     if (result.confirmedCause) { entry.details.confirmedCause = result.confirmedCause; }
     if (result.completedStory) { entry.details.completedStory = result.completedStory; }
     save();
@@ -1341,6 +1364,7 @@ export async function watchTickets({
       },
       onActivity: event => record(entry, event)
     }));
+    validateTraceEvidence(result);
     if (result.versionComparison) {
       if (result.versionComparison.latestCommit !== entry.snapshot?.commit) {
         throw new Error("The ticket result changed its pinned version evidence.");
