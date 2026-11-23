@@ -13,6 +13,96 @@ import {
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 
+test("scenario-first validation and independent recovery stay aligned across browser entry points", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
+    assert.match(readFileSync(join(root, entryPoint), "utf8"), /SCENARIO_VALIDATION_GUIDANCE/u, entryPoint);
+  }
+  for (const entryPoint of [
+    "dashboard/workflow-policy.js", "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
+    ".github/agents/fixlab.agent.md", "prompts/fixlab.live-test.prompt.md"
+  ]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/\s+/gu, " ");
+    for (const contract of [
+      /Scenario-first validation/u, /expected-versus-observed assertions/u,
+      /not a setup check, sign-in or screenshot alone/u,
+      /repair its syntax\/selectors/u, /approved synthetic\/intercepted data/u,
+      /discoverable \.spec file in a job-owned folder/u,
+      /configured testDir; honor testMatch\/project/u, /Verify --list before execution/u,
+      /report file path, runner command and assertion results/u,
+      /label synthetic UI coverage separately/u,
+      /Finish independent scenarios before asking/u,
+      /never use another checkout to prove an unpublished fix/u,
+      /explicitly deferred checks keep their contracts/u
+    ]) { assert.match(text, contract, entryPoint); }
+  }
+});
+
+test("persistent DEV browser/API access stays aligned across runtimes without job permission prompts", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
+    const text = readFileSync(join(root, entryPoint), "utf8");
+    for (const contract of [/RUNTIME_RECOVERY_GUIDANCE/u, /FIXLAB_HELPER_ROOT/u,
+      /FIXLAB_REPOSITORY/u, /FIXLAB_DEV_API_ENVIRONMENT/u]) {
+      assert.match(text, contract, entryPoint);
+    }
+  }
+  for (const entryPoint of ["dashboard/workflow-policy.js", "agents/fixlab.md",
+    "com.github.copilot/agents/fixlab.agent.md", "templates/fixlab-autofix.agent.md",
+    ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/[`"]/gu, "").replace(/\s+/gu, " ");
+    for (const contract of [/dataSafety\.devWrite\.allowAll=true/u, /without per-job permission prompts/u,
+      /createDevBrowserContext/u, /browserProxyPaths/u, /assertHealthy/u,
+      /not scenario success/u, /Other environments retain their existing policy/u]) {
+      assert.match(text, contract, entryPoint);
+    }
+  }
+});
+
+test("automatic checkout assignment and shared-testing waits stay aligned across execution surfaces", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of [
+    "dashboard/server.js", "bin/fixlab.js", "agents/fixlab.md",
+    "com.github.copilot/agents/fixlab.agent.md", "templates/fixlab-autofix.agent.md",
+    ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"
+  ]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/\s+/gu, " ");
+    for (const contract of [
+      /[Ii]solation is assigned automatically/u, /same job/u, /parallel in separate owned checkouts/u,
+      /--resource local-testing/u, /wait without failing/u, /reservation until it stops/u,
+      /not validation evidence/u, /never clear another owner's reservation/u
+    ]) { assert.match(text, contract, entryPoint); }
+  }
+});
+
+test("full-page portal evidence guidance stays aligned without requiring browser artifacts for API-only jobs", () => {
+  const root = join(testDirectory, "..");
+  for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
+    assert.match(readFileSync(join(root, entryPoint), "utf8"), /PORTAL_SCREENSHOT_GUIDANCE/u);
+  }
+  for (const entryPoint of [
+    "dashboard/workflow-policy.js", "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
+    ".github/agents/fixlab.agent.md", "prompts/fixlab.live-test.prompt.md"
+  ]) {
+    const text = readFileSync(join(root, entryPoint), "utf8").replace(/\s+/gu, " ");
+    assert.match(text, /page\.screenshot\(\{ path, fullPage: true \}\)/u, entryPoint);
+    assert.match(text, /Default to unmasked full-page screenshots/u, entryPoint);
+    assert.match(text, /No blanket masking or repeat screenshot-scope questions|Do not blanket-mask the page or ask again for default screenshot capture/u, entryPoint);
+    assert.match(text, /job-owned transient wrapper/u, entryPoint);
+    assert.match(text, /original test, shared configuration/u, entryPoint);
+    assert.match(text, /(?:Explicit repository|explicit) privacy rules/u, entryPoint);
+    assert.match(text, /sign-in\/MFA screens or private\/customer data/u, entryPoint);
+    assert.match(text, /Keep evidence local; (?:external )?sharing needs separate approval/u, entryPoint);
+    assert.match(text, /API-only and unit-test-only runs require no browser screenshot/u, entryPoint);
+    assert.match(text, /numbered journey per scenario/u, entryPoint);
+    assert.match(text, /SHA-256/u, entryPoint);
+    assert.match(text, /exact bytes passed to the upload/u, entryPoint);
+    assert.match(text, /expected versus observed/u, entryPoint);
+    assert.match(text, /Save\/Submit and persistence remain unverified/u, entryPoint);
+  }
+});
 test("safe recovery and scoped DEV/PPE/SIT/UAT POST guidance stay aligned across execution surfaces", () => {
   const root = join(testDirectory, "..");
   for (const entryPoint of ["dashboard/server.js", "bin/fixlab.js"]) {
@@ -198,6 +288,22 @@ test("cross-runtime validation guidance stays aligned", () => {
   );
   assert.match(browserRule, /applyTo: "dashboard\/public\/\*\*\/\*\.js"/);
   assert.match(browserRule, /event registration/);
+});
+
+test("issue-driven execution keeps runtime and packaged-agent contracts aligned", () => {
+  const root = join(testDirectory, "..");
+  for (const entry of ["dashboard/server.js", "bin/fixlab.js", "dashboard/ticket-automation.js"]) {
+    assert.match(readFileSync(join(root, entry), "utf8"), /issuePlanContext/u, entry);
+  }
+  for (const entry of ["agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
+    "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"]) {
+    const text = readFileSync(join(root, entry), "utf8").replace(/\s+/gu, " ");
+    for (const contract of [/fixlab issue-plan/u, /No arbitrary KQL\/JavaScript/u,
+      /--allow-production-evidence/u, /DEV writes require explicit job approval/u,
+      /--allow-dev-writes/u, /Generated journeys stay transient/u, /actual executed assertions/u]) {
+      assert.match(text, contract, entry);
+    }
+  }
 });
 
 test("transient journey exceptions stay bounded across all execution surfaces", () => {

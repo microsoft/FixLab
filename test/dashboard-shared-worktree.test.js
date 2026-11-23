@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { prepareSharedWorktree, reviewSharedWorktree, sharedWorktreeConfig, sharedWorktreeGuidance, stashReviewedSharedWorktree, verifySharedWorktreeBranch } from "../dashboard/shared-worktree.js";
+import { applySharedSetup, planSharedSetup, prepareSharedWorktree, reviewSharedWorktree, sharedWorktreeConfig, sharedWorktreeGuidance, stashReviewedSharedWorktree, verifySharedWorktreeBranch } from "../dashboard/shared-worktree.js";
 
 function git(repository, ...args) {
   const result = spawnSync("git", args, { cwd: repository, encoding: "utf8", windowsHide: true });
@@ -41,6 +41,69 @@ function fixture() {
 function prepare(f, options = {}) {
   return prepareSharedWorktree({ ...f, jobId: randomUUID(), ...options });
 }
+
+test("shared setup is reviewed, preserves existing configuration and rebinds ignored commit proof across jobs", () => {
+  const f = fixture();
+  try {
+    const profilePath = join(f.repository, ".github", "fixlab", "repository-profile.json");
+    mkdirSync(join(f.repository, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(f.repository, ".git", "info", "exclude"), ".github/fixlab/repository-profile.json\n");
+    f.profile.worktreeSetup.mode = "isolated";
+    f.profile.validation = { expectedCommit: "0".repeat(40) };
+    f.profile.browserAutomation = { authentication: { command: "existing-helper", statusPaths: [".edge-profile"] } };
+    writeFileSync(profilePath, JSON.stringify(f.profile));
+    mkdirSync(join(f.repository, ".edge-profile"));
+    writeFileSync(join(f.repository, ".edge-profile", "fixture-marker"), "preserve");
+    const plan = planSharedSetup(f.repository);
+    assert.equal(JSON.parse(readFileSync(profilePath)).worktreeSetup.mode, "isolated");
+    applySharedSetup(plan);
+    f.profile = JSON.parse(readFileSync(profilePath));
+    assert.equal(f.profile.worktreeSetup.mode, "shared");
+    assert.equal(f.profile.worktreeSetup.bindExpectedCommit, true);
+    assert.equal(f.profile.validation.expectedCommit, git(f.repository, "rev-parse", "HEAD"));
+    assert.equal(f.profile.browserAutomation.authentication.command, "existing-helper");
+    const id = randomUUID();
+    const first = prepare(f, { jobId: id });
+    writeFileSync(join(f.source, "upstream.txt"), "new base");
+    git(f.source, "add", "upstream.txt");
+    git(f.source, "commit", "--quiet", "-m", "advance base");
+    prepare(f);
+    f.profile = JSON.parse(readFileSync(profilePath));
+    assert.equal(f.profile.validation.expectedCommit, git(f.repository, "rev-parse", "HEAD"));
+    assert.notEqual(f.profile.validation.expectedCommit, first.baseCommit);
+    prepare(f, { jobId: id, saved: first, resume: true });
+    f.profile = JSON.parse(readFileSync(profilePath));
+    assert.equal(f.profile.validation.expectedCommit, first.baseCommit);
+    assert.equal(readFileSync(join(f.repository, ".edge-profile", "fixture-marker"), "utf8"), "preserve");
+    assert.equal(git(f.repository, "status", "--porcelain"), "");
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("shared setup rejects tracked commit pins and changed plans without overwriting configuration", () => {
+  const f = fixture();
+  try {
+    const profilePath = join(f.repository, ".github", "fixlab", "repository-profile.json");
+    mkdirSync(join(f.repository, ".github", "fixlab"), { recursive: true });
+    f.profile.validation = { expectedCommit: "0".repeat(40) };
+    const original = JSON.stringify(f.profile);
+    writeFileSync(profilePath, original);
+    assert.throws(() => planSharedSetup(f.repository), /Git-ignored local/);
+    assert.equal(readFileSync(profilePath, "utf8"), original);
+    writeFileSync(join(f.repository, ".git", "info", "exclude"), ".github/fixlab/repository-profile.json\n");
+    const plan = planSharedSetup(f.repository);
+    writeFileSync(profilePath, `${original}\n`);
+    assert.throws(() => applySharedSetup(plan), /changed after planning/);
+    assert.equal(readFileSync(profilePath, "utf8"), `${original}\n`);
+    const changedOwnership = planSharedSetup(f.repository);
+    git(f.repository, "add", "-f", ".github/fixlab/repository-profile.json");
+    assert.throws(() => applySharedSetup(changedOwnership), /Git-ignored local/);
+    assert.equal(readFileSync(profilePath, "utf8"), `${original}\n`);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
 
 test("shared jobs reuse one folder but refresh the base and retain separate resumable branches", () => {
   const f = fixture();

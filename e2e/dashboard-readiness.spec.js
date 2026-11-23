@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer as createPortProbe } from "node:net";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 
 const packageRoot = process.env.FIXLAB_TEST_PACKAGE_ROOT ??
   fileURLToPath(new URL("..", import.meta.url));
@@ -19,9 +20,24 @@ const { createRuntimeRequestBridge, runtimePermissionPrompt, runtimeQuestionProm
 const { ticketAutomationPlan, watchTickets, executeTicketAgent } = await import(
   pathToFileURL(join(packageRoot, "dashboard", "ticket-automation.js")).href
 );
+const { createNonProductionPostAccess, createPostWriteApproval, createPpeWriteApproval } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "dev-post.js")).href
+);
+const { forwardApprovedBrowserPost, forwardApprovedBrowserRequest, startBrowserPostBridge } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "browser-post.js")).href
+);
+const { createDevBrowserContext } = await import(
+  pathToFileURL(join(packageRoot, "dashboard", "dev-browser.js")).href
+);
 let repository;
 let dashboard;
 let baseUrl;
+
+function prepareWatcherFixtureSnapshot({ repository, snapshot, onBaseline }) {
+  const commit = snapshot.commit ?? "1".repeat(40);
+  onBaseline(commit);
+  return { repository, baseCommit: commit, jobId: snapshot.jobId };
+}
 
 async function openWorkflowControls(page, url) {
   await page.goto(url);
@@ -40,6 +56,148 @@ async function availablePort() {
   await new Promise((resolve) => probe.close(resolve));
   return port;
 }
+
+test("reviewed browser POST guard consumes the live job grant without a separate contract", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-browser-post-e2e-"));
+  const jobId = randomUUID();
+  const url = "https://api.dev.example.test/items";
+  let bridge;
+  try {
+    mkdirSync(join(root, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(root, "session.mjs"),
+      'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+    writeFileSync(join(root, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      environments: ["dev"],
+      browserAutomation: {
+        testSynthesis: { defaultDataSource: "non-production-approved", mutationMode: "approved-write" },
+        dataSafety: {
+          productionAllowed: false,
+          post: { dev: { scope: "api://example-service/access", sessionHelper: "session.mjs",
+            actions: [{ url, testRecord: { field: "name", value: "FIXLAB_TEST_001" } }] } }
+        }
+      }
+    }));
+    const access = createNonProductionPostAccess({
+      repository: root, targetEnvironment: "dev", allowPostRequests: true, jobId,
+      postWriteApproval: createPostWriteApproval(root, "dev", jobId),
+      isReady: () => true, ask() { throw new Error("Approved browser POST must not prompt again"); }
+    });
+    const writes = [];
+    bridge = await startBrowserPostBridge({
+      send: access.browserPost, revoke: access.revoke, jobId, environment: "dev",
+      async request(target, options) {
+        expect(target).toBe(url);
+        expect(options.redirect).toBe("manual");
+        expect(options.headers.Authorization).toBe("Bearer synthetic-value");
+        writes.push(JSON.parse(options.body));
+        return new Response('{"id":"synthetic-record"}', {
+          status: 201, headers: { "content-type": "application/json" }
+        });
+      }
+    });
+    const metadata = [];
+    await page.route("https://api.dev.example.test/**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          contentType: "text/html",
+          body: `<button id="save">Save</button><output id="result"></output>
+            <script>document.getElementById("save").onclick = async () => {
+              const response = await fetch("/items", { method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: "FIXLAB_TEST_001", enabled: false }) });
+              document.getElementById("result").textContent = (await response.json()).id;
+            };</script>`
+        });
+        return;
+      }
+      metadata.push(await forwardApprovedBrowserPost(route, {
+        environment: "dev", purpose: "Verify the approved synthetic browser record."
+      }));
+    });
+    await page.goto("https://api.dev.example.test/");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("#result")).toHaveText("synthetic-record");
+    expect(writes).toEqual([{ name: "FIXLAB_TEST_001", enabled: false }]);
+    expect(metadata[0].validationPassed).toBe(false);
+    expect(metadata[0].responseBodyReturned).toBe(false);
+  } finally {
+    await bridge?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("PPE browser journey loads, saves and reloads through the same approved read/write grant", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-ppe-journey-e2e-"));
+  const jobId = randomUUID();
+  const origin = "https://api.ppe.example.test";
+  let bridge;
+  try {
+    mkdirSync(join(root, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(root, "session.mjs"),
+      'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
+    writeFileSync(join(root, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      environments: ["ppe"],
+      browserAutomation: {
+        testSynthesis: { defaultDataSource: "non-production-approved", mutationMode: "approved-write" },
+        dataSafety: {
+          productionAllowed: false,
+          ppeWrite: { scope: "api://example-service/access", sessionHelper: "session.mjs", origins: [origin] }
+        }
+      }
+    }));
+    const access = createNonProductionPostAccess({
+      repository: root, targetEnvironment: "PPE", allowPostRequests: true, jobId,
+      postWriteApproval: createPpeWriteApproval(root, "PPE", jobId),
+      isReady: () => true, ask() { throw new Error("Approved PPE journeys must not prompt again"); }
+    });
+    let name = "original";
+    const methods = [];
+    bridge = await startBrowserPostBridge({
+      send: access.browserRequest, serializeRequests: true,
+      revoke: access.revoke, jobId, environment: "ppe",
+      async request(target, options) {
+        expect(target).toBe(`${origin}/records`);
+        expect(options.redirect).toBe("manual");
+        expect(options.headers.Authorization).toBe("Bearer synthetic-value");
+        methods.push(options.method);
+        if (options.method === "POST") { name = JSON.parse(options.body).name; }
+        return new Response(JSON.stringify({ name }), {
+          status: options.method === "POST" ? 201 : 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    });
+    await page.route(`${origin}/`, (route) => route.fulfill({
+      contentType: "text/html",
+      body: `<button id="save" disabled>Save</button><output id="result"></output>
+        <script>
+          const result = document.getElementById("result");
+          const save = document.getElementById("save");
+          async function read() { return (await fetch("/records")).json(); }
+          Promise.all([read(), read()]).then(([record]) => {
+            result.textContent = record.name; save.disabled = false;
+          });
+          save.onclick = async () => {
+            await fetch("/records", { method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: "saved" }) });
+            result.textContent = (await read()).name;
+          };
+        </script>`
+    }));
+    await page.route(`${origin}/records`, (route) => forwardApprovedBrowserRequest(route, {
+      environment: "PPE", purpose: "Verify the approved PPE load/save/reload journey."
+    }));
+    await page.goto(`${origin}/`);
+    await expect(page.locator("#result")).toHaveText("original");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(page.locator("#result")).toHaveText("saved");
+    expect(methods).toEqual(["GET", "GET", "POST", "GET"]);
+  } finally {
+    await bridge?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function executor({ onOutput }) {
   onOutput(
@@ -156,10 +314,386 @@ test.afterAll(async () => {
   rmSync(repository, { recursive: true, force: true });
 });
 
-test("watcher jobs show live recorded activity, failed checks and retained history without dashboard execution", async ({ page }) => {
+test("persistent DEV setup hides job permissions and forwards authenticated real browser CRUD traffic", async ({ page, browser }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-dev-http-ui-"));
+  const calls = [];
+  let record = { name: "Initial", status: "draft" };
+  const application = createServer((request, response) => {
+    if (request.url === "/") {
+      response.setHeader("Content-Type", "text/html");
+      response.end(`<!doctype html><html><body>
+        <button id="read">Read</button><button id="search">Search</button>
+        <button id="create">Create</button><button id="update">Update</button>
+        <button id="submit">Submit</button><button id="delete">Delete</button>
+        <output aria-label="Record"></output><script>
+        const actions = {read:['GET','/api/items'],search:['POST','/api/search'],
+          create:['POST','/api/items'],update:['PATCH','/api/items/1'],
+          submit:['PUT','/api/items/1/submit'],delete:['DELETE','/api/items/1']};
+        for(const [id,[method,url]] of Object.entries(actions)) {
+          document.getElementById(id).onclick = async () => {
+            const response = await fetch(url,{method,headers:{'Content-Type':'application/json'},
+              ...(method==='GET'?{}:{body:JSON.stringify({name:id==='update'?'Updated':'Created'})})});
+            document.querySelector('output').textContent = JSON.stringify(await response.json());
+          };
+        }
+        </script></body></html>`);
+      return;
+    }
+    if (!request.url.startsWith("/api/")) { response.writeHead(404); response.end(); return; }
+    response.setHeader("Content-Type", "application/json");
+    if (request.headers.cookie !== "fixture-auth=approved") {
+      response.writeHead(401);
+      response.end('{"error":"Normal application authentication required"}');
+      return;
+    }
+    calls.push({ method: request.method, path: request.url });
+    let body = "";
+    request.on("data", chunk => { body += chunk; });
+    request.on("end", () => {
+      if (request.url === "/api/items" && request.method === "POST") { record = { ...JSON.parse(body), status: "draft" }; }
+      if (request.method === "PATCH") { record = { ...record, ...JSON.parse(body) }; }
+      if (request.method === "PUT") { record.status = "submitted"; }
+      if (request.method === "DELETE") { record = null; }
+      response.end(JSON.stringify(record));
+    });
+  });
+  await new Promise(resolve => application.listen(0, "127.0.0.1", resolve));
+  const applicationUrl = `http://127.0.0.1:${application.address().port}`;
+  const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+  profile.environments = ["dev"];
+  profile.applications.frontend.port = application.address().port;
+  profile.applications.frontend.healthUrl = applicationUrl;
+  profile.browserAutomation.dataSafety.devWrite = {
+    allowAll: true, origins: ["https://api.dev.example.test"],
+    scope: "api://example-service/access", sessionHelper: "dev-session.mjs", browserProxyPaths: ["/api"]
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  writeFileSync(join(directory, "dev-session.mjs"), "export const syntheticFixture = true;");
+  const launches = [];
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {},
+    executor(input) {
+      launches.push(input);
+      let finish;
+      let stopped = false;
+      return {
+        completion: new Promise(resolve => { finish = resolve; }),
+        terminate() { stopped = true; finish({ code: null, signal: "SIGTERM" }); },
+        hasStopped: () => stopped
+      };
+    }
+  });
+  let session;
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await openWorkflowControls(page, address.url);
+    await expect(page.locator("#dev-api-policy")).toBeVisible();
+    await expect(page.locator("#allow-dev-writes")).toBeHidden();
+    await expect(page.locator("#allow-post-requests")).toBeHidden();
+    await page.locator('[name="mode"][value="validate-only"]').check();
+    await page.getByLabel("Bug or required enhancement").fill("Exercise authenticated DEV HTTP workflows.");
+    await page.getByRole("button", { name: "Start job", exact: true }).click();
+    await expect.poll(() => launches.length).toBe(1);
+    expect(launches[0].allowPostRequests).toBe(true);
+    expect(launches[0].postWriteApproval.mode).toBe("dev-origin");
+
+    session = await createDevBrowserContext(browser, {
+      repository: directory, targetEnvironment: "dev",
+      contextOptions: { storageState: { cookies: [{
+        name: "fixture-auth", value: "approved", domain: "127.0.0.1", path: "/",
+        expires: -1, httpOnly: true, secure: false, sameSite: "Lax"
+      }], origins: [] } }
+    });
+    const applicationPage = await session.context.newPage();
+    await applicationPage.goto(applicationUrl);
+    for (const [action, expected] of [["Read", "Initial"], ["Search", "Initial"],
+      ["Create", "Created"], ["Update", "Updated"], ["Submit", "submitted"], ["Delete", "null"]]) {
+      const count = calls.length;
+      await applicationPage.getByRole("button", { name: action, exact: true }).click();
+      await expect.poll(() => calls.length).toBe(count + 1);
+      await expect(applicationPage.getByLabel("Record")).toContainText(expected);
+    }
+    expect(record).toBe(null);
+    expect(calls.map(call => call.method)).toEqual(["GET", "POST", "POST", "PATCH", "PUT", "DELETE"]);
+    const evidence = await session.assertHealthy();
+    expect(evidence.requests.map(request => request.status)).toEqual([200, 200, 200, 200, 200, 200]);
+    expect(evidence.validationPassed).toBe(false);
+    expect(JSON.stringify(evidence)).not.toContain("fixture-auth");
+    await session.close();
+    session = null;
+  } finally {
+    await session?.context.close();
+    await instance.close();
+    await new Promise((resolve, reject) => application.close(error => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("DEV browser scope guards block real writes after unsuccessful localhost traffic", async ({ browser }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-dev-http-failure-"));
+  const calls = [];
+  const application = createServer((request, response) => {
+    if (request.url === "/api/items") {
+      calls.push(request.method);
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end('{"error":"Normal application authentication required"}');
+    } else {
+      response.writeHead(200, { "Content-Type": "text/html" });
+      response.end("<!doctype html><html><body>Owned DEV browser fixture</body></html>");
+    }
+  });
+  let session;
+  try {
+    await new Promise(resolve => application.listen(0, "127.0.0.1", resolve));
+    const applicationUrl = `http://127.0.0.1:${application.address().port}`;
+    const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+    profile.environments = ["dev"];
+    profile.applications.frontend.port = application.address().port;
+    profile.applications.frontend.healthUrl = applicationUrl;
+    profile.browserAutomation.dataSafety.devWrite = {
+      allowAll: true, origins: ["https://api.dev.example.test"],
+      scope: "api://example-service/access", sessionHelper: "dev-session.mjs", browserProxyPaths: ["/api"]
+    };
+    mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    writeFileSync(join(directory, "dev-session.mjs"), "export const syntheticFixture = true;");
+    for (const mutationMode of ["none", "intercepted"]) {
+      await expect(createDevBrowserContext(browser, {
+        repository: directory, targetEnvironment: "dev", mutationMode
+      })).rejects.toThrow(/per-run mutation/u);
+    }
+    session = await createDevBrowserContext(browser, {
+      repository: directory, targetEnvironment: "dev"
+    });
+    const unauthenticatedPage = await session.context.newPage();
+    await unauthenticatedPage.goto(applicationUrl);
+    const rejected = await unauthenticatedPage.evaluate(async () => {
+      const response = await fetch("/api/items");
+      return { status: response.status, body: await response.json() };
+    });
+    expect(rejected).toEqual({ status: 401, body: { error: "Normal application authentication required" } });
+    await expect(session.assertHealthy()).rejects.toThrow(/HTTP 401/u);
+    const failedReadCount = calls.length;
+    const subsequentWrite = await unauthenticatedPage.evaluate(() =>
+      fetch("/api/items", { method: "POST" }).then(() => "forwarded", () => "blocked"));
+    expect(subsequentWrite).toBe("blocked");
+    expect(calls.length).toBe(failedReadCount);
+    expect(calls).toEqual(["GET"]);
+    await expect(session.close()).rejects.toThrow(/HTTP 401/u);
+    session = null;
+  } finally {
+    await session?.context.close();
+    await new Promise((resolve, reject) => application.close(error => error ? reject(error) : resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("editing from an isolated checkout follows the same job and recovers watcher-only profile changes", async ({ page }) => {
+  test.setTimeout(60000);
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-owned-workspace-ui-"));
+  const profile = {
+    ...JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8")),
+    worktreeSetup: { mode: "isolated" }
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  for (const args of [
+    ["init", directory], ["-C", directory, "add", "."],
+    ["-C", directory, "-c", "user.name=FixLab Test", "-c", "user.email=fixlab@example.invalid", "commit", "-qm", "Synthetic checkout fixture"]
+  ]) {
+    expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
+  }
+  const workspaces = new Map();
+  let launches = 0;
+  let failFirstRun;
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {}, workspaceServers: workspaces,
+    workspaceSetup: async () => ({ ready: true, message: "Synthetic restore completed." }),
+    executor() {
+      launches += 1;
+      let finish;
+      let stopped = false;
+      const completion = new Promise(resolve => { finish = resolve; });
+      if (launches === 1) {
+        failFirstRun = () => { stopped = true; finish({ code: 1 }); };
+      }
+      return {
+        completion,
+        terminate() { stopped = true; finish({ code: null, signal: "SIGTERM" }); },
+        hasStopped: () => stopped
+      };
+    }
+  });
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await openWorkflowControls(page, address.url);
+    await page.getByLabel("Bug or required enhancement").fill("Fix this synthetic workflow in its owned checkout.");
+    await page.getByRole("button", { name: "Start job", exact: true }).click();
+    await page.waitForURL(url => url.origin !== new URL(address.url).origin, { timeout: 30000 });
+    expect(workspaces.size).toBe(1);
+    const owned = await [...workspaces.values()][0].ready;
+    await expect(page).toHaveURL(`${owned.url}/`);
+    const source = await (await page.request.get(`${address.url}/api/status`)).json();
+    const assigned = await (await page.request.get(`${owned.url}/api/status`)).json();
+    expect(assigned.job.id).toBe(source.job.id);
+    expect(source.job.workspace.repository).not.toBe(directory);
+    await expect(page.locator("#job-status")).toContainText("running");
+    writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
+      ...profile, analysis: { ...profile.analysis, productionReadOnlyEvidence: [] }
+    }));
+    failFirstRun();
+    await expect(page.locator("#job-status")).toContainText("failed");
+    await page.getByRole("button", { name: "Review and respond", exact: true }).click();
+    await page.getByLabel("Action", { exact: true }).selectOption("retry");
+    await page.getByLabel("Additional details or manual result").fill("Retry with this job's verified saved configuration; do not inherit watcher diagnostic access.");
+    await page.getByRole("button", { name: "Resume FixLab", exact: true }).click();
+    await expect.poll(() => launches).toBe(2);
+    await expect(page.locator("#job-status")).toContainText("running");
+    const recovered = await (await page.request.get(`${owned.url}/api/status`)).json();
+    expect(recovered.job.id).toBe(assigned.job.id);
+    expect(workspaces.size).toBe(1);
+    expect(JSON.parse(readFileSync(join(source.job.workspace.repository, ".github", "fixlab", "repository-profile.json"), "utf8"))).toEqual(profile);
+  } finally {
+    await instance.close();
+    rmSync(`${directory}.fixlab-worktrees`, { recursive: true, force: true });
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("watcher grid shows work-item titles and text statuses while preserving reviewed handoffs", async ({ page }) => {
+  await page.setViewportSize({ width: 1470, height: 900 });
   const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-ui-"));
   const profile = {
+    ...JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8")),
     name: "Synthetic watcher fixture", environments: ["dev"],
+    pullRequests: { defaultTargetBranch: "develop" },
+    ticketAutomation: { areaPaths: ["Example\\Application"] }
+  };
+  mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+  writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+  for (const args of [
+    ["init", directory], ["-C", directory, "remote", "add", "origin", "https://dev.azure.com/example-org/Example/_git/application"],
+    ["-C", directory, "add", "."],
+    ["-C", directory, "-c", "user.name=FixLab Test", "-c", "user.email=fixlab@example.invalid", "commit", "-qm", "Synthetic fixture"]
+  ]) {
+    expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
+  }
+  const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
+  const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture <img src=x onerror=alert(1)>", comments: [] };
+  let release;
+  let launches = 0;
+  const client = {
+    findTagged: async () => [42], load: async () => item, hasComment: async () => false,
+    async comment() {}, reviewPullRequests: async () => []
+  };
+  const result = new Promise(resolve => { release = resolve; });
+  const watching = watchTickets({
+    repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
+    prepareSnapshot: prepareWatcherFixtureSnapshot,
+    client,
+    execute: async ({ onActivity }) => executeTicketAgent({
+      repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
+      executor(options) {
+        options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|Investigating the reported mapping.\n");
+        options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed; live testing did not run.\n");
+        return {
+          completion: result.then(() => {
+            options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A focused check failed; the work item stays open.","report":{"plannedWork":["Implement the reviewed scope after the prerequisite is supplied."]}}\n');
+            return { code: 0 };
+          }), hasStopped: () => true, terminate() { release(); }
+        };
+      }
+    })
+  });
+  const instance = createDashboardServer({
+    repository: directory, packageRoot, browserOpener() {},
+    ticketClient: client,
+    executor() {
+      launches += 1;
+      let finish;
+      const completion = new Promise(resolve => { finish = resolve; });
+      return { completion, terminate() { finish({ code: null, signal: "SIGTERM" }); } };
+    }
+  });
+  try {
+    const address = await instance.listen({ port: await availablePort() });
+    await page.goto(address.url);
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await expect(page.locator("#watcher-status")).toContainText("investigating");
+    const grid = page.getByRole("table", { name: "Watcher jobs" });
+    await expect(grid.getByRole("columnheader")).toHaveText(["Work item", "Title", "Status"]);
+    const workspaceWidth = await page.locator("#workspace-tools").evaluate(element => element.getBoundingClientRect().width);
+    const watcherWidth = await page.locator("#watcher-group").evaluate(element => element.getBoundingClientRect().width);
+    expect(watcherWidth).toBeCloseTo(workspaceWidth, 0);
+    expect(await page.locator("#watcher-grid").evaluate(element => element.scrollWidth - element.clientWidth)).toBe(0);
+    const row = grid.locator("tbody > tr").first();
+    await expect(row.getByRole("cell").nth(0).getByRole("link", { name: "42", exact: true })).toHaveAttribute(
+      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
+    );
+    await expect(row.locator(".watcher-title")).toHaveText(item.title);
+    await expect(row.getByRole("img")).toHaveCount(0);
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Investigation running (last recorded)");
+    const attempt = row.locator("details").first();
+    await expect(attempt).not.toHaveAttribute("open");
+    await attempt.locator(":scope > summary").click();
+    await expect(attempt).toContainText("focused regression: failed");
+    await expect(attempt).toContainText("Investigating the reported mapping");
+    await expect(attempt.getByRole("link", { name: `ADO 42 - ${item.title} (work item and Discussion)`, exact: true })).toHaveAttribute(
+      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
+    );
+    expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
+    release();
+    await watching;
+    await expect(page.locator("#watcher-status")).toContainText("stopped");
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - blocked");
+    await expect(attempt).toHaveAttribute("open", "");
+    await page.reload();
+    await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+    await expect(row.locator(".watcher-title")).toHaveText(item.title);
+    await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - blocked");
+    await page.locator("#watcher-attempts > tr > td > details > summary").first().click();
+    await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
+    await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
+    const retained = page.locator("#watcher-attempts > tr > td > details").first();
+    await retained.getByText("Detailed investigation report", { exact: true }).click();
+    await expect(retained).toContainText("Implement the reviewed scope after the prerequisite is supplied.");
+    await retained.getByRole("button", { name: "Continue in FixLab", exact: true }).click();
+    const prepare = retained.getByRole("button", { name: "Prepare local job", exact: true });
+    await expect(prepare).toBeDisabled();
+    await retained.getByRole("checkbox", { name: "I reviewed the findings, dependencies and implementation scope." }).check();
+    await prepare.click();
+    await expect(page.locator("#watcher-handoff-notice")).toContainText("No job has started");
+    await expect(page.locator("#request")).toHaveValue(/Continue work item 42/);
+    await expect(page.locator('[name="requestType"][value="feature"]')).toBeChecked();
+    await expect(page.locator('[name="allowAllTools"]')).not.toBeChecked();
+    expect(launches).toBe(0);
+    await page.locator('#job-form button[type="submit"]').click();
+    await expect.poll(() => launches).toBe(1);
+    const started = (await (await page.request.get(`${address.url}/api/status`)).json()).job;
+    expect(started.watcherHandoff.workItemId).toBe(42);
+    expect(started.toolApprovalMode).toBe("ask");
+    expect(started.devWriteApproved).toBe(false);
+    expect(started.ppeWriteApproved).toBe(false);
+    await page.screenshot({ path: test.info().outputPath("watcher-history.png"), fullPage: true });
+  } finally {
+    release();
+    await watching;
+    await instance.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+for (const preparationFailure of [false, true]) {
+  test(`interrupted watcher ${preparationFailure ? "snapshot preparation" : "execution"} recovery requires review and confirmation without launching work`,
+    async ({ page }) => exerciseWatcherRecovery(page, preparationFailure));
+}
+
+async function exerciseWatcherRecovery(page, preparationFailure) {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-watcher-recovery-ui-"));
+  const profile = {
+    name: "Synthetic recovery fixture", environments: ["dev"],
     pullRequests: { defaultTargetBranch: "develop" },
     ticketAutomation: { areaPaths: ["Example\\Application"] }
   };
@@ -171,59 +705,76 @@ test("watcher jobs show live recorded activity, failed checks and retained histo
     expect(spawnSync("git", args, { windowsHide: true }).status).toBe(0);
   }
   const plan = ticketAutomationPlan(directory, profile, { environment: "dev" });
-  const item = { id: 42, project: "Example", areaPath: "Example\\Application",
-    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic UI fixture", comments: [] };
-  let release;
-  const result = new Promise(resolve => { release = resolve; });
-  const watching = watchTickets({
+  const item = { id: 42, assignedToCurrentUser: true, project: "Example", areaPath: "Example\\Application",
+    tags: "FixLab", workItemType: "User Story", state: "Active", title: "Synthetic interrupted fixture", comments: [] };
+  await expect(watchTickets({
     repository: directory, plan, once: true, confirmed: true, allowAllTools: true, onEvent() {},
-    client: { findTagged: async () => [42], load: async () => item, hasComment: async () => false, async comment() {} },
-    execute: async ({ onActivity }) => executeTicketAgent({
-      repository: directory, prompt: "Synthetic fixture", onActivity, onOutput() {},
-      executor(options) {
-        options.onOutput("stdout", "FIXLAB_ACTIVITY|diagnosis|Investigating the reported mapping.\n");
-        options.onOutput("stdout", "FIXLAB_CHECK|focused regression|failed|One assertion failed; live testing did not run.\n");
-        return {
-          completion: result.then(() => {
-            options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"blocked","summary":"A focused check failed; the work item stays open."}\n');
-            return { code: 0 };
-          }), hasStopped: () => true, terminate() { release(); }
-        };
-      }
-    })
-  });
+    prepareSnapshot: options => {
+      if (preparationFailure) { throw new Error("Synthetic interruption"); }
+      return prepareWatcherFixtureSnapshot(options);
+    },
+    client: { findTagged: async () => [42], load: async () => item },
+    execute() { throw new Error("Synthetic interruption"); }
+  })).rejects.toThrow("Synthetic interruption");
   const instance = createDashboardServer({
     repository: directory, packageRoot, browserOpener() {},
-    executor() { throw new Error("Opening watcher monitoring must not start a dashboard job."); }
+    ticketClient: { load: async () => item, reviewPullRequests: async () => [] },
+    executor() { throw new Error("Recovery must not start a dashboard job."); }
   });
   try {
     const address = await instance.listen({ port: await availablePort() });
     await page.goto(address.url);
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
-    await expect(page.locator("#watcher-status")).toContainText("investigating");
-    const attempt = page.locator("#watcher-attempts > li > details").first();
+    const attempt = page.locator("#watcher-attempts > tr > td > details").first();
     await attempt.locator("summary").click();
-    await expect(attempt).toContainText("focused regression: failed");
-    await expect(attempt).toContainText("Investigating the reported mapping");
-    await expect(attempt.getByRole("link", { name: "Open work item and Discussion" })).toHaveAttribute(
-      "href", "https://dev.azure.com/example-org/Example/_workitems/edit/42"
-    );
+    await attempt.getByRole("button", { name: "Review interrupted attempt" }).click();
+    const retry = attempt.getByRole("button", { name: "Authorize safe retry" });
+    await expect(retry).toBeDisabled();
+    await expect(attempt).toContainText("No final result was retained");
+    await expect(attempt.getByRole("button", { name: "Accept recorded result" })).toBeDisabled();
+    await attempt.getByRole("checkbox", { name: "I reviewed the ticket, existing work and limitations." }).check();
+    await expect(retry).toBeEnabled();
+    await retry.click();
+    await expect(page.locator("#watcher-attempts > tr > td").nth(2)).toHaveText("Reviewed recovery - retry");
+    await expect(attempt).toContainText("Recovery decision: retry");
     expect((await (await page.request.get(`${address.url}/api/status`)).json()).job).toBeNull();
-    release();
-    await watching;
-    await expect(page.locator("#watcher-status")).toContainText("stopped");
-    await expect(attempt).toContainText("Feedback recorded - blocked");
     await page.reload();
     await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
-    await page.locator("#watcher-attempts summary").click();
-    await expect(page.locator("#watcher-attempts")).toContainText("focused regression: failed");
-    await expect(page.locator("#watcher-attempts")).toContainText("the work item stays open");
-    await page.screenshot({ path: test.info().outputPath("watcher-history.png"), fullPage: true });
+    await expect(page.locator("#watcher-attempts")).toContainText("Reviewed recovery - retry");
   } finally {
-    release();
-    await watching;
     await instance.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("browser authentication failure exposes actionable recovery without private helper output", async ({ page }) => {
+  const root = mkdtempSync(join(tmpdir(), "fixlab-auth-diagnostic-e2e-"));
+  const profileDirectory = join(root, ".github", "fixlab");
+  mkdirSync(profileDirectory, { recursive: true });
+  const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+  profile.browserAutomation.authentication = {
+    required: true, command: "node auth-failure.cjs", statusPaths: ["ready.json"]
+  };
+  writeFileSync(join(profileDirectory, "repository-profile.json"), JSON.stringify(profile));
+  writeFileSync(join(root, "auth-failure.cjs"),
+    "process.stderr.write('Error: No tests found; private-browser-auth-sentinel'); process.exitCode = 1;");
+  const instance = createDashboardServer({
+    repository: root, packageRoot, executor, browserOwnership: () => null, browserOpener() {}
+  });
+  try {
+    const url = (await instance.listen({ port: await availablePort() })).url;
+    await openWorkflowControls(page, url);
+    expect((await page.request.post(`${url}/api/playwright/connect`)).status()).toBe(202);
+    await expect.poll(async () => (await (await page.request.get(`${url}/api/playwright/status`)).json()).running)
+      .toBe(false);
+    await page.locator("#playwright-check").click();
+    await expect(page.locator("#playwright-guidance")).toContainText("configured working directory");
+    await expect(page.locator("#playwright-status")).toHaveText("Not connected");
+    await expect(page.locator("#playwright-connect")).toBeEnabled();
+    await expect(page.locator("body")).not.toContainText("private-browser-auth-sentinel");
+  } finally {
+    await instance.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -364,6 +915,40 @@ test("POST checkbox explicitly approves this job only and keeps unchecked writes
   await expect(checkbox).not.toBeChecked();
 });
 
+test("POST-base checkbox explicitly confirms all POSTs without granting CRUD or later jobs", async ({ page }) => {
+  const posts = [];
+  await mockChatWorkspace(page, { environments: ["dev", "ppe"], postBaseEnvironments: ["ppe"] });
+  await page.route("**/api/jobs", async (route) => {
+    posts.push(route.request().postDataJSON());
+    await route.fulfill({ contentType: "application/json", status: 202,
+      body: JSON.stringify({ job: { id: "ppe-post-preference", request: "Synthetic PPE POST approval.",
+        mode: "validate-only", status: "running", stages: {}, bugs: [], logs: [], activity: [] },
+      queue: [], history: [] }) });
+  });
+  await openWorkflowControls(page, baseUrl);
+  await page.locator("#target-environment").selectOption("ppe");
+  await page.getByLabel("Allow all PPE POST requests, including writes, for this job", { exact: true }).check();
+  await page.locator("#request").fill("Approve all PPE POST requests for this job.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0].postBaseApprovalConfirmed).toBe(true);
+  expect(posts[0].postWriteApprovalConfirmed).toBe(true);
+  expect(posts[0].allowPostRequests).toBe(true);
+  expect(posts[0].allowPpeWrites).toBe(false);
+  await expect(page.locator("#allow-post-requests")).not.toBeChecked();
+  await page.locator("#request").fill("Run without a new POST approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(2);
+  expect(posts[1].postBaseApprovalConfirmed).toBe(false);
+  await page.locator("#target-environment").selectOption("dev");
+  await page.locator("#allow-post-requests").check();
+  await page.locator("#request").fill("Use endpoint-scoped DEV approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(3);
+  expect(posts[2].postBaseApprovalConfirmed).toBe(false);
+  expect(posts[2].postWriteApprovalConfirmed).toBe(true);
+});
+
 for (const environment of ["dev", "ppe"]) {
 test(`${environment.toUpperCase()} write checkbox is environment-specific, excludes scoped POST and resets consent for every job`, async ({ page }) => {
   const posts = [];
@@ -424,6 +1009,45 @@ test(`${environment.toUpperCase()} write checkbox is environment-specific, exclu
   await expect(checkbox).not.toBeChecked();
 });
 }
+
+test("PPE POST scope refreshes reset POST consent without restoring opted-out broad writes", async ({ page }) => {
+  const posts = [];
+  const postBaseEnvironments = [];
+  await mockChatWorkspace(page, { environments: ["dev", "ppe"], ppeWriteConfigured: true, postBaseEnvironments });
+  await page.route("**/api/jobs", async (route) => {
+    posts.push(route.request().postDataJSON());
+    await route.fulfill({ contentType: "application/json", status: 202,
+      body: JSON.stringify({ job: { id: "ppe-scope-refresh", request: "Synthetic PPE validation.",
+        mode: "validate-only", status: "running", stages: {}, bugs: [], logs: [], activity: [] },
+      queue: [], history: [] }) });
+  });
+  await openWorkflowControls(page, baseUrl);
+  await page.locator("#target-environment").selectOption("ppe");
+  const broad = page.locator("#allow-dev-writes");
+  const scoped = page.locator("#allow-post-requests");
+  await expect(broad).toBeChecked();
+  await broad.uncheck();
+  await scoped.check();
+  postBaseEnvironments.push("ppe");
+  await expect(page.locator("#post-writes-label")).toHaveText(
+    "Allow all PPE POST requests, including writes, for this job");
+  await expect(broad).not.toBeChecked();
+  await expect(scoped).not.toBeChecked();
+  await expect(scoped).toBeEnabled();
+  await scoped.check();
+  postBaseEnvironments.length = 0;
+  await expect(page.locator("#post-writes-label")).toHaveText(
+    "Allow POST writes for this job in the selected environment");
+  await expect(broad).not.toBeChecked();
+  await expect(scoped).not.toBeChecked();
+  await page.locator("#request").fill("Validate PPE without restoring write approval.");
+  await page.locator("#start-button").click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0].allowPpeWrites).toBe(false);
+  expect(posts[0].ppeWriteApprovalConfirmed).toBe(false);
+  expect(posts[0].allowPostRequests).toBe(false);
+  expect(posts[0].postBaseApprovalConfirmed).toBe(false);
+});
 
 test("configured PPE writes default on for future jobs, preserve opt-out and never select other environments", async ({ page }) => {
   const posts = [];
@@ -566,6 +1190,7 @@ test("live Allow all requires confirmation and is absent without an offered capa
 test("safe recovery denies the hidden request and per-action DEV POST never enters batch approval", async ({ page }) => {
   const job = pendingApprovalJob(["npm test"]);
   const hidden = { ...runtimePermissionPrompt({ kind: "shell", fullCommandText: "x".repeat(8193) }), id: randomUUID() };
+  hidden.automaticRecoveryAttempted = true;
   job.runtimeRequests = [hidden];
   const posts = [];
   await mockChatWorkspace(page, { job });
@@ -576,6 +1201,8 @@ test("safe recovery denies the hidden request and per-action DEV POST never ente
   });
   await page.goto(baseUrl);
   await expect(page.locator("#runtime-request-details")).toContainText("8192-character");
+  await expect(page.locator("#runtime-request-guidance")).toContainText("Automatic safe recovery was already attempted once");
+  await expect(page.locator("#runtime-request-details")).toContainText("do not split or repackage");
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
   const recover = page.getByRole("button", { name: "Deny and request safe recovery", exact: true });
   page.once("dialog", (dialog) => dialog.dismiss());
@@ -706,6 +1333,29 @@ test("runtime guidance distinguishes Allow all exceptions from questions", async
   await expect(page.locator("#runtime-request-guidance")).toContainText("question, not a tool permission");
   await expect(page.locator("#runtime-request-guidance")).toContainText("Allow all never supplies answers");
   await expect(page.getByRole("button", { name: "Allow once", exact: true })).toHaveCount(0);
+});
+
+test("conversation shows the exact next-step question and does not queue a choice-only reply", async ({ page }) => {
+  const job = pendingQuestionJob("Validation cannot use the sibling worktree. Which next step?");
+  job.runtimeRequests[0].allowFreeform = false;
+  job.runtimeRequests[0].choices = ["Configure the target worktree", "Leave validation blocked"];
+  const posts = [];
+  await mockChatWorkspace(page, { job });
+  page.on("request", request => { if (request.method() === "POST") { posts.push(request.url()); } });
+  await page.goto(baseUrl);
+  await expect(page.locator("#conversation-state-detail")).toHaveText(job.runtimeRequests[0].details);
+  await expect(page.locator("#needs-response")).toHaveText("Choose next step");
+  await expect(page.locator("#composer-question")).toContainText("Choose a next step");
+  await expect(page.locator("#start-button")).toBeDisabled();
+  await page.locator("#job-form").evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  await expect(page.locator("#form-error")).toContainText("Choose a next step from the offered answers");
+  await expect(page.locator("#start-button")).toBeDisabled();
+  await page.locator("#needs-response").click();
+  await expect(page.getByRole("button", { name: "Configure the target worktree", exact: true })).toBeVisible();
+  expect(posts).toEqual([]);
+  await page.locator("#new-conversation").click();
+  await expect(page.locator("#start-button")).toBeEnabled();
+  await expect(page.locator("#composer-question")).toBeHidden();
 });
 
 test("native Copilot prompts allow once, deny and answer choices in the same live job", async ({ page }) => {
@@ -853,7 +1503,7 @@ test("native Copilot prompts allow once, deny and answer choices in the same liv
       id: randomUUID()
     };
     bridge.receive(hidden);
-    await expect(page.locator("#runtime-request-details")).toContainText("authentication-related source code");
+    await expect(page.locator("#runtime-request-details")).toContainText("existing reviewed authentication helper");
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Deny and request safe recovery", exact: true }).click();
     await expect.poll(() => sent.at(-1)?.recover).toBe(true);
@@ -1472,6 +2122,34 @@ test("session controls reconnect, confirm another owner and resume its stopped j
     await test.step("Closing the owner dashboard", () => owner.close());
     await test.step("Closing the observer dashboard", () => observer.close());
     rmSync(sessionRepository, { recursive: true, force: true });
+  }
+});
+
+test("configured clones show sign-in guidance instead of asking to add a repository", async ({ page }) => {
+  const directory = mkdtempSync(join(tmpdir(), "fixlab-sign-in-ui-"));
+  let server;
+  try {
+    const profile = JSON.parse(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), "utf8"));
+    profile.browserAutomation.authentication = {
+      required: true, command: "node authenticate.js", statusPaths: [".auth/state.json"]
+    };
+    mkdirSync(join(directory, ".github", "fixlab"), { recursive: true });
+    writeFileSync(join(directory, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    server = createDashboardServer({ repository: directory, packageRoot });
+    const url = (await server.listen({ port: await availablePort() })).url;
+    await openWorkflowControls(page, url);
+    await page.locator('input[name="mode"][value="playwright-only"]').check();
+    await expect(page.locator("#readiness")).toHaveText("Sign-in required for live validation");
+    await expect(page.locator("#welcome-add-repository")).toBeHidden();
+    await expect(page.locator("#welcome-guidance")).toContainText("Connect Playwright");
+    await expect(page.getByRole("button", { name: "Connect Playwright" })).toBeEnabled();
+    const status = await (await page.request.get(`${url}/api/status`)).json();
+    expect(status.readiness.configurationReady).toBe(true);
+    expect(status.readiness.profileReady).toBe(false);
+    expect(status.job).toBeNull();
+  } finally {
+    await server?.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -2220,6 +2898,11 @@ test("dashboard retries a blocked Playwright gate without shell input", async ({
     "profile-defined browser and test command"
   );
   expect(submittedInput.details).toContain("save at least one");
+  expect(submittedInput.details).toContain("Default to unmasked full-page");
+  expect(submittedInput.details).toContain("page.screenshot({ path, fullPage: true })");
+  expect(submittedInput.details).toContain("do not ask again for default screenshot capture");
+  expect(submittedInput.details).toContain("Preserve explicit privacy rules");
+  expect(submittedInput.details).not.toContain("after masking sensitive regions");
   expect(submittedInput.details).toContain("Do not skip");
 });
 
@@ -2435,12 +3118,12 @@ test("dashboard exposes explicit pull-request approval when validation is comple
 });
 
 async function mockChatWorkspace(page, { job = null, queue = [], history = [], environments,
-  profileReady = true, draftOnlyReady = false, ppeWriteConfigured = false } = {}) {
+  profileReady = true, draftOnlyReady = false, ppeWriteConfigured = false, postBaseEnvironments = [] } = {}) {
   await page.route("**/api/status", (route) => route.fulfill({
     contentType: "application/json",
     body: JSON.stringify({
       instanceId: "workspace-owner",
-      readiness: { repositoryReady: true, profileReady, draftOnlyReady, ppeWriteConfigured,
+      readiness: { repositoryReady: true, profileReady, draftOnlyReady, ppeWriteConfigured, postBaseEnvironments,
         repository: "C:\\code\\alpha", profileName: "Alpha workspace", environments },
       runtime: { name: "copilot", supportsModelSelection: true, defaultModel: "" },
       job, queue, held: [], history
@@ -2508,6 +3191,7 @@ test("repository memory shows saved outcomes safely and selecting one never resu
   page.on("request", (request) => { if (request.method() === "POST") { posts++; } });
   const saved = {
     id: "saved-chat", request: "<img src=x onerror=alert(1)> Synthetic remembered work",
+    workspace: { jobId: "saved-chat", repository: join(repository, "previous-checkout"), url: "http://127.0.0.1:1" },
     status: "blocked", requestType: "bug-fix", targetEnvironment: "dev",
     stages: { diagnosis: { status: "passed", message: "Synthetic diagnosis complete" } },
     bugs: [], logs: [], activity: [], canResume: false, canComment: false
@@ -2570,8 +3254,48 @@ test("queue navigation opens the inspector at the first card without changing jo
   await expect(page.locator("#details-group")).toHaveAttribute("open", "");
   await expect(page.locator("#queue-panel")).toBeInViewport();
   await expect(page.locator("#details-view > :first-child")).toHaveAttribute("id", "queue-panel");
+  await expect(page.locator("#queue-list")).toHaveJSProperty("tagName", "OL");
+  await expect(page.locator("#queue-list > li")).toHaveCount(2);
   await expect(page.locator("#queue-list")).toContainText("Waiting #1");
   await expect(page.locator("#queue-list")).toContainText("Synthetic next bug");
+  expect(posts).toBe(0);
+});
+
+test("watcher grid handles empty history, unavailable titles and stale responses without executing work", async ({ page }) => {
+  let posts = 0;
+  let unavailable = false;
+  const body = { status: "idle", pollSeconds: 300, attempts: [], titleWarning: "" };
+  await mockChatWorkspace(page);
+  await page.route("**/api/ticket-automation", route => route.fulfill({
+    status: unavailable ? 503 : 200,
+    contentType: "application/json",
+    body: JSON.stringify(unavailable ? { error: "Synthetic watcher history unavailable" } : body)
+  }));
+  page.on("request", request => { if (request.method() === "POST") { posts++; } });
+  await page.goto(baseUrl);
+  await page.getByRole("button", { name: "Watcher jobs", exact: true }).click();
+  await expect(page.locator("#watcher-empty")).toBeVisible();
+  const grid = page.getByRole("table", { name: "Watcher jobs" });
+  await expect(grid).toBeHidden();
+  body.titleWarning = "Synthetic titles could not be loaded.";
+  body.attempts.push({
+    id: "legacy-attempt", workItemId: 7, title: "", status: "complete", outcome: "analysis",
+    workItemUrl: "https://dev.azure.com/example-org/Example/_workitems/edit/7",
+    historyAvailable: false, checks: [], activity: []
+  });
+  await expect(grid).toBeVisible({ timeout: 10000 });
+  const row = grid.locator("tbody > tr");
+  await expect(row.locator(".watcher-title")).toHaveText("Title unavailable");
+  await expect(row.getByRole("cell").nth(2)).toHaveText("Feedback recorded - analysis");
+  await expect(page.locator("#watcher-status")).toContainText(body.titleWarning);
+  await expect(page.locator("#watcher-empty")).toBeHidden();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await row.getByRole("cell").nth(2).scrollIntoViewIfNeeded();
+  await expect(row.getByRole("cell").nth(2)).toBeInViewport();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  unavailable = true;
+  await expect(page.locator("#watcher-status")).toContainText("Previously displayed history may be stale.", { timeout: 10000 });
+  await expect(row.locator(".watcher-title")).toHaveText("Title unavailable");
   expect(posts).toBe(0);
 });
 
@@ -2597,6 +3321,10 @@ test("browser-only retry preserves browser scope and makes its prerequisite bloc
   expect(submitted.action).toBe("retry");
   expect(submitted.details).toContain("retained same-job script");
   expect(submitted.details).toContain("Do not retry an unchanged profile lock");
+  expect(submitted.details).toContain("Default to unmasked full-page");
+  expect(submitted.details).toContain("page.screenshot({ path, fullPage: true })");
+  expect(submitted.details).toContain("do not ask again for default screenshot capture");
+  expect(submitted.details).toContain("Preserve explicit privacy rules");
   expect(submitted.details).not.toContain("continue to pull-request creation");
 });
 

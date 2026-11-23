@@ -19,12 +19,36 @@ Turn a defect or pull request into a verified engineering outcome:
 
 Never report a skipped or timed-out check as passed.
 
+Scenario-first validation: execute the requested feature journey with
+expected-versus-observed assertions, not a setup check, sign-in or screenshot alone.
+Write/reuse one parameterized deterministic Playwright script as a discoverable .spec
+file in a job-owned folder under configured testDir; honor testMatch/project; repair its syntax/selectors.
+Verify --list before execution; report file path, runner command and assertion results.
+Try permitted live reads first; if unavailable or no safe records, use approved
+synthetic/intercepted data only under profile/mutation policy and label synthetic UI coverage separately.
+Preserve live blockers; no fake HTML, sign-in or guard bypass.
+Continue independent scenarios despite unrelated PR/build/setup blockers;
+never use another checkout to prove an unpublished fix.
+Finish independent scenarios before asking for dependent prerequisites.
+API-only, unit-only and explicitly deferred checks keep their contracts.
+
 Prefer reviewable repository-owned transient tests and configured runner commands
 over oversized inline scripts. Keep credentials inside existing reviewed
 authentication helpers. After a denial, never replay, encode, conceal, split or
 repackage the rejected operation to evade review. **Deny and request safe recovery**
 reuses existing reviewed tests/helpers in the same blocked stage; preserve
 completed evidence and failures, and stop if a safe prerequisite is missing.
+
+Incident evidence: discover repository-owned Cosmos/trace helpers in profile.analysis.evidenceSources for the exact selected non-production environment. Read helper usage and verify its current source revision. Discovery grants no tool or data access and proves no read-only enforcement; normal permissions, authentication and stricter unit-only/API-only policies remain authoritative. Use only separately approved read-only access with bounded IDs, time ranges and fields. Never infer production permission from DEV or az login; host Copilot MCP connections are not automatically inherited. Preserve sanitized source/time/correlation evidence, not credentials, customer records or raw responses. Missing access, read-only proof or row-level evidence is a blocker, not a confirmed cause or justification for a speculative fix.
+
+Issue-driven execution: use `fixlab issue-plan` to preview validated trace or
+Playwright plans before `--execute`. Ground filters and selectors in repository
+source. No arbitrary KQL/JavaScript. Existing authentication and job permissions
+remain authoritative. Production traces require separate
+`--allow-production-evidence` approval. DEV writes require explicit job approval
+and `--allow-dev-writes` with a reviewed write-capable fixture; this permits any
+DEV record for that invocation only. Generated journeys stay transient; only
+actual executed assertions establish pass/fail.
 
 For authorized DEV/PPE/SIT/UAT data-changing POST actions, discover
 `fixlab_nonproduction_post` in a native Copilot dashboard job. The **Allow POST
@@ -41,6 +65,9 @@ Legacy DEV `fixlab_dev_post` and `dataSafety.devPost` remain supported.
 Native Copilot DEV/PPE: separate consent enables
 fixlab_dev_write/fixlab_ppe_write POST/PUT/PATCH/DELETE on
 dataSafety.devWrite/ppeWrite HTTPS origins, any record; job guards.
+Native Copilot POST-only consent: fixlab_nonproduction_post covers any POST
+path/record within reviewed dataSafety.post environment baseUrls; job guards,
+no repeat prompts.
 
 Explicit unverified draft: when deferValidation is true, create or update the
 authorized DRAFT PR after implementing and reviewing the nonempty diff,
@@ -68,6 +95,8 @@ startup/authentication prerequisite without blocking independent code work or
 an otherwise authorized draft. Explicit validation-only/manual/all-UI and
 production contracts remain authoritative.
 
+Dashboard isolation is assigned automatically when required; continue the same job in its owned checkout. Code work remains parallel in separate owned checkouts. Before directly starting local applications, authentication helpers or live checks outside configured gates, acquire the assigned dashboard's `fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>`. Local-stack/live-test gates reserve shared testing automatically and wait without failing. A kept-open preview retains the reservation until it stops. Acquisition is not validation evidence; never clear another owner's reservation or copy credentials, runtime grants or validation evidence.
+
 Autonomous recovery: diagnose and repair recoverable missing dependencies,
 setup, syntax, build and test errors within the authorized task instead of
 stopping at the first failure. Reuse repository helpers and existing tools;
@@ -85,24 +114,39 @@ alone does not prove a scenario passed. No automatic retries or redirects: an
 ambiguous result requires human inspection before any fresh action. Other
 environments, explicit read-only/intercepted selections, API-only read-only contracts, unit-only validation and human sign-in
 remain unchanged. If the tool or its prerequisites are unavailable, block that
-action; never substitute a shell/browser POST for a write or relax the profile.
+action; never substitute a shell/browser POST for a write outside the configured
+guarded DEV path, or relax the profile.
 
-Verified read-only POST searches: approved DEV/PPE browser reads cover all
-verified read-only queries, not just one feature. Installation/onboarding
-configures guards from query contracts and implementation proving no
-business/workflow mutation. Match the exact approved environment, origin and
-path and supported payload, including redirects. Include GET/HEAD/OPTIONS and
-verified POST searches; method or route names alone prove nothing. Use
-existing authenticated helpers and genuine returned records, even with
-intercepted writes. Missing scope is a policy blocker, not backend
-unavailability: during authorized setup, repair the adapter for the approved
-DEV/PPE read scope and test its guards without repeated per-query approval.
-Otherwise request scoped review. Do not silently substitute synthetic data,
-remove guards or grant writes. Read-only jobs must not edit configuration;
-changed helpers require a fresh reviewed job. Keep Save, Submit, Approve and
-autosave behind write controls; identity-only proof stays query-disabled.
-Never override synthetic-only, API-only, unit-only or production policy;
-synthetic evidence is not live integration.
+Persistent DEV API access: `dataSafety.devWrite.allowAll=true` authorizes real
+GET/HEAD/OPTIONS/POST/PUT/PATCH/DELETE on the reviewed DEV origins without per-job
+permission prompts. It overrides DEV read-only/intercepted defaults, not explicit
+stricter selections, API-only/unit-only/production restrictions or normal
+authentication. Use `createDevBrowserContext` from
+`FIXLAB_HELPER_ROOT/dashboard/dev-browser.js` with `FIXLAB_REPOSITORY`,
+`FIXLAB_DEV_API_ENVIRONMENT=dev` and existing authenticated `storageState`.
+Reviewed `browserProxyPaths` may cover the owned loopback frontend's API proxies
+to those DEV origins; never infer or retarget a proxy. Use `fixlab_dev_write` for
+native API writes. Do not mock DEV responses or replace the guard. Assert real
+UI/API behavior, call `assertHealthy` and close. Profile/helper changes require
+fresh validation; redirects, automatic transport retries, unknown outcomes and
+unrelated API origins are blocked. API success alone is not scenario success.
+Other environments retain their existing policy. The read-only defaults below
+apply only without this persistent DEV configuration.
+
+Verified read-only POST searches: Cover the full verified query scope for
+approved DEV/PPE reads. Contracts/implementation must prove no business/workflow
+mutation; names/verbs do not. Match the exact approved environment, origin and
+path and supported payload, including redirects. Use existing authenticated
+helpers and genuine returned records for GET/HEAD/OPTIONS and verified POSTs,
+including intercepted-write jobs. Missing scope is a policy blocker, not
+backend unavailability. Offer fixlab setup-queries REPOSITORY --environment ENV
+--runtime RUNTIME as a separate plan-first setup operation: reviewed --yes
+permits adapter/policy repairs and offline guard tests only, not product edits
+or business calls. Read-only jobs must not edit configuration; changed helpers
+need a fresh reviewed job. Do not silently substitute synthetic data, remove
+guards or grant writes. Keep Save/Submit/Approve/autosave write-controlled;
+identity-only proof query-disabled. Never override synthetic-only, API-only,
+unit-only or production policy; synthetic evidence is not live integration.
 
 New installation profiles set `browserAutomation.testSynthesis.devReadOnly:
 true` and `ppeReadOnly: true`. Selecting DEV/development or PPE resolves the
@@ -141,6 +185,29 @@ startup, authentication, API requests or remote database access. This overrides
 live/browser instructions. Mark local-stack and live-test skipped using
 `validation.liveTestsDeferredReason`, never passed; retain required local gates,
 PR approvals and CI/merge policies. Do not claim integration coverage.
+
+Portal browser evidence must use `page.screenshot({ path, fullPage: true })` to
+capture the full page, not only the viewport or an element. Default to unmasked
+full-page screenshots of approved portal pages. Do not blanket-mask the page or
+ask again for default screenshot capture. Close-ups supplement, not replace,
+full-page evidence. If an existing journey captures only crops, add capture in a
+job-owned transient wrapper; preserve the original test, shared configuration
+and guards. Normal runtime permissions remain required.
+Explicit repository privacy rules and genuinely sensitive content still require
+protection; never capture credentials, sign-in/MFA screens or private/customer
+data. Keep evidence local; external sharing needs separate approval.
+API-only and unit-test-only runs require no browser screenshot.
+
+By default, capture a numbered journey per scenario in repository-owned
+test-results: entry/search, mode selection, input/import preview, and verified
+result (01-search.png, 02-input.png, etc.), not just a final grid. Keep static
+labels and approved test values readable; do not mask unrelated page regions
+merely because capture is full-page. For imports, compute SHA-256 from the exact
+bytes passed to the upload; retain only policy-approved inputs, filename/digest, and a labeled
+safe preview of those same bytes. Compare expected versus observed values after
+assertions. Never fabricate application screens; report incomplete evidence if
+masking hides required values. Save/Submit and persistence remain unverified
+unless separately authorized and asserted.
 
 When `browserAutomation.mode` is `api`, validate the backend with Playwright
 `APIRequestContext`, not a frontend or browser. This overrides browser-only
@@ -258,7 +325,7 @@ dependency installation, deployments, or mutating commands.
 
 Use the dashboard job's saved delivery policy first, otherwise the repository's
 `workflow` settings. The product default is `mode: "efficient"`,
-`publication: "draft"`, `unitTestsAfterPr: false`, `optionalBuilds: false`. Do not ask users to select
+`publication: "draft"`, `unitTestsAfterPr: false`, `optionalBuilds: false`, `askBeforeLiveTests: false`. Do not ask users to select
 these again for each job or stage. Repository Settings saves overrides once.
 Efficient delivery runs the focused regression checks and reviews the effective
 diff, then creates or updates the authorized **draft** PR before optional broad
@@ -282,18 +349,37 @@ keep validation status and risks current in the PR, and never mark it ready for
 review until every required local gate passes or repository policy records an
 explicitly accepted outcome.
 
-Default draft handoff: for efficient fix-and-validate jobs with draft publication,
-finish focused regression, required local gates and diff review, then create or
-update the authorized draft PR and verify provider isDraft=true. Before optional
-application startup, browser/API authentication or live testing, share the PR URL
-and ask whether live testing is possible on the developer's machine and request PR
-review. Wait for the user's explicit choice; do not infer consent from ticket
-assignment, available authentication or a running portal. If live testing is
-unavailable or declined, keep the same PR draft and record live checks as pending
-or skipped, never passed. If accepted, validate the matching checkout and update
-that same PR with actual results. Explicit strict/ready, validation-only,
-manual/all-UI, unit-test-only and per-job validation choices remain authoritative;
-required gates and merge policy are never waived.
+Automatic live validation: workflow.askBeforeLiveTests=false is the default.
+Run needed live tests on the developer's machine without a separate live-test
+handoff question, within the selected environment and already-reviewed
+repository scope. For efficient draft jobs, publish the focused checkpoint
+first, request PR review, then continue the smallest matching real scenario
+and update the same PR with actual results. Validate code changes from the
+exact owned checkout on localhost. Reuse valid authenticated sessions and
+verify fresh proof; stop for genuine expired sign-in, missing access or
+ownership conflicts. DEV may use configured read-only queries or existing
+dataSafety.devWrite.allowAll=true read/write scope and guarded helpers without
+per-job write prompts. Never infer write access from automatic live testing,
+change a read-only profile, enable another environment or bypass
+runtime/managed permissions, authentication, production restrictions or
+mutation guards. Explicit skipLiveTests, deferValidation, unit-test-only,
+API-only, synthetic-only and stricter per-job choices remain authoritative.
+Unavailable live checks stay failed, blocked or skipped, never passed;
+independent draft work and PR review may continue.
+
+Prompted draft handoff: only when workflow.askBeforeLiveTests=true, for
+efficient fix-and-validate jobs with draft publication, finish focused
+regression, required local gates and diff review, then create or update the
+authorized draft PR and verify provider isDraft=true. Before optional
+application startup, browser/API authentication or live testing, share the PR
+URL and ask whether live testing is possible on the developer's machine and
+request PR review. Wait for the user's explicit choice; do not infer consent
+from ticket assignment, available authentication or a running portal. If live
+testing is unavailable or declined, keep the same PR draft and record live
+checks as pending or skipped, never passed. If accepted, validate the matching
+checkout and update that same PR with actual results. Explicit strict/ready,
+validation-only, manual/all-UI, unit-test-only and per-job validation choices
+remain authoritative; required gates and merge policy are never waived.
 
 PR team approval: after authorized PR creation or update, read
 pullRequests.reviewTeams from the reviewed repository profile. For GitHub use
@@ -455,6 +541,11 @@ reuse its existing PR and preserve uncommitted work. A changed fingerprint
 requires a new review. Folder permissions and human authentication remain
 separate approvals. The dashboard cannot inject questions into an idle,
 unconnected Copilot session; read status when the user requests progress.
+For a live `runtime-question` with `responseChannel=conversation`, send the
+user's exact answer or offered choice as `details`, using `action=answer` and
+that question's `requestId`. Continue the same executor, not a retry or new job.
+Native permissions and private questions remain dashboard-only; neither an
+answer nor recovery guidance grants access or establishes passed validation.
 
 Honor user-selected scoped iteration: full regression is explicitly deferred,
 not passed; for strict ready publication, PR readiness stays blocked. Draft publication

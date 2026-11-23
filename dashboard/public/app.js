@@ -157,6 +157,7 @@ const watcherStatus = document.querySelector("#watcher-status");
 const watcherAttempts = document.querySelector("#watcher-attempts");
 const expandedWatcherAttempts = new Set();
 let watcherHistorySignature = "";
+let pendingWatcherHandoff = null;
 const bugResultsPanel = document.querySelector("#bug-results-panel");
 const bugResultsElement = document.querySelector("#bug-results");
 const agentActivityPanel = document.querySelector("#agent-activity-panel");
@@ -180,6 +181,7 @@ const allowDevWritesInput = document.querySelector("#allow-dev-writes");
 let postUiBlocked = true;
 let postRuntimeAvailable = false;
 let postCheckboxEnvironment = null;
+let postCheckboxScope = null;
 let repositoryReadiness = null;
 
 function updatePostRequestsOption() {
@@ -189,14 +191,30 @@ function updatePostRequestsOption() {
   const available = postRuntimeAvailable && !postUiBlocked && ["dev", "sit", "uat", "ppe"].includes(environment) &&
     !document.querySelector('[name="testMutationMode"]').value;
   const key = available ? environment : "";
-  if (postCheckboxEnvironment !== key) {
+  const persistentDevApi = environment === "dev" && repositoryReadiness?.devApiConfigured === true &&
+    !document.querySelector('[name="testMutationMode"]').value;
+  const devSetupError = environment === "dev" ? repositoryReadiness?.devApiSetupError : null;
+  const devPolicy = document.querySelector("#dev-api-policy");
+  devPolicy.hidden = !persistentDevApi && !devSetupError;
+  devPolicy.textContent = devSetupError ? `DEV API setup needs correction in repository settings: ${devSetupError}`
+    : "DEV API access is configured for this repository. Real reads and writes are enabled without per-job permission prompts; normal application sign-in is still required.";
+  allowDevWritesInput.closest("label").hidden = persistentDevApi;
+  allowPostRequestsInput.closest("label").hidden = persistentDevApi;
+  const scope = repositoryReadiness?.postBaseEnvironments?.includes(environment) ? "base" : "endpoint";
+  if (postCheckboxEnvironment !== key || postCheckboxScope !== scope) {
     allowPostRequestsInput.checked = false;
+    postCheckboxScope = scope;
+  }
+  if (postCheckboxEnvironment !== key) {
     allowDevWritesInput.checked = key === "ppe" && repositoryReadiness?.ppeWriteConfigured === true;
     postCheckboxEnvironment = key;
   }
   allowDevWritesInput.disabled = !available || !["dev", "ppe"].includes(environment);
   document.querySelector("#origin-writes-label").textContent =
     `Allow all ${environment === "ppe" ? "PPE" : "DEV"} API writes for this job`;
+  document.querySelector("#post-writes-label").textContent = scope === "base"
+    ? `Allow all ${environment.toUpperCase()} POST requests, including writes, for this job`
+    : "Allow POST writes for this job in the selected environment";
   allowPostRequestsInput.disabled = !available || allowDevWritesInput.checked;
   updateIntegrationOptions();
 }
@@ -641,7 +659,7 @@ function setRuntimeBusy(busy) {
     element.disabled = busy;
   });
   if (composerQuestionSelection) {
-    startButton.disabled = busy;
+    startButton.disabled = busy || !composerQuestionSelection.allowFreeform;
   }
 }
 
@@ -786,7 +804,8 @@ async function respondToRuntime(action, choice, scope, answer = runtimeAnswer.va
 
 function renderComposerQuestion(job, isActive) {
   const pending = isActive ? job?.runtimeRequests?.[0] : null;
-  const question = pending?.kind === "question" && pending.allowFreeform ? pending : null;
+  const question = pending?.kind === "question" ? pending : null;
+  const freeform = question?.allowFreeform === true;
   const key = question ? `${dashboardInstanceId}:${job.id}:${question.id}` : null;
   if (composerQuestionSelection && composerQuestionSelection.key !== key && requestInput.value) {
     requestInput.value = "";
@@ -795,20 +814,29 @@ function renderComposerQuestion(job, isActive) {
     composerReplyResult.textContent = "The question context changed. Its unsent reply was cleared; review the current question before answering.";
   }
   composerQuestionSelection = question ? {
-    key, instanceId: dashboardInstanceId, jobId: job.id, requestId: question.id
+    key, instanceId: dashboardInstanceId, jobId: job.id, requestId: question.id,
+    allowFreeform: freeform
   } : null;
   composerQuestion.hidden = !question;
-  composerQuestion.textContent = question?.details ?? "";
+  composerQuestion.textContent = question
+    ? `${question.details}${freeform ? "" : " Choose a next step in the response panel above; a new message does not answer this question."}`
+    : "";
   document.querySelector('label[for="request"]').textContent = question
-    ? "Reply to Copilot's question" : "Bug or required enhancement";
+    ? freeform ? "Reply to Copilot's question" : "Choose a next step above"
+    : "Bug or required enhancement";
   requestInput.maxLength = question ? 4000 : 10000;
   requestInput.placeholder = question
-    ? "Reply to the question above. Never enter passwords, tokens or MFA codes."
+    ? freeform ? "Reply to the question above. Never enter passwords, tokens or MFA codes."
+      : "Use an offered answer above, or New conversation for a separate request."
     : "Describe what you want to fix or check.";
-  if (question) {
+  if (freeform) {
     document.querySelector(".composer-heading span").textContent = "Reply to current job";
     startButton.textContent = "Send reply";
     startButton.disabled = runtimeBusy;
+  } else if (question) {
+    document.querySelector(".composer-heading span").textContent = "Choose next step above";
+    startButton.textContent = "Choose next step above";
+    startButton.disabled = true;
   }
 }
 
@@ -824,7 +852,9 @@ function renderRuntimeRequest(job, isActive) {
   runtimeGuidance.textContent = pending.perAction === true
     ? "This is a real non-production POST action without current job-scoped write approval. Review its environment, exact destination and complete payload. It requires single-use confirmation; Allow all does not approve it."
     : pending.kind === "permission" && !pending.canApprove
-      ? "This operation cannot be approved here. Read the specific reasons below. Safe recovery denies the operation; it never overrides a restriction or replays hidden details."
+      ? pending.automaticRecoveryAttempted === true
+        ? "Automatic safe recovery was already attempted once. Resolve the remaining prerequisite using the guidance below. Any further recovery needs your explicit decision; no permission has been granted."
+        : "This operation cannot be approved here. Read the specific reasons and next steps below. Deny rejects only this operation; it does not stop the job or pass a check. Safe recovery requests existing reviewed helpers without overriding restrictions or replaying hidden details."
     : pending.kind === "question"
     ? "This is a question, not a tool permission. Choose an answer below or reply from Message FixLab when freeform input is available. Allow all never supplies answers for you."
     : job.toolApprovalMode === "allow-all"
@@ -1259,6 +1289,8 @@ document.querySelectorAll("[data-open]").forEach((button) => {
   button.addEventListener("click", () => openWorkspaceSection(button.dataset.open));
 });
 document.querySelector("#new-conversation").addEventListener("click", () => {
+  pendingWatcherHandoff = null;
+  document.querySelector("#watcher-handoff-notice").hidden = true;
   draftingConversation = true;
   renderJob(null, activeJob);
   openWorkspaceSection("new-job-panel");
@@ -1343,12 +1375,17 @@ function renderConversation(job, isActive) {
     job?.status === "blocked" || job?.status === "failed")));
   document.querySelector("#conversation-state").classList.toggle("waiting", waiting);
   needsResponse.hidden = !waiting;
+  needsResponse.textContent = pending?.kind === "question"
+    ? "Choose next step"
+    : pending?.kind === "permission" ? "Review permission" : "Review and respond";
   if (!job) {
     conversationTitle.textContent = "Ready when you are";
     conversationDetail.textContent = "Describe an outcome. Run options control the mode and environment; nothing runs until you send it.";
   } else if (pending) {
     conversationTitle.textContent = pending.kind === "permission" ? "Waiting for your permission" : "Waiting for your answer";
-    conversationDetail.textContent = pending.title;
+    conversationDetail.textContent = pending.kind === "question"
+      ? pending.details
+      : `${pending.title}. Next step: review the exact request below, then allow or deny it. No execution is progressing while this decision is pending.`;
   } else if (job.permissionRequest) {
     conversationTitle.textContent = "Access review required";
     conversationDetail.textContent = "The executor is paused. Review the exact folder scope; no access has been granted.";
@@ -1479,6 +1516,7 @@ function renderReadiness(readiness) {
     form.querySelector('[name="mode"]:checked')?.value === "fix-and-validate" &&
     form.querySelector('[name="deferValidation"]').checked;
   const ready = readiness.repositoryReady && (readiness.profileReady || draftOnly);
+  const authenticationPending = readiness.configurationReady === true && !readiness.profileReady;
   const apiOnly = readiness.playwrightMode === "api";
   const unitTestsOnly = readiness.unitTestsOnly === true;
   const noUi = apiOnly || unitTestsOnly;
@@ -1508,12 +1546,16 @@ function renderReadiness(readiness) {
   if (apiOnly && mutationSelect?.value === "intercepted") {
     mutationSelect.value = "";
   }
-  document.querySelector("#welcome-add-repository").hidden = ready;
-  document.querySelector("#welcome-guidance").textContent = ready
+  document.querySelector("#welcome-add-repository").hidden = ready || authenticationPending;
+  document.querySelector("#welcome-guidance").textContent = authenticationPending
+    ? "Use Connect Playwright to complete the configured sign-in before live validation."
+    : ready
     ? `Describe a bug, change, or ${unitTestsOnly ? "local unit-test" : apiOnly ? "API" : "browser"} check.`
     : "Set up a repository to get started.";
   readinessElement.className = `readiness ${ready ? "ready" : "blocked"}`;
-  readinessElement.textContent = ready
+  readinessElement.textContent = authenticationPending
+    ? ready ? "Ready for draft work; sign-in required for live validation" : "Sign-in required for live validation"
+    : ready
     ? "Ready"
     : `Not ready: ${readiness.error}`;
   startButton.disabled = !ready;
@@ -1609,6 +1651,14 @@ function inferActiveStageFromLogs(logs = []) {
 }
 
 function renderJob(job, currentActiveJob = job) {
+  if (job && job.id === currentActiveJob?.id && job.workspace?.jobId === job.id && job.workspace.url) {
+    const workspace = new URL(job.workspace.url);
+    if (workspace.protocol === "http:" && workspace.hostname === "127.0.0.1" &&
+        workspace.origin !== window.location.origin) {
+      window.location.assign(workspace.origin);
+      return;
+    }
+  }
   summaryButton.disabled = !job;
   if (summaryDialog.open) {renderSummary();}
   currentJobFullscreen.disabled = !currentActiveJob;
@@ -2330,7 +2380,9 @@ function renderQueue(currentJob, queue = [], held = [], history = []) {
       button.classList.add("selected");
     }
     const summary = document.createElement("strong");
-    summary.textContent = `${label} · ${job.status} · ${job.requestType}`;
+    summary.textContent = `${label} · ${job.status} · ${job.requestType}${
+      job.model ? ` · ${job.model}` : ""
+    }`;
     const details = document.createElement("span");
     details.className = "job-request";
     details.textContent =
@@ -2562,11 +2614,15 @@ function loadedScreenshotFile(screenshot) {
 
 document.querySelectorAll("input[name='intakeSource']").forEach((input) => {
   input.addEventListener("change", () => {
+    pendingWatcherHandoff = null;
+    document.querySelector("#watcher-handoff-notice").hidden = true;
     azureDevOpsIntake.hidden = selectedIntakeSource() !== "azure-devops";
   });
 });
 
 loadWorkItemButton.addEventListener("click", async () => {
+  pendingWatcherHandoff = null;
+  document.querySelector("#watcher-handoff-notice").hidden = true;
   formError.textContent = "";
   loadWorkItemButton.disabled = true;
   try {
@@ -2717,7 +2773,10 @@ async function refreshWatcherHistory() {
     };
     const reported = body.updatedAt ? new Date(body.updatedAt).toLocaleString() : "time not recorded";
     watcherStatus.textContent = labels[body.status] ??
-      `Last reported: ${body.status} at ${reported}. Scan interval: ${body.pollSeconds} seconds. ${body.message || ""}`;
+      `Last reported: ${body.status} at ${reported}. Scan interval: ${body.pollSeconds} seconds. New discovery: assigned to signed-in Azure DevOps user (@Me). ${body.message || ""}`;
+    if (body.titleWarning) { watcherStatus.textContent += ` ${body.titleWarning}`; }
+    document.querySelector("#watcher-grid").hidden = body.attempts.length === 0;
+    document.querySelector("#watcher-empty").hidden = body.attempts.length > 0;
     watcherAttempts.replaceChildren();
     const link = (text, url) => {
       if (!/^https:\/\/dev\.azure\.com\//u.test(url)) { throw new Error("Recorded watcher link is invalid."); }
@@ -2729,7 +2788,14 @@ async function refreshWatcherHistory() {
       return element;
     };
     for (const attempt of body.attempts) {
-      const row = document.createElement("li");
+      const row = document.createElement("tr");
+      const workItem = document.createElement("td");
+      workItem.append(link(String(attempt.workItemId), attempt.workItemUrl));
+      const titleCell = document.createElement("td");
+      const title = document.createElement("span");
+      title.className = "watcher-title";
+      title.textContent = attempt.title || "Title unavailable";
+      titleCell.append(title);
       const detail = document.createElement("details");
       detail.open = expandedWatcherAttempts.has(attempt.id);
       detail.addEventListener("toggle", () => {
@@ -2738,15 +2804,21 @@ async function refreshWatcherHistory() {
       });
       const heading = document.createElement("summary");
       let status = "Investigation running (last recorded)";
+      if (attempt.status === "snapshot-pending") { status = "Preparing isolated code snapshot (last recorded)"; }
       if (attempt.status === "feedback-pending") { status = "Result ready; feedback pending"; }
       if (attempt.status === "complete") {
         status = `Feedback recorded - ${attempt.outcome || "validation status unknown"}`;
+      } else if (attempt.status === "reconciled") {
+        status = `Reviewed recovery - ${attempt.recovery.at(-1)?.decision || "unknown"}`;
       } else if (body.status === "blocked" || body.status === "stopped") {
         status = `Review required - last recorded ${attempt.status}`;
       }
-      heading.textContent = `Work item ${attempt.workItemId} - ${status}`;
+      const statusCell = document.createElement("td");
+      statusCell.textContent = status;
+      heading.textContent = "Details";
+      heading.setAttribute("aria-label", `Details for work item ${attempt.workItemId}`);
       const links = document.createElement("p");
-      links.append(link("Open work item and Discussion", attempt.workItemUrl));
+      links.append(link(`ADO ${attempt.workItemId}${attempt.title ? ` - ${attempt.title}` : ""} (work item and Discussion)`, attempt.workItemUrl));
       if (attempt.pullRequestUrl) {
         links.append(" | ", link("Recorded PR", attempt.pullRequestUrl));
       }
@@ -2757,12 +2829,197 @@ async function refreshWatcherHistory() {
         ? attempt.summary || "No final summary recorded yet."
         : "Detailed history was not recorded or has expired. See the work item's Discussion.";
       detail.append(heading, links, timing, summary);
+      if (attempt.status === "complete" && attempt.historyAvailable && attempt.outcome) {
+        const prepare = document.createElement("button");
+        prepare.type = "button";
+        prepare.textContent = "Continue in FixLab";
+        const panel = document.createElement("div");
+        prepare.addEventListener("click", async () => {
+          prepare.disabled = true;
+          panel.textContent = "Refreshing the ticket, existing PRs and recorded evidence...";
+          const instance = dashboardInstanceId;
+          try {
+            const review = await fetchJson("/api/ticket-automation/handoff-review", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ attemptId: attempt.id })
+            });
+            panel.replaceChildren();
+            for (const text of [
+              `${review.title}. Environment: ${review.environment}; target: ${review.targetBranch}.`,
+              review.message,
+              "Continue only the approved repository work. Cross-team dependencies remain explicit blockers; watcher tool/data permissions do not transfer."
+            ]) {
+              const description = document.createElement("p");
+              description.textContent = text;
+              panel.append(description);
+            }
+            for (const pr of review.pullRequests) {
+              const description = document.createElement("p");
+              description.append(link(`Related PR ${pr.id}: ${pr.status}`, pr.webUrl));
+              panel.append(description);
+            }
+            const confirmation = document.createElement("input");
+            confirmation.type = "checkbox";
+            const label = document.createElement("label");
+            label.append(confirmation, " I reviewed the findings, dependencies and implementation scope.");
+            const compose = document.createElement("button");
+            compose.type = "button";
+            compose.textContent = "Prepare local job";
+            compose.disabled = true;
+            confirmation.addEventListener("change", () => { compose.disabled = !confirmation.checked; });
+            compose.addEventListener("click", () => {
+              if (instance !== dashboardInstanceId) {
+                panel.textContent = "The dashboard instance changed. Review the attempt again.";
+                return;
+              }
+              const environment = [...targetEnvironmentSelect.options].find(option =>
+                option.value.toLowerCase() === review.environment.toLowerCase());
+              if (!environment) {
+                panel.textContent = "The recorded environment is unavailable. Review the profile first.";
+                return;
+              }
+              if ((requestInput.value || selectedScreenshots.length) &&
+                  !window.confirm("Replace the current draft request and attached screenshots with this reviewed handoff? Existing jobs remain unchanged.")) { return; }
+              draftingConversation = true;
+              renderJob(null, activeJob);
+              loadedWorkItems = review.jobInput.workItems;
+              form.elements.intakeSource.value = "azure-devops";
+              azureDevOpsIntake.hidden = false;
+              form.querySelector('[name="mode"][value="fix-and-validate"]').checked = true;
+              form.elements.requestType.value = review.jobInput.requestType;
+              targetEnvironmentSelect.value = environment.value;
+              updatePostRequestsOption();
+              for (const name of ["allowAllTools", "deferValidation", "skipLiveTests", "useDeployedBackend"]) {
+                form.querySelector(`[name="${name}"]`).checked = false;
+              }
+              allowPostRequestsInput.checked = false;
+              allowDevWritesInput.checked = false;
+              selectedScreenshots = [];
+              renderScreenshots();
+              renderWorkItems(loadedWorkItems);
+              requestInput.value = review.jobInput.request;
+              pendingWatcherHandoff = {
+                attemptId: review.attemptId, reviewToken: review.reviewToken,
+                instanceId: instance, confirmed: true
+              };
+              const notice = document.querySelector("#watcher-handoff-notice");
+              notice.textContent = `Prepared from watcher ticket ${review.workItemId}. Review scope and run options, then submit. No job has started.`;
+              notice.hidden = false;
+              openWorkspaceSection("new-job-panel");
+              requestInput.focus();
+            });
+            panel.append(label, compose);
+          } catch (error) {
+            panel.textContent = error.message;
+          } finally {
+            prepare.disabled = false;
+          }
+        });
+        detail.append(prepare, panel);
+      }
+      for (const record of attempt.recovery ?? []) {
+        const audit = document.createElement("p");
+        audit.textContent = `Recovery decision: ${record.decision} at ${new Date(record.reviewedAt).toLocaleString()}.`;
+        detail.append(audit);
+      }
+      if (["running", "snapshot-pending"].includes(attempt.status)) {
+        const reviewButton = document.createElement("button");
+        reviewButton.type = "button";
+        reviewButton.textContent = "Review interrupted attempt";
+        const panel = document.createElement("div");
+        reviewButton.addEventListener("click", async () => {
+          reviewButton.disabled = true;
+          panel.textContent = "Checking ticket, linked PRs, local branches and executor ownership...";
+          try {
+            const review = await fetchJson("/api/ticket-automation/review", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ workItemId: attempt.workItemId })
+            });
+            panel.replaceChildren();
+            for (const text of [
+              `${review.title}. Environment: ${review.environment}; target: ${review.targetBranch}.`,
+              review.ownership,
+              review.ticketChanged ? "The ticket changed since this attempt. Acceptance is unavailable." : "The ticket still matches this attempt.",
+              review.result ? `Stored result (${review.result.outcome}): ${review.result.summary}` : "No final result was retained. Missing evidence cannot be accepted.",
+              `Matching local branches: ${review.branches.join("; ") || "none found"}.`,
+              review.limitations, review.acceptMessage, review.retryMessage
+            ]) {
+              const description = document.createElement("p");
+              description.textContent = text;
+              panel.append(description);
+            }
+            for (const pr of review.pullRequests) {
+              const description = document.createElement("p");
+              description.append(link(`Linked PR ${pr.id}: ${pr.status}${pr.isDraft ? " (draft)" : ""}`, pr.webUrl));
+              panel.append(description);
+            }
+            const label = document.createElement("label");
+            const confirmation = document.createElement("input");
+            confirmation.type = "checkbox";
+            label.append(confirmation, " I reviewed the ticket, existing work and limitations.");
+            panel.append(label);
+            for (const [decision, title, allowed] of [
+              ["accept", "Accept recorded result", review.canAccept],
+              ["retry", "Authorize safe retry", review.canRetry],
+              ["leave", "Leave blocked", review.executorStopped]
+            ]) {
+              const action = document.createElement("button");
+              action.type = "button";
+              action.textContent = title;
+              action.disabled = true;
+              confirmation.addEventListener("change", () => { action.disabled = !confirmation.checked || !allowed; });
+              action.addEventListener("click", async () => {
+                for (const button of panel.querySelectorAll("button")) { button.disabled = true; }
+                confirmation.disabled = true;
+                try {
+                  const result = await fetchJson("/api/ticket-automation/reconcile", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      workItemId: attempt.workItemId, reviewToken: review.reviewToken, decision, confirmed: true
+                    })
+                  });
+                  panel.textContent = result.message;
+                  watcherHistorySignature = "";
+                  await refreshWatcherHistory();
+                } catch (error) {
+                  panel.textContent = `${error.message} Review the attempt again before deciding.`;
+                  reviewButton.disabled = false;
+                }
+              });
+              panel.append(action);
+            }
+          } catch (error) {
+            panel.textContent = `${error.message} Nothing was reconciled.`;
+          } finally {
+            reviewButton.disabled = false;
+          }
+        });
+        detail.append(reviewButton, panel);
+      }
       if (attempt.confirmedCause) {
         for (const [label, field] of [["Confirmed cause (agent-reported)", "cause"], ["Recorded evidence", "evidence"], ["Next steps", "nextSteps"]]) {
           const description = document.createElement("p");
           description.textContent = `${label}: ${attempt.confirmedCause[field]}`;
           detail.append(description);
         }
+      }
+      if (attempt.report) {
+        const report = document.createElement("details");
+        const title = document.createElement("summary");
+        title.textContent = "Detailed investigation report";
+        report.append(title);
+        for (const [field, values] of Object.entries(attempt.report)) {
+          const heading = document.createElement("h4");
+          heading.textContent = field.replace(/([a-z])([A-Z])/gu, "$1 $2");
+          const list = document.createElement("ul");
+          for (const value of Array.isArray(values) ? values : [values]) {
+            const item = document.createElement("li");
+            item.textContent = value;
+            list.append(item);
+          }
+          report.append(heading, list);
+        }
+        detail.append(report);
       }
       if (attempt.resolution) {
         const resolution = document.createElement("p");
@@ -2793,7 +3050,8 @@ async function refreshWatcherHistory() {
         omitted.textContent = `${attempt.omittedActivity} earlier activity update(s) omitted by the history limit.`;
         detail.append(omitted);
       }
-      row.append(detail);
+      titleCell.append(detail);
+      row.append(workItem, titleCell, statusCell);
       watcherAttempts.append(row);
     }
   } catch (error) {
@@ -2816,6 +3074,9 @@ form.addEventListener("submit", async (event) => {
           activeJob?.id !== replySelection.jobId) {
         throw new Error("The question changed. Review the current request before replying.");
       }
+      if (!replySelection.allowFreeform) {
+        throw new Error("Choose a next step from the offered answers above, or use New conversation for a separate request.");
+      }
       if (selectedScreenshots.length) {
         throw new Error("Question replies support text only. Remove the images before replying, or choose New conversation to start a separate job.");
       }
@@ -2829,6 +3090,8 @@ form.addEventListener("submit", async (event) => {
       return;
     }
     const data = new FormData(form);
+    const reviewedPostEnvironment = postCheckboxEnvironment;
+    const reviewedPostScope = postCheckboxScope;
     const allowAllTools = data.get("allowAllTools") === "on";
     if (allowAllTools && !window.confirm(
       "Allow all reviewable tool commands for this run? Commands can access or change files and contact services without individual approval prompts. This is privileged execution, not a sandbox. Organization policy, sensitive/escalated requests, sign-in, publication consent and required checks remain separate. Retries and later jobs require a new opt-in."
@@ -2843,6 +3106,11 @@ form.addEventListener("submit", async (event) => {
     const screenshots = await Promise.all(
       validateSelectedScreenshots().map(fileBase64)
     );
+    if (data.get("allowPostRequests") === "on" &&
+        (reviewedPostEnvironment !== postCheckboxEnvironment || reviewedPostScope !== postCheckboxScope ||
+          allowPostRequestsInput.disabled || !allowPostRequestsInput.checked)) {
+      throw new Error("The POST approval scope changed. Review the current environment and approve it again.");
+    }
     const body = await fetchJson("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2867,6 +3135,7 @@ form.addEventListener("submit", async (event) => {
         testMutationMode: data.get("testMutationMode") ?? "",
         allowPostRequests: !allowPostRequestsInput.disabled && data.get("allowPostRequests") === "on",
         postWriteApprovalConfirmed: !allowPostRequestsInput.disabled && data.get("allowPostRequests") === "on",
+        postBaseApprovalConfirmed: !allowPostRequestsInput.disabled && reviewedPostScope === "base" && data.get("allowPostRequests") === "on",
         allowDevWrites: !allowDevWritesInput.disabled && postCheckboxEnvironment === "dev" && data.get("allowDevWrites") === "on",
         devWriteApprovalConfirmed: !allowDevWritesInput.disabled && postCheckboxEnvironment === "dev" && data.get("allowDevWrites") === "on",
         allowPpeWrites: !allowDevWritesInput.disabled && postCheckboxEnvironment === "ppe" && data.get("allowDevWrites") === "on",
@@ -2877,11 +3146,14 @@ form.addEventListener("submit", async (event) => {
         manualLocalhostTest:
           data.get("manualLocalhostTest") === "on",
         intakeSource,
+        ...(pendingWatcherHandoff ? { watcherHandoff: pendingWatcherHandoff } : {}),
         workItems: intakeSource === "azure-devops" ? loadedWorkItems : [],
         screenshots
       })
     });
     requestInput.value = "";
+    pendingWatcherHandoff = null;
+    document.querySelector("#watcher-handoff-notice").hidden = true;
     form.querySelector('[name="allowAllTools"]').checked = false;
     for (const name of ["deferValidation", "skipLiveTests", "useDeployedBackend"]) {
       form.querySelector(`[name="${name}"]`).checked = false;
@@ -2908,7 +3180,7 @@ form.addEventListener("submit", async (event) => {
       composerReplyResult.classList.add("error");
       composerReplyResult.hidden = false;
     }
-    startButton.disabled = false;
+    startButton.disabled = composerQuestionSelection?.allowFreeform === false;
   }
 });
 
@@ -3223,8 +3495,8 @@ async function retryLiveTest() {
         action: "retry",
         details:
           activeJob?.mode === "playwright-only"
-            ? "Retry only the browser-validation prerequisite and focused Playwright journey using the retained same-job script, selected environment and existing authentication. Do not retry an unchanged profile lock, copy browser state, delete a script still needed for continuation, change product source, or perform PR work. Report unavailable browser prerequisites as blocked and non-browser stages as skipped."
-            : "Reuse the repository-profile-defined browser authentication and all completed diagnosis, fix, review, and local validation evidence. Rerun only the blocked Playwright live-test gate using the profile-defined browser and test command, save at least one non-sensitive screenshot under the profile-defined working directory's test-results folder, emit the terminal live-test result, and continue to pull-request creation. Do not skip the live-test or PR stage."
+            ? "Retry only the browser-validation prerequisite and focused Playwright journey using the retained same-job script, selected environment and existing authentication. Default to unmasked full-page portal screenshots using page.screenshot({ path, fullPage: true }); do not ask again for default screenshot capture. Preserve explicit privacy rules and exclude credentials, sign-in/MFA screens and private/customer data. Do not retry an unchanged profile lock, copy browser state, delete a script still needed for continuation, change product source, or perform PR work. Report unavailable browser prerequisites as blocked and non-browser stages as skipped."
+            : "Reuse the repository-profile-defined browser authentication and all completed diagnosis, fix, review, and local validation evidence. Rerun only the blocked Playwright live-test gate using the profile-defined browser and test command, save at least one non-sensitive screenshot. Default to unmasked full-page portal screenshots using page.screenshot({ path, fullPage: true }) in the configured test-results folder; do not ask again for default screenshot capture. Preserve explicit privacy rules and exclude credentials, sign-in/MFA screens and private/customer data. Emit the terminal live-test result and continue to pull-request creation. Do not skip the live-test or PR stage."
       })
     });
     jobInputMessage.textContent =

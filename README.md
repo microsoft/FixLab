@@ -40,6 +40,12 @@ use [installation.md](installation.md) and the
 Setup still requires reviewed approvals; installing FixLab alone does not
 establish application readiness or grant permissions.
 
+For an existing dedicated runner, `fixlab onboard C:\source\application
+--reuse-setup --runtime copilot` reviews reuse in one checkout with a branch per
+job. Add `--yes` after review; add `--authenticate` for fresh proof of existing
+browser sign-in. Dependencies and private state stay in place, not copied.
+See [shared setup](docs/repository-onboarding.md#reusing-one-checkout-for-sequential-jobs).
+
 ## What you can do
 
 | Workflow | Outcome |
@@ -47,16 +53,33 @@ establish application readiness or grant permissions.
 | Fix a bug or small enhancement | Scoped changes, validation evidence, and an authorized pull request |
 | Validate an existing change or PR | Findings and evidence without source or PR changes |
 | Run focused Playwright validation | Browser or configured API assertions without an implementation job |
-| Watch explicitly tagged ADO tickets (Agency) | Reviewed local polling produces a draft PR or feedback on the existing ticket's Discussion |
+| Watch explicitly tagged ADO tickets assigned to you (Agency or Copilot) | Reviewed local polling produces a draft PR or feedback on the existing ticket's Discussion |
 
 The optional [tagged-ticket watcher](docs/commands.md#tagged-ticket-watcher)
 starts only after a separate scope review and explicit session approval.
 Onboarding supplies defaults, not automatic activation. IcM requires a linked
 ADO item; no direct IcM listener is installed.
-Use **Watcher jobs** in the existing dashboard for read-only attempt status,
-recorded activity, check outcomes and work-item/PR links. Older attempts may
+Assignment follows the signed-in Azure DevOps identity (`@Me`), not a hard-coded
+username, Windows account or GitHub login. Unassigned and other users' items
+are excluded; the tag and reviewed area filters still apply.
+Use **Watcher jobs** in the existing dashboard for attempt status,
+recorded activity, check outcomes and work-item/PR links. **Review interrupted
+attempt** offers separately confirmed recovery without editing private files.
+Older attempts may
 have basic history only. Optional `--resolve-on-completion` hands off a verified
 draft PR or confirmed cause as `Resolved`; this is not merge or deployment.
+
+Completed investigations offer **Continue in FixLab**: review the refreshed
+ticket and related PRs, confirm the scope, then prepare and submit a normal
+local job. Existing work is preserved; tool/data grants do not transfer.
+Ticket comments use a moderate high-level summary with changes, actual checks
+and a next action; expandable reports retain the technical detail.
+Optional [incident evidence helpers](docs/commands.md#incident-evidence-helpers)
+make approved, environment-bound Cosmos/trace tooling discoverable without
+automatically connecting, copying credentials or granting production access.
+Separately reviewed production incident readers require exact ticket/correlation
+bindings, approved helper hashes and `watch --allow-production-evidence`.
+They do not enable production application testing or business-data writes.
 
 ## Architecture and benefits
 
@@ -158,6 +181,41 @@ fixlab chat C:\source\application --port 4317 --runtime copilot
 Closing a browser tab or exiting Copilot does not stop a detached dashboard.
 No reinstall or file deletion is needed. Restarting preserves saved jobs;
 submit a new request for a fresh job.
+
+## Run the watcher worker
+
+Use an onboarded clone with reviewed Azure DevOps area paths and target branch.
+Preview the scope first; this command prints a plan without starting work:
+
+```powershell
+fixlab watch "C:\source\application-watcher" --runtime copilot --environment dev
+```
+
+After reviewing the plan, explicitly start the worker:
+
+```powershell
+fixlab watch "C:\source\application-watcher" --runtime copilot --environment dev --yes --allow-all-tools
+```
+
+Keep the terminal open. Press **Ctrl+C in that terminal** to stop the worker.
+Run only one watcher for the same ticket scope, including across separate clones.
+Before moving to another clone, stop the old watcher and verify its history
+migration; a fresh clone has a separate journal and can reprocess old tickets.
+
+To monitor a dedicated watcher clone, open another terminal and start a dashboard
+against that same clone on a free port:
+
+```powershell
+fixlab dashboard "C:\source\application-watcher" --runtime copilot --port 4318
+```
+
+Previously reviewed production Cosmos/trace readers additionally require
+`--allow-production-evidence` on the watcher command. Ordinary DEV watching
+does not require that flag. See the [watcher command reference](docs/commands.md#tagged-ticket-watcher)
+and [production reader requirements](docs/commands.md#incident-evidence-helpers).
+For another developer's setup, use the
+[optional Cosmos and trace setup instructions](docs/FIXLAB-SETUP.md#optional-cosmos-and-trace-evidence-separate-approval);
+installation does not copy local helpers, configuration, credentials or access.
 
 ## Documentation
 

@@ -634,16 +634,19 @@ function createCollector(path) {
   return { write, finish };
 }
 
-function cacheFingerprint(options, state) {
+function cacheFingerprint(options, state, environment) {
   return sha256(
     JSON.stringify({
-      version: 3,
+      version: 4,
       platform: process.platform,
       command: options.command,
       commandArgs: options.commandArgs,
       cwd: relative(options.repository, options.cwd),
       stage: options.stage,
       timeoutSeconds: options.timeoutSeconds,
+      executionContext: Object.fromEntries(["FIXLAB_HELPER_ROOT", "FIXLAB_REPOSITORY",
+        "FIXLAB_DEV_API_ENVIRONMENT", "FIXLAB_DEV_API_MUTATION_MODE",
+        "FIXLAB_DEV_API_SELECTED_MUTATION_MODE"].map(key => [key, environment[key] ?? ""])),
       state
     })
   );
@@ -767,7 +770,9 @@ export async function executeStructuredCommand(options, io = {}) {
   pruneEvidence(evidenceRoot, now());
 
   const state = io.repositoryState ?? repositoryState(options.repository);
-  const fingerprint = cacheFingerprint(options, state);
+  const environment = { ...process.env, ...io.environment };
+  delete environment.NODE_TEST_CONTEXT;
+  const fingerprint = cacheFingerprint(options, state, environment);
   const cacheDirectory = join(evidenceRoot, "cache");
   const cachePath = join(cacheDirectory, `${fingerprint}.json`);
   const reusable =
@@ -938,8 +943,6 @@ export async function executeStructuredCommand(options, io = {}) {
         }
       }
     };
-    const environment = { ...process.env };
-    delete environment.NODE_TEST_CONTEXT;
     const spawnOptions = {
       cwd: options.cwd,
       env: environment,

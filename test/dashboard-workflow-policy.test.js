@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, POST_PR_LIVE_REVIEW_GUIDANCE, WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE, USER_FRIENDLY_UPDATE_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
+import { API_ONLY_PLAYWRIGHT_GUIDANCE, DEV_WRITE_GUIDANCE, PPE_POST_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, allowsUnverifiedDraft, allowsPostPrLiveReview, UNIT_TEST_ONLY_GUIDANCE, PR_LEARNING_GUIDANCE, POST_PR_LIVE_REVIEW_GUIDANCE, AUTOMATIC_LIVE_TEST_GUIDANCE, WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE, USER_FRIENDLY_UPDATE_GUIDANCE, READ_ONLY_POST_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, configuredWorkflow, efficientWorkflowGuidance } from "../dashboard/workflow-policy.js";
 import { ValidationSession, selectedValidationGates, validationGates } from "../dashboard/validation-gates.js";
 import { buildJobPrompt, FIXLAB_STAGES } from "../dashboard/server.js";
 import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
@@ -74,7 +74,9 @@ test("verified read-only POST searches use the default browser policy independen
         "Verified read-only POST searches:", "exact approved environment, origin and path",
         "genuine returned records", "policy blocker, not backend unavailability",
         "Do not silently substitute synthetic data", "Read-only jobs must not edit configuration",
-        "synthetic-only, API-only, unit-only or production policy"
+        "synthetic-only, API-only, unit-only or production policy",
+        "fixlab setup-queries REPOSITORY --environment ENV --runtime RUNTIME",
+        "separate plan-first setup operation", "Cover the full verified query scope"
       ]) {
         assert.ok(prompt.includes(phrase), `${mode}/${allowPostRequests}: ${phrase}`);
       }
@@ -98,11 +100,13 @@ test("verified query guidance stays aligned without expanding interactive CLI ar
     assert.ok(source.includes(READ_ONLY_POST_GUIDANCE), path);
   }
   const cli = readFileSync(new URL("../bin/fixlab.js", import.meta.url), "utf8");
-  assert.match(cli, /request && profile\.validation\?\.liveTestsRequired !== false &&\s+profile\.browserAutomation\?\.mode !== "api" \? \[READ_ONLY_POST_GUIDANCE\]/u);
+  assert.match(cli, /request && profile\.validation\?\.liveTestsRequired !== false &&\s+profile\.browserAutomation\?\.mode !== "api" && !testEvidence\.persistentDevApi \? \[READ_ONLY_POST_GUIDANCE\]/u);
+  assert.match(cli, /request && testEvidence\.persistentDevApi \? \[PERSISTENT_DEV_API_GUIDANCE\]/u);
 });
 
 test("DEV write guidance stays native-only and aligned across runtime and initialized agents", () => {
   assert.ok(RUNTIME_RECOVERY_GUIDANCE.includes(DEV_WRITE_GUIDANCE));
+  assert.ok(RUNTIME_RECOVERY_GUIDANCE.includes(PPE_POST_GUIDANCE));
   for (const path of [
     "agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
     "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md",
@@ -110,6 +114,7 @@ test("DEV write guidance stays native-only and aligned across runtime and initia
   ]) {
     const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8").replace(/\s+/gu, " ");
     assert.ok(source.includes(DEV_WRITE_GUIDANCE), path);
+    assert.ok(source.includes(PPE_POST_GUIDANCE), path);
   }
 });
 
@@ -174,7 +179,8 @@ test("PR learning stays aligned across CLI, packaged agents, initialized agents 
     const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8")
       .replace(/`/gu, "").replace(/\s+/gu, " ");
     assert.ok(source.includes(PR_LEARNING_GUIDANCE), `${path} must preserve the complete PR learning contract`);
-    assert.ok(source.includes(POST_PR_LIVE_REVIEW_GUIDANCE), `${path} must preserve the default draft/live-test handoff`);
+    assert.ok(source.includes(POST_PR_LIVE_REVIEW_GUIDANCE), `${path} must preserve the optional draft/live-test handoff`);
+    assert.ok(source.includes(AUTOMATIC_LIVE_TEST_GUIDANCE), `${path} must preserve automatic scoped live validation`);
     assert.ok(source.includes(WORK_ITEM_VALIDATION_EVIDENCE_GUIDANCE), `${path} must preserve conditional, best-effort work-item evidence`);
     assert.ok(source.includes(USER_FRIENDLY_UPDATE_GUIDANCE), `${path} must preserve understandable updates and verified fix links`);
   }
@@ -221,7 +227,7 @@ test("explicit repository unit-only guidance reaches both runtimes without relax
 
 test("efficient workflow is a product default with saved preferences and strict opt-in", () => {
   assert.deepEqual(configuredWorkflow(), {
-    mode: "efficient", unitTestsAfterPr: false, publication: "draft", optionalBuilds: false
+    mode: "efficient", unitTestsAfterPr: false, publication: "draft", optionalBuilds: false, askBeforeLiveTests: false
   });
   assert.equal(configuredWorkflow({ workflow: { mode: "strict" } }).mode, "strict");
   for (const [publication, expected] of [["draft", true], ["ready", false], [undefined, false]]) {
@@ -250,7 +256,7 @@ test("efficient workflow is a product default with saved preferences and strict 
   }
   assert.deepEqual(configuredWorkflow({ workflow: {
     optionalBuilds: true, unitTestsAfterPr: false
-  } }), { mode: "efficient", optionalBuilds: true, publication: "draft", unitTestsAfterPr: false });
+  } }), { mode: "efficient", optionalBuilds: true, publication: "draft", unitTestsAfterPr: false, askBeforeLiveTests: false });
   for (const workflow of ["efficient", [], { mode: "unknown" }, { publication: "unknown" }, { optionalBuilds: "true" }]) {
     assert.throws(() => configuredWorkflow({ workflow }), /workflow must/);
   }
@@ -293,11 +299,49 @@ test("browser-only reproduction is existing-application first without claiming d
   assert.match(prompt, /Do not commit, push, create or update pull requests/);
   assert.match(prompt, /No Save, Submit, Approve, autosave/);
 });
-test("default draft delivery publishes before asking for developer-local live tests and review", () => {
-  const job = { request: "Fix the reported defect.", mode: "fix-and-validate",
-    workflow: configuredWorkflow() };
+test("automatic live testing is the default without authorizing new DEV writes", () => {
+  const workflow = configuredWorkflow();
+  const job = { request: "Fix the reported defect.", mode: "fix-and-validate", workflow };
+  assert.equal(allowsPostPrLiveReview(job), false);
   const prompt = buildJobPrompt(job);
-  assert.match(prompt, /Default draft handoff:/);
+  assert.match(prompt, /Automatic live validation/);
+  assert.doesNotMatch(prompt, /live-test blocked while awaiting the user's live-test choice/);
+  assert.match(prompt, /execute its repository-defined live test in the approved environment/);
+  assert.match(prompt, /Verified read-only POST searches/);
+  assert.match(prompt, /Never infer write access from automatic live testing/);
+  assert.doesNotMatch(efficientWorkflowGuidance(workflow, {
+    automaticLiveTesting: false, postPrLiveReview: false
+  }), /Automatic live validation/);
+  const writable = buildJobPrompt({ ...job, targetEnvironment: "dev",
+    testEvidence: { persistentDevApi: true, mutationMode: "approved-write" } });
+  assert.match(writable, /Persistent DEV API access/);
+  assert.match(writable, /without per-job permission prompts/);
+  assert.doesNotMatch(writable, /Verified read-only POST searches/);
+});
+
+test("prompted live testing is an explicit saved preference", () => {
+  for (const askBeforeLiveTests of [false, true]) {
+    const workflow = configuredWorkflow({ workflow: { askBeforeLiveTests } });
+    assert.equal(workflow.askBeforeLiveTests, askBeforeLiveTests);
+    assert.deepEqual(configuredWorkflow({ workflow }), workflow);
+    const job = { mode: "fix-and-validate", workflow };
+    assert.equal(allowsPostPrLiveReview(job), askBeforeLiveTests);
+    assert.equal(efficientWorkflowGuidance(workflow).includes(POST_PR_LIVE_REVIEW_GUIDANCE), askBeforeLiveTests);
+    for (const restriction of [{ skipLiveTests: true }, { deferValidation: true },
+      { testEvidence: { unitTestsOnly: true } }, { manualLocalhostTest: true }]) {
+      assert.equal(allowsPostPrLiveReview({ ...job, ...restriction }), false);
+    }
+  }
+  for (const askBeforeLiveTests of ["false", 0, null, []]) {
+    assert.throws(() => configuredWorkflow({ workflow: { askBeforeLiveTests } }), /workflow must/);
+  }
+});
+
+test("prompted draft delivery publishes before asking for developer-local live tests and review", () => {
+  const job = { request: "Fix the reported defect.", mode: "fix-and-validate",
+    workflow: configuredWorkflow({ workflow: { askBeforeLiveTests: true } }) };
+  const prompt = buildJobPrompt(job);
+  assert.match(prompt, /Prompted draft handoff:/);
   assert.match(prompt, /verify provider isDraft=true/);
   assert.match(prompt, /ask whether live testing is possible on the developer's machine and request PR review/);
   assert.match(prompt, /Wait for the user's explicit choice/);
@@ -319,7 +363,7 @@ test("default draft delivery publishes before asking for developer-local live te
     { skipLiveTests: true }, { deferValidation: true },
     { testEvidence: { unitTestsOnly: true } }
   ]) {
-    assert.doesNotMatch(buildJobPrompt({ ...job, ...overrides }), /Default draft handoff:/);
+    assert.doesNotMatch(buildJobPrompt({ ...job, ...overrides }), /Prompted draft handoff:/);
   }
 });
 

@@ -8,6 +8,7 @@ import { configuredWorkflow } from "./workflow-policy.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { resolveLinkedApplications } from "./linked-applications.js";
 import { validationGates } from "./validation-gates.js";
+import { persistentDevApiConfiguration } from "./dev-post.js";
 
 export { localRepository };
 
@@ -16,6 +17,7 @@ export const REPOSITORY_SETTING_FIELDS = [
   { key: "readyPublication", label: "Publish ready for review instead of draft? Required checks and publication consent still apply.", type: "boolean" },
   { key: "unitTestsAfterPr", label: "Run broader local unit tests after PR creation?", type: "boolean" },
   { key: "optionalBuilds", label: "Run optional builds after PR creation? Saved once, not asked each stage.", type: "boolean" },
+  { key: "askBeforeLiveTests", label: "Ask before optional live tests after a draft PR? Off runs needed tests automatically within existing approved access.", type: "boolean" },
   { key: "name", label: "What should this repository be called?", type: "text" },
   { key: "frontendDirectory", label: "Where is the frontend? Use a repository-relative folder.", type: "text" },
   { key: "frontendCommand", label: "Which command starts the frontend?", type: "text" },
@@ -28,6 +30,11 @@ export const REPOSITORY_SETTING_FIELDS = [
   { key: "backendHealthUrl", label: "What is the backend's local health URL?", type: "text", when: "backendEnabled" },
   { key: "browserDirectory", label: "Where should Playwright run?", type: "text" },
   { key: "browserCommand", label: "Which command runs the browser tests?", type: "text" },
+  { key: "devApiEnabled", label: "Enable real DEV API reads and all writes once for this repository, without per-job permission prompts?", type: "boolean" },
+  { key: "devApiOrigins", label: "Which exact DEV HTTPS API origins may React UI tests use? Separate multiple origins with commas.", type: "text", when: "devApiEnabled" },
+  { key: "devApiScope", label: "What is the DEV API's full authentication scope? Never enter a token.", type: "text", when: "devApiEnabled" },
+  { key: "devApiSessionHelper", label: "Which existing repository-relative .mjs helper provides normal DEV API authentication?", type: "text", when: "devApiEnabled" },
+  { key: "devApiProxyPaths", label: "Optional frontend API proxy prefixes mapped to those DEV origins, for example /api. Review the real proxy configuration first.", type: "text", when: "devApiEnabled", optional: true },
   { key: "apiAuthenticationEnabled", label: "Configure portal-backed API authentication and a real read-only API check? Tokens stay in the portal runner's memory.", type: "boolean" },
   { key: "apiProofUrl", label: "Which approved local HTTPS API endpoint should reject anonymous access and pass an authenticated GET?", type: "text", when: "apiAuthenticationEnabled" },
   { key: "apiScope", label: "What is the full API scope (for example api://client-id/access_as_user)? Never enter a token.", type: "text", when: "apiAuthenticationEnabled" },
@@ -52,7 +59,8 @@ const portalInRepository = (profile) => profile.browserAutomation?.mode !== "api
   (profile.browserAutomation?.apiAuthentication?.role ??
     (profile.applications?.frontend ? "portal" : "consumer")) === "portal";
 const settingFields = (apiOnly, localPortal) => REPOSITORY_SETTING_FIELDS.filter((field) =>
-  !(apiOnly && field.key.startsWith("frontend")) && (!field.role || field.role === (localPortal ? "portal" : "consumer")));
+  !(apiOnly && (field.key.startsWith("frontend") || field.key.startsWith("devApi"))) &&
+  (!field.role || field.role === (localPortal ? "portal" : "consumer")));
 const sameApiGrant = (left, right) => left && right &&
   ["repository", "origin", "method", "path"].every((key) => left[key] === right[key]) &&
   (left.includeWorktrees === true) === (right.includeWorktrees === true) &&
@@ -102,6 +110,7 @@ export function inspectRepositorySettings(repository) {
     readyPublication: workflow.publication === "ready",
     unitTestsAfterPr: workflow.unitTestsAfterPr,
     optionalBuilds: workflow.optionalBuilds,
+    askBeforeLiveTests: workflow.askBeforeLiveTests,
     name: p.name ?? basename(info.root),
     frontendDirectory: f.workingDirectory ?? (existsSync(join(info.root, "frontend")) ? "frontend" : "."),
     frontendCommand: f.command ?? "npm start", frontendPort: f.port ?? 3000,
@@ -111,6 +120,11 @@ export function inspectRepositorySettings(repository) {
     backendHealthUrl: b.healthUrl ?? "http://127.0.0.1:5000/health",
     browserDirectory: browser.workingDirectory ?? f.workingDirectory ?? ".",
     browserCommand: browser.testCommand ?? "npx playwright test",
+    devApiEnabled: browser.dataSafety?.devWrite?.allowAll === true,
+    devApiOrigins: (browser.dataSafety?.devWrite?.origins ?? []).join(", "),
+    devApiScope: browser.dataSafety?.devWrite?.scope ?? "",
+    devApiSessionHelper: browser.dataSafety?.devWrite?.sessionHelper ?? "",
+    devApiProxyPaths: (browser.dataSafety?.devWrite?.browserProxyPaths ?? []).join(", "),
     apiAuthenticationEnabled: Boolean(browser.apiAuthentication),
     apiProofUrl: api.url ?? (b.healthUrl?.startsWith("https:") ? b.healthUrl : "https://localhost:50443/protected-read"),
     apiScope: api.scope ?? "", apiProductionDatabaseReadOnly: api.productionDatabaseReadOnly === true,
@@ -148,6 +162,7 @@ function configuredProfile(root, original, values) {
     if (field.when && values[field.when] === false) { continue; }
     if (field.unless && values[field.unless] === true) { continue; }
     const value = values[field.key];
+    if (field.optional && value === "") { continue; }
     if (field.type === "boolean" ? typeof value !== "boolean"
       : field.type === "number" ? !Number.isInteger(value) || value < 1 || value > field.max
         : !safeRuntimeText(value, 2048) || !value.trim() ||
@@ -211,7 +226,8 @@ function configuredProfile(root, original, values) {
     workflow: configuredWorkflow({ workflow: {
       mode: values.efficientWorkflow ? "efficient" : "strict",
       publication: values.readyPublication ? "ready" : "draft",
-      unitTestsAfterPr: values.unitTestsAfterPr, optionalBuilds: values.optionalBuilds
+      unitTestsAfterPr: values.unitTestsAfterPr, optionalBuilds: values.optionalBuilds,
+      askBeforeLiveTests: values.askBeforeLiveTests
     } }),
     validation: { ...original.validation, agentIdleTimeoutMinutes: values.idleTimeoutMinutes },
     browserAutomation: {
@@ -235,7 +251,27 @@ function configuredProfile(root, original, values) {
       branchNaming: { ...original.pullRequests?.branchNaming,
         userId: values.branchUserId, prefixTemplate: values.branchPrefix } }
   };
-  return configuredApiAuthentication(root, original, profile, values, apiOnly);
+  if (values.devApiEnabled) {
+    profile.browserAutomation.dataSafety.devWrite = {
+      ...original.browserAutomation?.dataSafety?.devWrite,
+      allowAll: true, origins: split(values.devApiOrigins),
+      scope: values.devApiScope, sessionHelper: values.devApiSessionHelper,
+      ...(values.devApiProxyPaths ? { browserProxyPaths: split(values.devApiProxyPaths) } : {})
+    };
+    if (!values.devApiProxyPaths) { delete profile.browserAutomation.dataSafety.devWrite.browserProxyPaths; }
+    profile.browserAutomation.testSynthesis = {
+      ...profile.browserAutomation.testSynthesis, devReadOnly: false
+    };
+    profile.worktreeSetup = { ...profile.worktreeSetup,
+      files: [...new Set([...(profile.worktreeSetup?.files ?? []), values.devApiSessionHelper])] };
+  } else if (profile.browserAutomation.dataSafety.devWrite?.allowAll === true) {
+    profile.browserAutomation.dataSafety.devWrite = {
+      ...profile.browserAutomation.dataSafety.devWrite, allowAll: false
+    };
+  }
+  const configured = configuredApiAuthentication(root, original, profile, values, apiOnly);
+  if (values.devApiEnabled) { persistentDevApiConfiguration(root, configured); }
+  return configured;
 }
 
 function configureApiGateSelection(profile, gateId, enabled, apiOnly) {

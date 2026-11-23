@@ -38,7 +38,7 @@ test("repository onboarding previews without writes and creates only missing rev
     const profile = JSON.parse(readFileSync(join(repository, SETUP_PROFILE_PATH), "utf8"));
     assert.equal(profile.pullRequests.branchNaming.userId, "synthetic-user");
     assert.deepEqual(profile.workflow, {
-      mode: "efficient", publication: "draft", unitTestsAfterPr: false, optionalBuilds: false
+      mode: "efficient", publication: "draft", unitTestsAfterPr: false, optionalBuilds: false, askBeforeLiveTests: false
     });
     assert.equal(profile.browserAutomation.dataSafety.productionAllowed, false);
     assert.equal(configuredTestSynthesis(profile, "", undefined, "dev").source, "non-production-read-only");
@@ -66,21 +66,24 @@ test("repository settings preserve undisplayed configuration and never expose en
     profile.browserAutomation.authentication.environment = { SYNTHETIC_PRIVATE: "noncredential-private-sentinel" };
     profile.pullRequests.requireConfirmation = false;
     profile.workflow.publication = "ready";
+    profile.workflow.askBeforeLiveTests = true;
     profile.customContract = { retained: true };
     delete profile.browserAutomation.testSynthesis.devReadOnly;
     delete profile.browserAutomation.testSynthesis.ppeReadOnly;
     profile.environments = { dev: { syntheticContract: "preserved" } };
     writeFileSync(path, JSON.stringify(profile));
     const inspected = inspectRepositorySettings(repository);
+    assert.equal(inspected.values.askBeforeLiveTests, true);
     assert.doesNotMatch(JSON.stringify(inspected), /noncredential-private-sentinel|SYNTHETIC_PRIVATE/);
     const preview = plan(repository, { name: "Updated synthetic repository",
-      efficientWorkflow: false, optionalBuilds: true, unitTestsAfterPr: false }, false);
+      efficientWorkflow: false, optionalBuilds: true, unitTestsAfterPr: false,
+      askBeforeLiveTests: false }, false);
     assert.deepEqual(preview.files, [SETUP_PROFILE_PATH]);
     applyRepositorySettings(preview, "synthetic-settings-owner");
     const updated = JSON.parse(readFileSync(path, "utf8"));
     assert.equal(updated.name, "Updated synthetic repository");
     assert.deepEqual(updated.workflow, {
-      mode: "strict", publication: "ready", unitTestsAfterPr: false, optionalBuilds: true
+      mode: "strict", publication: "ready", unitTestsAfterPr: false, optionalBuilds: true, askBeforeLiveTests: false
     });
     assert.deepEqual(updated.customContract, { retained: true });
     assert.equal(updated.pullRequests.requireConfirmation, false);
@@ -88,6 +91,51 @@ test("repository settings preserve undisplayed configuration and never expose en
     assert.equal(configuredTestSynthesis(updated, "", undefined, "ppe").source, "synthetic-intercepted");
     assert.deepEqual(updated.environments, profile.environments);
     assert.deepEqual(updated.browserAutomation.authentication.environment, profile.browserAutomation.authentication.environment);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("DEV API setup enables persistent real UI access without job permissions or read-only defaults", () => {
+  const repository = fixture();
+  try {
+    applyRepositorySettings(plan(repository), "synthetic-settings-owner");
+    writeFileSync(join(repository, "dev-session.mjs"), "throw new Error('Setup must not execute authentication');");
+    const preview = plan(repository, {
+      devApiEnabled: true, devApiOrigins: "https://api.dev.example.test",
+      devApiScope: "api://example-service/access", devApiSessionHelper: "dev-session.mjs"
+    }, false);
+    const safety = preview.profile.browserAutomation.dataSafety;
+    assert.deepEqual(safety.devWrite, {
+      allowAll: true, origins: ["https://api.dev.example.test"],
+      scope: "api://example-service/access", sessionHelper: "dev-session.mjs"
+    });
+    const evidence = configuredTestSynthesis(preview.profile, "", undefined, "dev");
+    assert.equal(evidence.source, "non-production-approved");
+    assert.equal(evidence.mutationMode, "approved-write");
+    assert.notEqual(evidence.devReadOnly, true);
+    assert.equal(preview.profile.browserAutomation.testSynthesis.devReadOnly, false);
+    assert.equal(configuredTestSynthesis(preview.profile, "none", undefined, "dev").mutationMode, "none");
+    assert.equal(configuredTestSynthesis(preview.profile, "intercepted", undefined, "dev").mutationMode, "intercepted");
+    assert.equal(configuredTestSynthesis(preview.profile, "", undefined, "sit").source, "synthetic-intercepted");
+    assert.ok(preview.profile.worktreeSetup.files.includes("dev-session.mjs"));
+    applyRepositorySettings(preview, "synthetic-settings-owner");
+    assert.equal(inspectRepositorySettings(repository).values.devApiEnabled, true);
+    for (const invalid of [
+      { devApiOrigins: "https://api.ppe.example.test" },
+      { devApiOrigins: "https://api.dev.example.test/path" },
+      { devApiScope: "not-an-api-scope" }, { devApiSessionHelper: "missing.mjs" },
+      { devApiProxyPaths: "/api/../production" }, { devApiProxyPaths: "//other-host" }
+    ]) {
+      assert.throws(() => plan(repository, invalid, false));
+    }
+    const proxied = plan(repository, { devApiProxyPaths: "/api, /odata" }, false);
+    assert.deepEqual(proxied.profile.browserAutomation.dataSafety.devWrite.browserProxyPaths, ["/api", "/odata"]);
+    applyRepositorySettings(proxied, "synthetic-settings-owner");
+    assert.equal(plan(repository, { devApiProxyPaths: "" }, false)
+      .profile.browserAutomation.dataSafety.devWrite.browserProxyPaths, undefined);
+    const disabled = plan(repository, { devApiEnabled: false }, false);
+    assert.equal(disabled.profile.browserAutomation.dataSafety.devWrite.allowAll, false);
   } finally {
     rmSync(repository, { recursive: true, force: true });
   }
@@ -133,6 +181,7 @@ test("API-only repository settings never add a frontend or browser and retain ba
     profile.browserAutomation.testSynthesis.mutationMode = "none";
     writeFileSync(path, JSON.stringify(profile));
     assert.equal(inspectRepositorySettings(repository).fields.some((field) => field.key.startsWith("frontend")), false);
+    assert.equal(inspectRepositorySettings(repository).fields.some((field) => field.key.startsWith("devApi")), false);
     const preview = plan(repository, { name: "Updated API workspace" }, false);
     assert.equal(preview.profile.applications.frontend, undefined);
     assert.equal(preview.profile.browserAutomation.browser, undefined);

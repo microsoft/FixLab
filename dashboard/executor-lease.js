@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { setTimeout as sleep } from "node:timers/promises";
 
 export function canonicalExecutionRepository(repository) {
   const root = realpathSync.native(repository);
@@ -49,8 +50,30 @@ export function canonicalExecutionRepository(repository) {
   };
 }
 
-export function createExecutorLease(repository, ownerId) {
+export function createExecutorLease(repository, ownerId, { worktree = false, resource = "executor" } = {}) {
   const scope = canonicalExecutionRepository(repository);
+  if (!["executor", "local-testing"].includes(resource) || (worktree && resource !== "executor")) {
+    throw new Error("Unknown execution resource scope.");
+  }
+  if (worktree) {
+    const root = realpathSync.native(repository);
+    const result = spawnSync("git", ["rev-parse", "--absolute-git-dir"], {
+      cwd: root, encoding: "utf8", windowsHide: true, timeout: 10000
+    });
+    if (result.status !== 0 || result.error) {
+      throw new Error("Cannot verify the isolated checkout's Git directory.");
+    }
+    const directory = realpathSync.native(result.stdout.trim());
+    if (directory === scope.repository) {
+      throw new Error("Parallel executor ownership requires a linked Git worktree.");
+    }
+    scope.directory = join(directory, "fixlab", "executor-lease");
+    scope.key = createHash("sha256").update(process.platform === "win32" ? root.toLowerCase() : root).digest("hex");
+  } else if (resource === "local-testing") {
+    scope.directory = scope.directory === join(scope.repository, "fixlab", "executor-lease")
+      ? join(resolve(scope.directory, ".."), "local-testing-lease")
+      : `${scope.directory}-local-testing`;
+  }
   const metadataPath = join(scope.directory, "owner.json");
 
   function reservedError() {
@@ -68,11 +91,11 @@ export function createExecutorLease(repository, ownerId) {
     } catch {
       // An incomplete reservation remains exclusive after an owner crash.
     }
-    return new Error(
+    return Object.assign(new Error(
       `Repository executor lease is reserved (${description}). ` +
       "Reconnect to its owner or wait for confirmed executor termination. " +
       "An unreachable owner is not proof that its executor stopped; do not clear the lease without verifying that the owner and executor tree are quiescent."
-    );
+    ), { code: "FIXLAB_LEASE_RESERVED" });
   }
 
   return {
@@ -145,4 +168,20 @@ export function createExecutorLease(repository, ownerId) {
       };
     }
   };
+}
+
+/** @param {{signal?: AbortSignal, onWaiting?: () => void, pollMs?: number}} options */
+export async function waitForExecutorLease(owner, jobId, options = {}) {
+  const { signal, onWaiting = () => {}, pollMs = 250 } = options;
+  let waiting = false;
+  for (;;) {
+    signal?.throwIfAborted();
+    try {
+      return owner.acquire(jobId);
+    } catch (error) {
+      if (error.code !== "FIXLAB_LEASE_RESERVED") { throw error; }
+      if (!waiting) { onWaiting(); waiting = true; }
+      await sleep(pollMs, undefined, { signal });
+    }
+  }
 }

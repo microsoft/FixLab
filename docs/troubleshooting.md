@@ -176,8 +176,11 @@ pwsh -File scripts/repair-node-runtime.ps1 -Repository C:\path\to\application
 pwsh -File scripts/repair-node-runtime.ps1 -Repository C:\path\to\application -Yes
 ```
 
-The script verifies the official Node.js SHA-256 checksum and does not alter
-NVM or the permanent system `PATH`.
+The script verifies the official Node.js SHA-256 checksum, requires a real npm
+operation to succeed, and does not alter NVM or the permanent system `PATH`.
+It refuses to execute an existing portable runtime unless its destination root
+is already marked as FixLab-owned, and rejects junctions, symbolic links, or
+other reparse points before runtime execution or recursive cleanup.
 
 ## Dependency restore returns `E401` or `E403`
 
@@ -317,6 +320,15 @@ Stop/hold/shutdown invalidates outstanding prompts. A dashboard/runtime restart
 cannot replay an approval, and a historical unclassified denial has no live
 request to approve. This feature does not make failed tests or organization
 restrictions automatically approvable.
+
+For an unreviewable native operation, FixLab can reject it once automatically
+and ask Copilot to reuse existing reviewed helpers. This is not an approval or
+retry. If another blocker remains, its panel reports that safe recovery was
+already attempted and gives reason-specific next steps. For oversized source
+edits, use **Review source-edit access** when offered. For credential-like
+content, use an existing authentication helper; never paste secrets or resend
+the hidden content. Human denials and managed restrictions are not recovered
+automatically, and missing coverage remains blocked rather than passed.
 
 For an Agency or older dashboard job that reports "no interactive user response was available"
 or "Denied, no one to approve", use the browser's **Copilot permission required**

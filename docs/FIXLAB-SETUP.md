@@ -260,6 +260,29 @@ fixlab setup-playwright $Repo --yes
 Verify an actual Edge launch, not merely the package version or executable
 path. Do not install through an unreviewed shared `node_modules` junction.
 
+### Reuse an existing dedicated runner setup
+
+When the user chooses sequential jobs in one configured checkout, review
+`fixlab onboard ACTUAL_RUNNER_DIRECTORY --reuse-setup --runtime copilot`.
+After approval add `--yes`. Preserve existing frontend/authentication commands
+and browser state in place; do not copy credentials into new branch folders.
+Review the profile's actual remote, base branch and branch prefix first.
+The option enables shared mode, preserves installed dependencies and verifies
+Playwright/configuration without unconditional restore. Branch-specific tests
+must still detect changed or missing dependencies.
+
+For an existing session, add `--authenticate` to run the repository's fresh
+`proofCommand` instead of redoing login when configured state is present.
+Failed proof remains a real blocker; human authentication is not bypassed.
+Ignored local commit-bound profiles can follow owned branch acquisition;
+tracked templates remain unchanged. See [shared setup](repository-onboarding.md#reusing-one-checkout-for-sequential-jobs).
+
+Before calling setup reusable, inventory the actual guard's required read-only
+bootstrap API calls, local assets, fonts and Microsoft identity resources.
+Repair narrowly through reviewed `fixlab setup-queries` and focused offline
+tests. Keep one shared policy, HTTP/transport failures and write restrictions;
+do not make each journey rediscover the same missing resources.
+
 ### 6. Put private browser state in a valid, protected location
 
 FixLab dashboard authentication `statusPaths` must resolve **inside**
@@ -449,6 +472,16 @@ actually validated.
 Do not retain generated validation-only authenticated spec files in product
 changes unless permanent coverage was explicitly requested.
 
+Portal journeys default to unmasked full-page screenshots (`fullPage: true`),
+with close-ups only as supplements. Include this capture in the reviewed journey
+or a job-owned transient wrapper; do not ask a separate screenshot-scope question
+for the default. Preserve existing tests, guards and shared configuration.
+Explicit privacy policy and genuinely sensitive content still require protection;
+never capture credentials, sign-in/MFA screens or private/customer data. Keep
+evidence local unless sharing is separately authorized. Native permissions and
+human authentication remain separate approvals. Existing stricter repository
+policies are not silently changed by installing FixLab.
+
 ### 9. Verify Doctor and a stable, matching dashboard
 
 ```powershell
@@ -479,6 +512,8 @@ Verify all of these:
 - Dashboard UI returns HTTP 200.
 - `fixlab_dashboard_status` reports the exact repository and expected port.
 - Record its actual instance ID and confirm no job was started by setup.
+- Use the actual port/repository/instance/job supplied in executor context, not
+  the default port or an older dashboard. Read fresh status before mutations.
 - Read `fixlab_dashboard_control` operation `authentication-status`, bound to
   that instance ID and current job ID (`null` when idle).
 - Check status again after that request to catch a crash. A basic status
@@ -490,6 +525,13 @@ memory-only and tied to the owning job, environment, configuration, and state
 identities. Obtain its own fresh proof when that operation/job is authorized.
 Do not start a job just to make the status green.
 
+A live dashboard may be waiting for input or a native permission rather than
+stopped. Answer non-sensitive questions against their exact current request ID;
+native permission decisions stay in the dashboard browser panel. Do not reinstall
+or restart merely to clear these states. Reuse an owned healthy frontend only
+after verifying its checkout, environment and source version; a deployed screenshot
+does not prove an unpublished commit.
+
 ### 10. Finish with actual status
 
 Report installation/MCP, profile, dependency restores, npm/NuGet feed access,
@@ -500,6 +542,73 @@ Do not call the whole setup complete if backend startup/health, selected
 environment configuration, required live coverage, or job-bound proof remains
 unverified. Do not commit credentials, start jobs, change application UI,
 publish, or stop unrelated resources as part of setup.
+
+## Optional tagged-ticket watcher (separate approval)
+
+The same FixLab installation includes the watcher; no separate watcher package
+is needed. Updating an older install is still necessary to receive new features.
+Setup above does not start it. Only when the user requests unattended ticket
+investigation, review `pullRequests.defaultTargetBranch`, exact
+`ticketAutomation.areaPaths`, the trigger tag and a configured non-production
+environment. Install and sign in to the selected runtime separately and verify
+the local Azure CLI identity has the required ADO access.
+The watcher selects only work items assigned to that authenticated ADO user
+(`@Me`), with the reviewed tag and area. It does not use a hard-coded alias,
+the Windows login or the runtime's GitHub account. Unassigned and other users'
+items are excluded; assignment is rechecked before work continues.
+
+```powershell
+fixlab watch $Repo --runtime copilot --environment dev
+```
+
+Agency is also supported with `--runtime agency`. Review the printed plan first;
+then obtain separate approval before adding `--yes --allow-all-tools`. Installation,
+MCP registration and onboarding grant none of those permissions. Keep the approved
+local watcher process running; dashboard startup alone does not start it.
+
+Use **Watcher jobs** for status and **Review interrupted attempt** for supported
+recovery. CLI users can run `fixlab watch-review $Repo --ticket <id>` and confirm
+a fresh reviewed decision with `fixlab watch-recover`. Never edit private JSON
+or delete a retained lock/lease. See [watcher commands and recovery](commands.md#tagged-ticket-watcher)
+for the exact controls and limits.
+
+## Optional Cosmos and trace evidence (separate approval)
+
+Installing FixLab adds evidence-helper support, not another developer's local
+configuration, helper scripts, credentials, or Azure data-access permissions.
+Only configure this optional integration when requested. After installation,
+the user can paste:
+
+```text
+Configure Cosmos DB and trace evidence for FixLab in this repository.
+
+Ask me for the approved environment, Cosmos account/database/container,
+trace workspace, work-item ID, correlation ID and query time window.
+
+Reuse team-approved repository-owned helper scripts. If missing, ask
+for them; do not invent endpoints or copy another user's credentials.
+Authenticate using my own authorized Azure identity and existing permissions;
+do not change roles or copy tokens, connection strings or browser state.
+
+Configure .github\fixlab\repository-profile.json:
+- analysis.evidenceSources for non-production.
+- analysis.productionReadOnlyEvidence for explicitly approved production
+  readers, bound to the exact ticket, correlation and helperSha256.
+
+Review the helper, bounded query/field scope, read-only enforcement and
+configuration with me before applying changes or performing reads.
+Verify only approved bounded reads. Report actual results and access blockers
+without exposing raw records or credentials; do not infer a cause from no data.
+For production, review the watcher plan with --allow-production-evidence.
+Ask separately before starting the watcher; do not start a job or publish.
+```
+
+The user must already have the approved data-plane permissions. Azure login,
+MCP registration and browser SSO alone do not prove Cosmos or trace access.
+Production readers also require a reviewed helper whose SHA256 matches the
+profile; they are watcher-only and do not enable production application tests.
+See [incident evidence helper requirements](commands.md#incident-evidence-helpers)
+for the configuration schema and helper contract.
 
 ## Troubleshooting summary
 

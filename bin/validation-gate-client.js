@@ -7,18 +7,22 @@ export async function runValidationGate(args, io = process) {
     for (let index = 0; index < args.length; index += 2) {
       const key = args[index];
       const value = args[index + 1];
-      if (!["--port", "--job", "--gate", "--repository"].includes(key) || !value || options[key]) {
-        throw new Error("Usage: fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>");
+      if (!["--port", "--job", "--gate", "--resource", "--repository"].includes(key) || !value || options[key]) {
+        throw new Error("Usage: fixlab gate --port <port> --job <id> (--gate <id> | --resource local-testing) --repository <worktree>");
       }
       options[key] = value;
     }
     const port = Number(options["--port"]);
-    if (!Number.isInteger(port) || port < 1 || port > 65535 || !options["--job"] || !options["--gate"]) {
+    const resource = options["--resource"];
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || !options["--job"] ||
+        (resource !== undefined && resource !== "local-testing") ||
+        (Boolean(options["--gate"]) === Boolean(resource))) {
       throw new Error("gate requires a loopback dashboard port, job ID, and gate ID.");
     }
     const body = JSON.stringify({
       jobId: options["--job"],
       gateId: options["--gate"],
+      resource,
       repository: resolve(options["--repository"] ?? process.cwd())
     });
     const result = await new Promise((resolveResult, reject) => {

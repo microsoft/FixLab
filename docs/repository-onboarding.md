@@ -60,10 +60,52 @@ operation policy cannot be enabled here. An executor lease or active owned
 frontend/sign-in session prevents saving, without stopping those resources.
 Only the selected repository's ownership scopes are checked for setup writes
 and workspace opening. An unreachable or identity-mismatched registered owner
-in those scopes blocks the operation; it is not evidence that its resources
-stopped. Unrelated unavailable dashboard registrations do not block setup.
+in those scopes blocks the operation unless safe automatic registration recovery
+is possible. An unreachable port alone is not evidence that resources stopped.
+Unrelated unavailable dashboard registrations do not block setup.
 Plans expire after ten minutes and are invalidated by concurrent profile edits.
 Setup paths reject traversal and symbolic links.
+
+### Obsolete dashboard registrations
+
+New dashboards persist their process ID and a resource checkpoint before
+starting work. An idle checkpoint is written only when no owned job, frontend,
+sign-in helper, setup, pending operation or execution/testing reservation remains.
+Scoped owner discovery automatically archives a registration only when that
+checkpoint is quiescent, the recorded process definitively no longer exists, and
+the endpoint refuses connections or belongs to a different session. Process
+permission errors, timeouts, HTTP errors, active/unknown resources and legacy
+records do not qualify. A reused PID is treated conservatively as a live process.
+Global repository discovery does not recover other repositories' records.
+
+For old records or an interrupted busy dashboard, review:
+
+```powershell
+fixlab recover-sessions C:\source\application
+```
+
+The preview identifies live owners, obsolete candidates, ambiguous owners and
+remaining repository/worktree reservations, with a snapshot-bound review token.
+It does not archive files. Verify that every listed old dashboard and its child
+executors, tests, frontends and sign-in helpers has stopped. Then explicitly
+confirm that reviewed snapshot:
+
+```powershell
+fixlab recover-sessions C:\source\application --review-token <value> --confirm-quiescent --yes
+```
+
+Confirmation reinspects the owners and refuses changed snapshots, live or
+ambiguous owners, linked paths and remaining execution/testing reservations,
+including reservations in linked worktrees. It never uses age or a closed port
+as permission to stop a process or clear a reservation. Original registration
+bytes and a receipt are retained under a unique `.recovered-*` directory in the
+same private ownership scope. A partial filesystem failure reports how many
+registrations were archived; inspect again rather than replaying an old token.
+
+Recovery changes only obsolete registration files. Job history, configuration,
+authentication, runtime grants and actual stage/test outcomes stay unchanged.
+Retry or continue the stopped job separately through its normal controls.
+Missing stage markers or bug outcomes are not repaired by declaring success.
 
 ## Linked local applications in separate repositories
 
@@ -202,7 +244,78 @@ test through its instructions, or the user can request one explicitly;
 otherwise newly created authenticated `*.auth.spec.ts` files are validation
 artifacts rather than product changes.
 
-New installations default `browserAutomation.testSynthesis.devReadOnly` and
+### Real DEV reads and writes for React applications
+
+In repository settings, enable **real DEV API reads and all writes** and provide
+the real DEV API origins, full API scope and existing repository-relative `.mjs`
+authentication helper. Review and apply the preview once. This config is shared
+through the repository profile; each developer still authenticates independently.
+Setup validates configuration without executing the helper, signing in or sending
+a request. No job permission prompt is needed afterward.
+
+For example, inside `browserAutomation.dataSafety`:
+
+```json
+{
+  "productionAllowed": false,
+  "devWrite": {
+    "allowAll": true,
+    "origins": ["https://api.dev.example.test"],
+    "scope": "api://example-service/access",
+    "sessionHelper": "tools/dev-session.mjs",
+    "browserProxyPaths": ["/api"]
+  }
+}
+```
+
+Declare `dev` in `environments`, configure the frontend health URL and use an
+existing helper exporting `withApiToken({ scope, interactive }, callback)` for
+native API authentication. Use only reviewed DEV HTTPS origins. If the React app
+calls the API directly, omit `browserProxyPaths`; if it uses an owned loopback
+frontend proxy, first verify those prefixes really target the listed DEV origins.
+Setup does not rewrite the application's API URL, CORS or proxy implementation.
+Keep its existing normal browser authentication and environment configuration.
+
+Configured DEV uses real GET/HEAD/OPTIONS, search POST and
+POST/PUT/PATCH/DELETE create/update/submit flows, not a read-only or intercepted
+default. The dashboard hides the per-job write permission controls. Other
+environments and explicit stricter selections remain unchanged.
+
+Dashboard gates and CLI-launched workers receive `FIXLAB_HELPER_ROOT`,
+`FIXLAB_REPOSITORY` and `FIXLAB_DEV_API_ENVIRONMENT`. Repository-owned Playwright
+journeys can import the packaged guard without installing FixLab in the app:
+
+```js
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const { createDevBrowserContext } = await import(pathToFileURL(
+  join(process.env.FIXLAB_HELPER_ROOT, "dashboard", "dev-browser.js")
+).href);
+const session = await createDevBrowserContext(browser, {
+  contextOptions: { storageState: ".auth/dev.json" }
+});
+try {
+  const page = await session.context.newPage();
+  await page.goto(frontendUrl);
+  // Exercise the real workflow and assert its UI/API outcomes here.
+  await session.assertHealthy();
+} finally {
+  await session.close();
+}
+```
+
+Reuse a genuine authenticated state through the existing application sign-in
+flow; the guard does not invent cookies or tokens. Complete sign-in before the
+guarded context and refresh it separately if the application needs an external
+identity provider. Do not add mocks, page-route overrides or direct
+`APIRequestContext` traffic to this browser path. HTTP success alone does not
+prove the business scenario passed. Missing authentication/API access remains
+blocked, not a synthetic pass. See [the DEV access contract](security.md#persistent-dev-browser-and-api-access).
+
+### Existing restricted defaults
+
+Without persistent DEV setup, new installations default `browserAutomation.testSynthesis.devReadOnly` and
 `ppeReadOnly` to `true` for new portal profiles. Selecting `dev`, `development`
 or `ppe` uses real
 read-only backend data while mutations remain intercepted. Unselected/local,
@@ -217,16 +330,44 @@ implementation and payload rather than the verb or route name. Once that read
 scope is approved, no per-query human confirmation is required. Preserve
 identity-only authentication/proof defaults and all business-write controls.
 
+For an existing adapter that still permits only a feature-specific subset, run
+the dedicated query-setup operation in the application checkout:
+
+```shell
+fixlab setup-queries REPOSITORY --environment dev --runtime copilot
+fixlab setup-queries REPOSITORY --environment dev --runtime copilot --yes
+```
+
+The first invocation starts an interactive, read-only setup review. It inventories
+the full verified query scope from contracts and implementation and reports the
+exact policy/adapter files and proposed offline guard tests. On Windows, the
+launcher quotes the generated arguments so both runtimes receive the complete
+setup prompt as one argument. After reviewing that
+plan, `--yes` authorizes only the setup repair and focused guard tests. Existing
+adapters must consume the shared query policy; adding one profile path alone is
+not sufficient. No business API calls, authentication, business writes, product
+source changes or PR operations are authorized. Runtime permissions remain
+interactive and independent. An existing approved non-production browser read
+scope is required; API-only, unit-only, synthetic-only and production policies
+cannot be expanded by this command.
+
+Finish setup before starting a fresh reviewed validation job. Do not repair
+configuration inside a validation-only job or reuse stale helper/write approvals.
+This operation does not turn all POSTs into reads or replace the separate
+POST/DEV/PPE write-approval flow.
+
 Use `defaultDataSource: "synthetic-intercepted"` with
 `mutationMode: "intercepted"` when Playwright should fulfill reads locally and
 capture mutation intent without changing an external record. Repositories may
 instead declare `local-fixture`, `non-production-read-only`, or
-`non-production-approved`; any approved write still requires the normal human
-unsafe-data approval.
+`non-production-approved`; outside persistent DEV configuration, approved writes
+still require the normal human unsafe-data approval.
 
-With `non-production-read-only`, an explicitly selected DEV or SIT environment
-is tried first. If that backend is unavailable or cannot provide a safe record
-required for the assertion, FixLab may fall back to
+With `non-production-read-only`, the explicitly selected profile-approved
+environment is tried first. Profiles can offer DEV, SIT, Test, UAT, or other
+repository-specific non-production systems so users are not required to have
+access to one shared environment. If that backend is unavailable or cannot
+provide a safe record required for the assertion, FixLab may fall back to
 `synthetic-intercepted`/`intercepted` and must report that the backend was not
 validated. Expected empty-state scenarios must remain against the selected
 backend and must not be replaced by synthetic results.
@@ -354,6 +495,39 @@ permissions or API authentication blocks live testing, not a synthetic pass.
 
 ### Reusing one checkout for sequential jobs
 
+For an already configured dedicated checkout, review and enable reuse without
+recreating its setup:
+
+```powershell
+fixlab onboard C:\source\application-runner --reuse-setup --runtime copilot
+fixlab onboard C:\source\application-runner --reuse-setup --runtime copilot --yes
+```
+
+The plan preserves existing commands, helper files, dependencies and browser
+state in place. It requires the profile's real remote, base branch and branch
+naming settings; it does not guess them, start a job or switch branches.
+Approval enables shared mode and runs Playwright/configuration checks without
+running restore commands. Changed branch manifests still need validation and,
+when necessary, an explicit `fixlab prepare` restore.
+
+Add `--authenticate` to the approved command to verify an existing browser
+session with its configured `proofCommand` when all contained `statusPaths`
+exist. A failed proof is reported, not silently retried as login or treated as
+success. Use the existing `fixlab authenticate ... --yes` operation for human
+sign-in when needed. API authentication keeps its separate fresh-job contract.
+
+If the local profile already has `validation.expectedCommit`, reuse enables
+`worktreeSetup.bindExpectedCommit` and refreshes that pin after owned branch
+acquisition or resume. This requires a Git-ignored local profile; tracked
+profiles are never rewritten. Keep a reusable template separately. Changed
+profile revisions still invalidate prior authentication/write approvals.
+Neither a refreshed pin nor a directory's presence proves authenticated access.
+
+Repair a legacy browser guard once through reviewed `fixlab setup-queries`,
+including required read-only bootstrap APIs, local assets, UI fonts and identity
+resources in the repository's shared policy. Do not copy a one-off journey's
+allowlist into every future test or broadly allow an origin to avoid a blocker.
+
 Opt in to shared mode in a dedicated runner checkout's repository profile:
 
 ```json
@@ -426,6 +600,18 @@ shared mode because they do not have the dashboard's branch-resume contract.
 Validation-only jobs do not switch branches or refresh the base.
 
 ### Preparing another worktree
+
+Dashboard editing jobs with `worktreeSetup.mode: "isolated"` automatically
+create or recover a receipt-bound checkout and keep the same job ID. Detached
+source checkouts also get this recovery unless shared mode is explicit.
+Declared configuration, dependency restore and Playwright setup run before
+execution; no routine request to create a checkout is needed. A failed restore
+is reported and dependent validation stays unverified while independent code
+work can continue. Stop cancels that job's owned setup. Existing edits,
+branches and unrelated worktrees are never reset, deleted or adopted by name.
+Different isolated jobs can implement concurrently; shared local testing
+queues and resumes automatically. Browser identity, runtime grants and prior
+passing validation do not transfer. Manual preparation remains available:
 
 A Git worktree does not inherit ignored profiles, untracked browser
 configuration, restored dependencies, or authenticated browser state. Declare
@@ -648,6 +834,27 @@ Changed production approval requires a newly reviewed job, including after
 restart. Disabling the option restores saved testing configuration, **not the
 database connection**: independently verify that the backend no longer targets
 production before using a non-production profile.
+
+## Optional private adapters
+
+Some organizations keep data-handling or policy helpers (for example, validation
+of security work-item data) in a private package. Public FixLab does not name,
+bundle, or install such packages. The owning team makes them discoverable:
+
+- Publish a short onboarding page in the private repository or internal wiki
+  that states the package name, the feed that hosts it, how to request access,
+  and who approves its use.
+- Authenticate to that feed with the owner's supported credential provider
+  before running `fixlab prepare`. FixLab never creates, copies, or persists
+  feed credentials.
+- Link the onboarding page from the repository's own `README` or contributor
+  guide so a first-time developer finds it without asking.
+- Keep the adapter's name, feed URL, and access instructions out of public
+  FixLab files and out of the profile's shared defaults; they belong in the
+  private repository.
+
+An adapter must not bypass approval gates. Publication approval, unsafe-data
+approval, and the no-automatic-closure rules for findings still apply.
 
 ## Profile review checklist
 

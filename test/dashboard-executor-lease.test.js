@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { fork, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createExecutorLease } from "../dashboard/executor-lease.js";
+import { createExecutorLease, waitForExecutorLease } from "../dashboard/executor-lease.js";
 
 function repository() {
   const path = mkdtempSync(join(tmpdir(), "fixlab-lease-"));
@@ -14,6 +14,53 @@ function repository() {
   assert.equal(result.status, 0);
   return path;
 }
+
+test("isolated worktrees execute concurrently while local testing waits and resumes after release", async () => {
+  const path = repository();
+  const worktree = `${path}-parallel`;
+  try {
+    assert.equal(spawnSync("git", ["-C", path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+      "commit", "--allow-empty", "--quiet", "-m", "fixture"]).status, 0);
+    assert.equal(spawnSync("git", ["-C", path, "worktree", "add", "--quiet", "-b", "parallel", worktree]).status, 0);
+    const first = createExecutorLease(path, randomUUID()).acquire("first-code-job");
+    const second = createExecutorLease(worktree, randomUUID(), { worktree: true }).acquire("second-code-job");
+    const testOwner = createExecutorLease(path, randomUUID(), { resource: "local-testing" });
+    const waitingOwner = createExecutorLease(worktree, randomUUID(), { resource: "local-testing" });
+    assert.equal(testOwner.scope.directory, waitingOwner.scope.directory);
+    const testing = testOwner.acquire("first-test-job");
+    let waiting = 0;
+    let acquired = false;
+    const next = waitForExecutorLease(waitingOwner, "second-test-job", {
+      pollMs: 5, onWaiting() { waiting += 1; }
+    }).then(lease => { acquired = true; return lease; });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(waiting, 1);
+    assert.equal(acquired, false);
+    testing.release();
+    (await next).release();
+    second.release();
+    first.release();
+    assert.equal(existsSync(testOwner.scope.directory), false);
+  } finally {
+    rmSync(worktree, { recursive: true, force: true });
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+test("cancelling queued local testing leaves the active owner's reservation untouched", async () => {
+  const path = repository();
+  try {
+    const owner = createExecutorLease(path, randomUUID(), { resource: "local-testing" });
+    const held = owner.acquire("active");
+    const controller = new AbortController();
+    const waiting = waitForExecutorLease(owner, "waiting", { signal: controller.signal, pollMs: 5 });
+    controller.abort();
+    await assert.rejects(waiting, { name: "AbortError" });
+    assert.throws(() => owner.acquire("third"), /lease is reserved/);
+    held.release();
+    assert.throws(() => createExecutorLease(path, randomUUID(), { worktree: true }), /linked Git worktree/);
+  } finally { rmSync(path, { recursive: true, force: true }); }
+});
 
 test("executor lease admits exactly one barrier-synchronized cross-process contender", async () => {
   const path = repository();

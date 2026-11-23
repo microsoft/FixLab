@@ -20,7 +20,11 @@ Every completed run MUST identify:
 
 Machine-generated CI summaries MUST conform to the schemas under `reports/`.
 Secrets, authorization headers, browser state, customer records, private
-endpoints, and unredacted screenshots MUST NOT be retained.
+endpoints, and screenshots exposing such data MUST NOT be retained.
+Approved portal pages default to unmasked full-page screenshots; explicit
+repository privacy policy and sensitive content still require protection.
+Credentials and sign-in/MFA screens MUST NOT be captured. Evidence remains
+local unless external sharing is separately authorized.
 
 ## Completion
 

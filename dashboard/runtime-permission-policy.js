@@ -288,10 +288,11 @@ export function createRuntimePermissionPolicy(repository, protectedPaths = [], f
           }
           if (args[0] === "node" && trustedHelper(args[1]) && args[2] === "gate" &&
               options.size === 4 && [...options.keys()].every((key) =>
-                ["--port", "--job", "--gate", "--repository"].includes(key)) &&
+                ["--port", "--job", "--gate", "--resource", "--repository"].includes(key)) &&
               /^\d{1,5}$/.test(options.get("--port")) && Number(options.get("--port")) === dashboardPort &&
               options.get("--job") === fileAccess.jobId && options.get("--repository") === directory &&
-              /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(options.get("--gate")) &&
+              ((options.has("--gate") && /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(options.get("--gate"))) ||
+                options.get("--resource") === "local-testing") &&
               request.possiblePaths.every((path) => [directory, helperPath].includes(path) &&
                 (!request.resolvedPaths?.[path] || request.resolvedPaths[path] === path))) {
             return { scope: "reviewed-validation-gate", key: directory };
