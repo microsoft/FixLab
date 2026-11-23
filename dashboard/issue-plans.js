@@ -24,6 +24,27 @@ function requireValue(condition, message) {
   if (!condition) { throw new Error(message); }
 }
 
+function traceMetadataReason(column, value) {
+  if (value === null) { return column === "timestamp" ? "expected a non-null timestamp" : null; }
+  if (column === "timestamp") {
+    return typeof value === "string" && value.length <= 40 && Number.isFinite(Date.parse(value))
+      ? null : "expected a valid timestamp of at most 40 characters";
+  }
+  if (column === "success") {
+    return typeof value === "boolean" || (typeof value === "string" && /^(?:true|false)$/iu.test(value))
+      ? null : "expected a boolean or canonical true/false string";
+  }
+  if (column === "severityLevel") {
+    return Number.isInteger(value) && value >= 0 && value <= 4 ? null : "expected an integer from 0 to 4";
+  }
+  if (typeof value !== "string" || value.length > 160) { return "expected a string of at most 160 characters"; }
+  if (column === "operation_Id" || column === "operation_ParentId") {
+    return /^[A-Za-z0-9_.:|+/=\-]*$/u.test(value) ? null : "unsupported identifier format";
+  }
+  return (column === "type" ? /^[A-Za-z_][A-Za-z0-9_.+`[\], ]*$/u.test(value) : /^[A-Za-z0-9_.:-]*$/u.test(value))
+    ? null : "unsupported metadata format";
+}
+
 function record(value, keys) {
   requireValue(value && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value).every(key => keys.includes(key)), "Unsupported issue-plan fields.");
@@ -329,19 +350,21 @@ export async function executeTracePlan(compiled, { tokenProvider = azureToken, r
     Array.isArray(table.columns) && JSON.stringify(table.columns.map(column => column.name)) === JSON.stringify(compiled.columns) &&
     Array.isArray(table.rows) && table.rows.length <= compiled.limit + 1,
   "Trace response was partial, oversized or changed schema; no rows accepted.");
+  const rows = [];
   for (const row of table.rows) {
-    requireValue(Array.isArray(row) && row.length === compiled.columns.length && row.every((value, index) => {
+    requireValue(Array.isArray(row) && row.length === compiled.columns.length,
+      "Trace response contained an invalid metadata row; no rows accepted.");
+    for (const [index, value] of row.entries()) {
       const column = compiled.columns[index];
-      if (value === null) { return column !== "timestamp"; }
-      if (column === "timestamp") { return typeof value === "string" && Number.isFinite(Date.parse(value)) && value.length <= 40; }
-      if (column === "success") { return typeof value === "boolean"; }
-      if (column === "severityLevel") { return Number.isInteger(value) && value >= 0 && value <= 4; }
-      return typeof value === "string" && value.length <= 160 &&
-        (column === "type" ? /^[A-Za-z_][A-Za-z0-9_.+`[\], ]*$/u.test(value) : /^[A-Za-z0-9_.:-]*$/u.test(value));
-    }), "Trace response contained unsupported metadata; no rows accepted.");
+      const reason = traceMetadataReason(column, value);
+      const safeColumn = Object.values(metadata).some(columns => columns.includes(column)) ? column : "unknown column";
+      requireValue(!reason, `Trace response contained unsupported metadata in ${safeColumn}: ${reason}; no rows accepted.`);
+    }
+    rows.push(row.map((value, index) => compiled.columns[index] === "success" && typeof value === "string"
+      ? value.toLowerCase() === "true" : value));
   }
   return { status: table.rows.length > compiled.limit ? "partial" : "passed",
-    columns: compiled.columns, rows: table.rows.slice(0, compiled.limit) };
+    columns: compiled.columns, rows: rows.slice(0, compiled.limit) };
 }
 
 async function browserProcess(cli, args, cwd, environment) {

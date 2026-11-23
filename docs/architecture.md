@@ -57,6 +57,11 @@ keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown
 Detailed version comparisons follow the same latest-20-attempt retention;
 pending authentication resumes retain their required phase evidence.
 Last reported worker status is not a process-liveness assertion.
+On Windows, atomic journal replacement retries transient reader-sharing errors
+for at most eight attempts with 25 ms between attempts. Other filesystem errors
+are not retried. Persistent activity-save failures stop the investigation and
+report only a known filesystem error code, never private paths or raw errors;
+the previous journal and ownership barriers remain intact.
 
 Completed attempts support a separate local-job handoff review. An exact-origin
 POST refreshes the ticket and linked PRs and binds a token to the attempt,

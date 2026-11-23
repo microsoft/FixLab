@@ -1105,6 +1105,101 @@ test("watcher reads the latest journal under its lock and releases ownership on 
   }
 });
 
+test("watcher journal replacement survives transient Windows sharing failures without losing its result", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const fixture = ticketFixture();
+  let replacement;
+  let failures = 0;
+  try {
+    const journal = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    await fixture.run({
+      execute: async ({ onActivity }) => {
+        const rename = fs.renameSync;
+        replacement = mock.method(fs, "renameSync", (source, destination) => {
+          if (destination === journal && failures < 2) {
+            failures += 1;
+            throw Object.assign(new Error("private sharing detail"), { code: "EPERM" });
+          }
+          return rename(source, destination);
+        });
+        syncBuiltinESMExports();
+        onActivity({ timestamp: new Date().toISOString(), kind: "check", name: "trace discovery",
+          status: "passed", message: "Accepted incident metadata." });
+        return { outcome: "analysis", summary: "Trace discovery completed." };
+      }
+    });
+    assert.equal(failures, 2);
+    const [attempt] = readTicketAutomationHistory(fixture.repository).attempts;
+    assert.equal(attempt.outcome, "analysis");
+    assert.equal(attempt.checks[0].status, "passed");
+    assert.match(fixture.posted[0].text, /Trace discovery completed/);
+    assert.doesNotMatch(readFileSync(journal, "utf8"), /private sharing detail/);
+  } finally {
+    replacement?.mock.restore();
+    syncBuiltinESMExports();
+    fixture.cleanup();
+  }
+});
+
+test("ticket history save failures expose only known filesystem codes and do not claim success", async () => {
+  const fixture = ticketFixture();
+  try {
+    for (const code of ["ENOSPC", "EACCES", "private-sentinel"]) {
+      const result = await executeTicketAgent({
+        repository: fixture.repository, prompt: "Fixture", onOutput() {},
+        onActivity() {
+          throw Object.assign(new Error("private-sentinel C:\\private\\history.json"), { code });
+        },
+        executor(options) {
+          options.onOutput("stdout", "FIXLAB_CHECK|trace discovery|passed|Accepted incident metadata.\n");
+          options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"analysis","summary":"Discovery completed."}\n');
+          return { completion: Promise.resolve({ code: 0 }), hasStopped: () => true, terminate() {} };
+        }
+      });
+      assert.equal(result.outcome, "blocked");
+      assert.equal(result.summary, `The private watcher history could not be saved${code === "private-sentinel" ? "" : ` (${code})`}. Review local storage before retrying.`);
+      assert.doesNotMatch(JSON.stringify(result), /private-sentinel|C:\\private/);
+    }
+  } finally { fixture.cleanup(); }
+});
+
+test("watcher journal replacement bounds sharing retries and preserves the prior file on failure", async () => {
+  const fixture = ticketFixture();
+  let replacement;
+  try {
+    const root = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation");
+    const journal = join(root, "state.json");
+    await fixture.run({
+      execute: async ({ onActivity }) => {
+        const before = readFileSync(journal, "utf8");
+        for (const code of ["EPERM", "ENOSPC"]) {
+          let attempts = 0;
+          replacement = mock.method(fs, "renameSync", (_source, destination) => {
+            assert.equal(destination, journal);
+            attempts += 1;
+            throw Object.assign(new Error("private filesystem detail"), { code });
+          });
+          syncBuiltinESMExports();
+          assert.throws(() => onActivity({ timestamp: new Date().toISOString(), kind: "activity",
+            name: "diagnosis", message: "Preserve the previous journal." }), { code });
+          assert.equal(attempts, code === "EPERM" && process.platform === "win32" ? 8 : 1);
+          assert.equal(readFileSync(journal, "utf8"), before);
+          assert.equal(fs.readdirSync(root).some(name => name.endsWith(".tmp")), false);
+          replacement.mock.restore();
+          syncBuiltinESMExports();
+        }
+        return { outcome: "blocked", summary: "Storage must be reviewed before another investigation." };
+      }
+    });
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].outcome, "blocked");
+  } finally {
+    replacement?.mock.restore();
+    syncBuiltinESMExports();
+    fixture.cleanup();
+  }
+});
+
 test("watcher plans and history normalize array and keyed environments without selecting production", async () => {
   for (const environments of [["DEV", "dev", "Production"], { DEV: {}, Production: {} }]) {
     const fixture = ticketFixture();

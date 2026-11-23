@@ -74,6 +74,13 @@ Discover candidate operation IDs from issue facts first, then generate a new
 bounded plan using observed IDs to inspect requests/dependencies/exceptions.
 Do not silently expand scope or equate business request numbers with operation IDs.
 Results contain only bounded telemetry metadata, not messages or raw payloads.
+Correlation IDs accept bounded hierarchical identifiers, including the `|`
+separator and Base64 characters used by legacy IDs. Canonical `true`/`false`
+strings from Application Insights are normalized to booleans; numeric values
+and arbitrary truthy strings are rejected. Invalid metadata rejects the entire result
+and reports only the known column and validation reason, never the rejected
+value or raw response. Review that reason before a separately approved retry;
+rejection is not evidence that the incident has no matching traces.
 
 ## Reviewed browser adapter
 

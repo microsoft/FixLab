@@ -97,6 +97,13 @@ test("trace transport sends bounded compiled KQL once and preserves only metadat
   const options = { tokenProvider: async subscription => { assert.equal(subscription, f.policy.subscriptionId); return "unit-test-placeholder"; }, request };
   assert.equal((await executeTracePlan(compiled, options)).status, "passed");
   assert.equal(calls, 1);
+  const hierarchical = ["2026-11-19T10:01:00Z", "root-42", "|root-42.span_1.", 3];
+  const legacy = await executeTracePlan(compiled, { ...options, request: async () => response([hierarchical]) });
+  assert.deepEqual(legacy.rows, [hierarchical]);
+  const encoded = ["2026-11-19T10:01:00Z", "x/Ysh+M1TfU=", "|x/Ysh+M1TfU=.span_1.", 3];
+  assert.deepEqual((await executeTracePlan(compiled, {
+    ...options, request: async () => response([encoded])
+  })).rows, [encoded]);
   const partial = await executeTracePlan(compiled, { ...options, request: async () => response(Array.from({ length: 6 }, () => row)) });
   assert.equal(partial.status, "partial");
   assert.equal(partial.rows.length, 5);
@@ -111,6 +118,59 @@ test("trace transport sends bounded compiled KQL once and preserves only metadat
     await assert.rejects(executeTracePlan(compiled, { ...options, request: async (...args) => { attempted += 1; return request(...args); } }),
       error => !/sensitive|raw denial/u.test(error.message));
     assert.equal(attempted, 1);
+  }
+});
+
+test("trace request and dependency success accepts canonical wire booleans without truthy coercion", async t => {
+  const f = fixture(t);
+  for (const table of ["requests", "dependencies"]) {
+    const compiled = compileIssuePlan(f.repository, f.profile, { ...f.trace, table }, f.options);
+    const response = success => new Response(JSON.stringify({ tables: [
+      { columns: compiled.columns.map(name => ({ name })),
+        rows: [["2026-11-19T10:01:00Z", "root-42", "|root-42.span_1.", success, "500"]] }
+    ] }));
+    for (const [wire, expected] of [[true, true], [false, false], ["True", true], ["False", false],
+      ["true", true], ["false", false], [null, null]]) {
+      const result = await executeTracePlan(compiled, {
+        tokenProvider: async () => "unit-test-placeholder", request: async () => response(wire)
+      });
+      assert.equal(result.rows[0][3], expected);
+    }
+    for (const wire of ["", " false ", "private-token", 0, 1, {}, []]) {
+      await assert.rejects(executeTracePlan(compiled, {
+        tokenProvider: async () => "unit-test-placeholder", request: async () => response(wire)
+      }), { message: "Trace response contained unsupported metadata in success: expected a boolean or canonical true/false string; no rows accepted." });
+    }
+  }
+});
+
+test("trace metadata rejection identifies only the trusted column and reason without leaking values", async t => {
+  const f = fixture(t);
+  const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+  const row = ["2026-11-19T10:01:00Z", "0123456789abcdef", null, 3];
+  const cases = [
+    [0, null, "timestamp", "expected a non-null timestamp"],
+    [0, "private-invalid-time", "timestamp", "expected a valid timestamp of at most 40 characters"],
+    [1, 123, "operation_Id", "expected a string of at most 160 characters"],
+    [1, "private-value".repeat(20), "operation_Id", "expected a string of at most 160 characters"],
+    [2, "Bearer private-token", "operation_ParentId", "unsupported identifier format"],
+    [2, "private-value\n", "operation_ParentId", "unsupported identifier format"],
+    [3, 5, "severityLevel", "expected an integer from 0 to 4"]
+  ];
+  for (const [index, value, column, reason] of cases) {
+    const invalid = [...row];
+    invalid[index] = value;
+    let calls = 0;
+    await assert.rejects(executeTracePlan(compiled, {
+      tokenProvider: async () => "unit-test-placeholder",
+      request: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ tables: [
+          { columns: compiled.columns.map(name => ({ name })), rows: [row, invalid] }
+        ] }));
+      }
+    }), { message: `Trace response contained unsupported metadata in ${column}: ${reason}; no rows accepted.` });
+    assert.equal(calls, 1);
   }
 });
 

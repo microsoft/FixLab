@@ -424,8 +424,10 @@ export async function executeTicketAgent({
     if (activity) {
       try {
         onActivity(activity);
-      } catch {
-        stop("The private watcher history could not be saved. Review local storage before retrying.");
+      } catch (error) {
+        const code = ["EACCES", "EPERM", "EBUSY", "ENOSPC", "EIO", "ENOENT", "EEXIST", "EROFS"]
+          .includes(error?.code) ? ` (${error.code})` : "";
+        stop(`The private watcher history could not be saved${code}. Review local storage before retrying.`);
       }
     }
     const match = text.trim().match(/^FIXLAB_TICKET_RESULT\|(\{.*\})$/u);
@@ -725,6 +727,21 @@ function loadAutomationJournal(repository) {
   return { root, path, state, plan, profileRevision: hash(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"))) };
 }
 
+function replaceAutomationJournal(temporary, path) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(temporary, path);
+      return;
+    } catch (error) {
+      if (process.platform !== "win32" || attempt >= 7 || !["EACCES", "EPERM", "EBUSY"].includes(error?.code)) {
+        throw error;
+      }
+      // Windows readers can briefly deny atomic replacement while the journal is open.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+}
+
 function saveAutomationJournal(root, path, state, owner) {
   privateFile(path, 1024 * 1024);
   for (const entry of state.entries.slice(0, -20)) {
@@ -740,7 +757,7 @@ function saveAutomationJournal(root, path, state, owner) {
   const temporary = join(root, `state-${owner}.tmp`);
   try {
     writeFileSync(temporary, contents, { flag: "wx", mode: 0o600 });
-    renameSync(temporary, path);
+    replaceAutomationJournal(temporary, path);
   } finally {
     if (existsSync(temporary)) { unlinkSync(temporary); }
   }
