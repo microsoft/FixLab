@@ -606,7 +606,9 @@ export async function executeVersionedTicketAgent({
   if (retainedTrace) { onTraceEvidence(retainedTrace); }
   const run = async (prompt, mode, resume) => {
     const result = ticketOutcome(await execute({
-      ...options, prompt, mode, sessionId, resume,
+      ...options, prompt: `${prompt}
+
+This watcher-owned snapshot's reviewed profile and declared non-sensitive setup files are already prepared. Do not repeat onboarding with --from or access the source checkout to prepare this job. Stay in the assigned snapshot; review remaining setup locally with \`fixlab onboard . --runtime <selected-runtime>\` (substitute the current runtime). Read-only review must not provision dependencies or change configuration. In the fix phase, apply local setup only under the existing scoped setup approval. Never copy credentials, browser state or runtime grants. Missing dependencies, authentication or denied access blocks only dependent checks; continue independent source analysis and report the exact prerequisite. Never grant yourself folder access or retry unchanged denied commands.`, mode, sessionId, resume,
       onSession(id) {
         if (id !== sessionId) { throw new Error("Version review must retain the same owned runtime session."); }
         options.onSession?.(id);

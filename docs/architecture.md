@@ -37,6 +37,13 @@ on recovery. The journal records `snapshot-pending` before preparation and the
 pinned commit before checkout creation; failed fetches never fall back to an old
 ref and can retry before any executor has started. Active/authentication-paused
 attempts keep the same snapshot. Legacy resumes are not silently moved.
+Preparation already installs the reviewed profile and declared non-sensitive
+setup files in the snapshot. Watcher phases review remaining setup locally,
+without repeating onboarding with `--from` or requesting source-clone access.
+Read-only review never provisions dependencies or changes configuration; any
+fix-phase setup still requires its existing scoped approval. Missing prerequisites
+block dependent checks, not independent source analysis. No extra folder grants,
+credentials or browser state transfer to the runtime.
 
 The CLI runs a read-only version-review phase before fix/PR authority takes
 effect. A bounded, agent-reported comparison binds latest-code findings to the

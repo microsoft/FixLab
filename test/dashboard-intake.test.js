@@ -291,6 +291,40 @@ test("version review verifies latest code when deployment is unavailable without
   }
 });
 
+test("owned ticket phases review setup in the assigned snapshot without requesting source-clone access", async () => {
+  for (const resume of [false, true]) {
+    const calls = [];
+    const result = await executeVersionedTicketAgent({
+      workspace: { baseCommit: "b".repeat(40) }, prompt: "Synthetic approved watcher request.",
+      runtimeDirectories: ["reviewed-helper"], resume,
+      execute: async options => {
+        calls.push(options);
+        assert.match(options.prompt, /reviewed profile and declared non-sensitive setup files are already prepared/u);
+        assert.match(options.prompt, /Do not repeat onboarding with --from or access the source checkout/u);
+        assert.match(options.prompt, /fixlab onboard \. --runtime <selected-runtime>/u);
+        assert.match(options.prompt, /Read-only review must not provision dependencies or change configuration/u);
+        assert.deepEqual(options.runtimeDirectories, ["reviewed-helper"]);
+        return options.mode === "validate-only"
+          ? { outcome: "analysis", summary: "The pinned code needs a focused fix.",
+              versionComparison: { latestCommit: "b".repeat(40), finding: "needs-fix",
+                evidence: "Existing source confirms the defect." } }
+          : { outcome: "analysis", summary: "Scoped investigation completed." };
+      }
+    });
+    assert.equal(result.outcome, "analysis");
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].resume, resume);
+    assert.equal(calls[1].resume, true);
+  }
+  await executeVersionedTicketAgent({
+    prompt: "Legacy execution without an owned snapshot.",
+    execute: async options => {
+      assert.equal(options.prompt, "Legacy execution without an owned snapshot.");
+      return { outcome: "analysis", summary: "No snapshot setup assertion." };
+    }
+  });
+});
+
 test("a fetched snapshot cannot substitute a different incident helper for the reviewed revision", async () => {
   const f = snapshotFixture();
   let executions = 0;
