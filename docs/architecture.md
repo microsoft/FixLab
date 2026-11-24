@@ -123,6 +123,33 @@ delivery fingerprint. If that proves an existing comment but the trace policy
 is now stale, the attempt is marked reconciled with an explicit review notice;
 no stale result is reposted and no new resolution is attempted. Unconfirmed or
 unsent stale feedback remains blocked for review.
+New attempts use a separate `trace-image` feedback version. After policy
+validation, an in-memory PNG grid renders only returned UTC timestamps, telemetry
+table/type, boolean success, three-digit status codes and numeric severity with
+fixed level labels. It shows the bounded UTC window, retained row count,
+truncation and omitted-diagnostic count. Source/operation/correlation IDs,
+exception names, endpoints, URLs, payloads and log messages are never drawn or
+embedded in the PNG. The original bitmap font, rasterizer, PNG chunks and Node
+zlib compression require no browser, fonts, external requests or new dependency;
+the module ships in the existing `dashboard` package directory.
+The image is explicitly **Rendered trace results**, observed evidence, not a
+Portal screenshot, causal proof or application validation. It uses no uploaded
+user screenshot and causes no additional telemetry read.
+
+The configured ADO project receives at most one bounded 64 KiB PNG upload per
+feedback phase. A private `uploading` receipt is saved before the request;
+confirmed attachment identities are persisted before comment preparation.
+Only canonical ADO attachment URLs are rendered as images, alongside a readable
+caption whose attachment identity participates in the comment fingerprint.
+An uncertain upload (including a restart during upload), unsupported upload
+client or failed render yields explicit **image unavailable** text, not another
+upload or a blocked diagnosis. An uncertain upload may leave an unlinked provider
+attachment; there is no automatic deletion or retry. Confirmed uploads are reused
+after restart, and attempted comment fingerprints stay unchanged. Legacy,
+`readable` and `table` pending attempts never gain images. Assignment, ticket
+revision and reviewed scope are rechecked immediately before both upload and
+comment writes. An explicit authentication continuation starts a new feedback
+phase with its own image receipt; previous comment deduplication remains intact.
 These agent-reported correlations never establish a cause or deployed revision.
 Last reported worker status is not a process-liveness assertion.
 On Windows, atomic journal replacement retries transient reader-sharing errors

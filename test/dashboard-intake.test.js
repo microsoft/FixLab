@@ -16,6 +16,9 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test, { mock } from "node:test";
+import { inflateSync } from "node:zlib";
+import https from "node:https";
+import { EventEmitter } from "node:events";
 import {
   createAzureDevOpsLoader,
   createAzureDevOpsTicketClient,
@@ -34,6 +37,7 @@ import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { ANALYSIS_EVIDENCE_GUIDANCE, analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
 import { issuePlanConfiguration } from "../dashboard/issue-plans.js";
+import { renderTraceImage } from "../dashboard/trace-image.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
@@ -1048,9 +1052,108 @@ test("ticket feedback gives a high-level summary while retaining detailed work a
   }
 });
 
+function traceImageFixture() {
+  const fixture = ticketFixture({ readable: true });
+  fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
+    subscriptionId: "12345678-1234-1234-1234-123456789abc",
+    applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10 }] };
+  writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+  const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+  const policy = issuePlanConfiguration(fixture.repository, fixture.profile, "dev").traces[0];
+  const traceEvidence = { source: policy.id, policyRevision: policy.policyRevision,
+    start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+    rows: [{ table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "private-operation",
+      operation_ParentId: null, success: false, resultCode: "500" }] };
+  return { ...fixture, plan, policy, traceEvidence,
+    execute: async () => ({ outcome: "analysis", summary: "Observed a failure; cause unconfirmed.", traceEvidence }),
+    journalPath: join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json")
+  };
+}
+
+function decodeTracePng(bytes) {
+  assert.deepEqual(bytes.subarray(0, 8), png);
+  const chunks = [];
+  for (let offset = 8; offset < bytes.length;) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.toString("ascii", offset + 4, offset + 8);
+    const data = bytes.subarray(offset + 8, offset + 8 + length);
+    let crc = 0xffffffff;
+    for (const byte of bytes.subarray(offset + 4, offset + 8 + length)) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit++) { crc = crc >>> 1 ^ (crc & 1 ? 0xedb88320 : 0); }
+    }
+    assert.equal(bytes.readUInt32BE(offset + 8 + length), (crc ^ 0xffffffff) >>> 0);
+    chunks.push({ type, data });
+    offset += length + 12;
+    assert.ok(offset <= bytes.length);
+  }
+  assert.deepEqual(chunks.map(chunk => chunk.type), ["IHDR", "tEXt", "IDAT", "IEND"]);
+  const header = chunks[0].data;
+  const width = header.readUInt32BE();
+  const height = header.readUInt32BE(4);
+  assert.deepEqual([...header.subarray(8)], [8, 2, 0, 0, 0]);
+  const pixels = inflateSync(chunks[2].data);
+  assert.equal(pixels.length, (width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) { assert.equal(pixels[y * (width * 3 + 1)], 0); }
+  return { width, height, pixels, description: chunks[1].data.toString("utf8").split("\0")[1] };
+}
+
+test("rendered trace PNG draws only approved safe metadata with no network or private-field leakage", t => {
+  t.mock.method(globalThis, "fetch", () => assert.fail("Rendering must not fetch resources."));
+  t.mock.method(https, "request", () => assert.fail("Rendering must not make HTTP requests."));
+  const policy = { id: "app-traces", policyRevision: "1".repeat(64), maxWindowMinutes: 30,
+    diagnostics: { endpoints: ["GET /private-route"], messages: ["<script>alert(1)</script>"] } };
+  const evidence = { source: policy.id, policyRevision: policy.policyRevision,
+    start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z", truncated: true, omittedDiagnostics: 3,
+    rows: [
+      { table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "private-id", operation_ParentId: null,
+        success: false, resultCode: "500", endpoint: "GET /private-route" },
+      { table: "dependencies", timestamp: "2026-11-19T10:01:01Z", operation_Id: "private-id", operation_ParentId: "parent",
+        success: true, resultCode: "private-code" },
+      { table: "traces", timestamp: "2026-11-19T10:01:02Z", operation_Id: "private-id", operation_ParentId: null,
+        severityLevel: 3, logMessage: "<script>alert(1)</script>" },
+      { table: "exceptions", timestamp: "2026-11-19T10:01:03Z", operation_Id: null, operation_ParentId: null,
+        severityLevel: null, type: "Private.CustomerException" }
+    ] };
+  const bytes = renderTraceImage(evidence, policy);
+  const decoded = decodeTracePng(bytes);
+  assert.equal(decoded.width, 1100);
+  assert.equal(decoded.height, 404);
+  assert.match(decoded.description, /UTC WINDOW: 2026-11-19T10:00:00.000Z TO 2026-11-19T10:15:00.000Z/u);
+  assert.match(decoded.description, /OBSERVED ROWS: 4 \/ 10 MAX - TRUNCATED: YES\nOMITTED DIAGNOSTICS: 3/u);
+  assert.match(decoded.description, /REQUESTS \| FALSE \| 500 \| N\/A/u);
+  assert.match(decoded.description, /DEPENDENCIES \| TRUE \| N\/A \| N\/A/u);
+  assert.match(decoded.description, /TRACES \| N\/A \| N\/A \| 3 ERROR/u);
+  assert.match(decoded.description, /EXCEPTIONS \| N\/A \| N\/A \| N\/A/u);
+  assert.match(decoded.description, /NOT AN AZURE PORTAL SCREENSHOT/u);
+  assert.doesNotMatch(decoded.description, /private|parent|CustomerException|script|alert/iu);
+  const changedPrivate = structuredClone(evidence);
+  for (const row of changedPrivate.rows) { row.operation_Id = "other-id"; row.operation_ParentId = null; }
+  changedPrivate.rows[0].endpoint = null;
+  changedPrivate.rows[2].logMessage = null;
+  changedPrivate.rows[3].type = "Other.PrivateException";
+  assert.deepEqual(renderTraceImage(changedPrivate, policy), bytes);
+  // The R in the visible title and 2 in the first timestamp have dark foreground pixels.
+  const pixel = (x, y) => [...decoded.pixels.subarray(y * (1100 * 3 + 1) + 1 + x * 3, y * (1100 * 3 + 1) + 4 + x * 3)];
+  assert.deepEqual(pixel(20, 18), [24, 35, 50]);
+  assert.deepEqual(pixel(22, 165), [24, 35, 50]);
+  assert.throws(() => renderTraceImage(evidence), /approved policy/u);
+  assert.throws(() => renderTraceImage({ ...evidence, policyRevision: "2".repeat(64) }, policy), /approved source/u);
+  assert.throws(() => renderTraceImage({ ...evidence, rows: [{ ...evidence.rows[0], message: "private" }] }, policy), /Unsupported/u);
+  const maximum = renderTraceImage({ ...evidence, rows: Array(10).fill(evidence.rows[0]) }, policy);
+  assert.ok(maximum.length < 64 * 1024);
+  assert.equal(decodeTracePng(maximum).height, 620);
+});
+
 test("ticket feedback summarizes the failure and trace snapshot while retaining full rows privately", async () => {
   const fixture = ticketFixture({ readable: true });
   try {
+    const uploads = [];
+    fixture.client.uploadTraceImage = async bytes => {
+      uploads.push(bytes);
+      return "12345678-1234-1234-1234-123456789abc";
+    };
+    fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
     fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
       subscriptionId: "12345678-1234-1234-1234-123456789abc",
       applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10,
@@ -1082,6 +1185,10 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
         versionComparison: { latestCommit: "1".repeat(40), finding: "unknown", evidence: "Deployment metadata could not be read." } };
     } });
     const text = fixture.posted[0].text;
+    assert.equal(uploads.length, 1, "approved trace results must produce one PNG attachment");
+    assert.deepEqual(uploads[0].subarray(0, 8), png);
+    assert.match(text, /!\[Rendered trace results\]\(https:\/\/dev.azure.com\//u);
+    assert.match(formatAzureDevOpsComment(text), /<img .*alt="Rendered trace results"/u);
     assert.match(text, /Trace snapshot/);
     for (const value of ["10:01:00", "Request: HTTP 500", "Correlated downstream call: HTTP 404",
       "GET /v1/items/lookup", "Backend request failed."]) {
@@ -1106,7 +1213,176 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     assert.equal(fixture.item.state, "Active");
     await fixture.run({ plan, execute() { assert.fail("Own trace feedback must not trigger another attempt."); } });
     assert.equal(fixture.posted.length, 1);
+    assert.equal(uploads.length, 1);
   } finally { fixture.cleanup(); }
+});
+
+test("trace image rendering and uncertain upload failures preserve text feedback and bounded restart outcomes", async () => {
+  for (const failure of ["render", "upload", "unsupported"]) {
+    const fixture = traceImageFixture();
+    let uploads = 0;
+    try {
+      if (failure !== "unsupported") {
+        fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
+        fixture.client.uploadTraceImage = async () => { uploads++; throw new Error("private provider error"); };
+      }
+      await fixture.run({ plan: fixture.plan, execute: fixture.execute,
+        ...(failure === "render" ? { renderTraceResults() { throw new Error("private renderer error"); } } : {}) });
+      assert.equal(uploads, failure === "upload" ? 1 : 0);
+      assert.equal(fixture.posted.length, 1);
+      assert.match(fixture.posted[0].text, /image unavailable/u);
+      assert.match(fixture.posted[0].text, /Trace snapshot/u);
+      assert.doesNotMatch(fixture.posted[0].text, /private provider|private renderer|!\[/u);
+      assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].traceImage.reason,
+        { render: "render-failed", upload: "upload-unconfirmed", unsupported: "unsupported" }[failure]);
+      await fixture.run({ plan: fixture.plan, execute() { assert.fail("Do not rerun a completed diagnosis."); } });
+      assert.equal(fixture.posted.length, 1);
+      assert.equal(uploads, failure === "upload" ? 1 : 0);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("trace attachment and uncertain comment receipts survive restart without changing fingerprints or reuploading", async () => {
+  const fixture = traceImageFixture();
+  let uploads = 0;
+  try {
+    fixture.client.uploadTraceImage = async () => { uploads++; return "12345678-1234-1234-1234-123456789abc"; };
+    fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
+    const commentIds = fixture.client.commentIds;
+    fixture.client.commentIds = async () => [];
+    await assert.rejects(fixture.run({ plan: fixture.plan, execute: fixture.execute }), /read-back is unconfirmed/u);
+    const receipt = JSON.parse(readFileSync(fixture.journalPath)).entries[0].feedback;
+    await assert.rejects(fixture.run({ plan: fixture.plan, execute() { assert.fail("Do not rerun."); } }), /previous feedback submission is unconfirmed/u);
+    assert.deepEqual(JSON.parse(readFileSync(fixture.journalPath)).entries[0].feedback, receipt);
+    assert.equal(uploads, 1);
+    fixture.client.commentIds = commentIds;
+    await fixture.run({ plan: fixture.plan, execute() { assert.fail("Reconcile only."); } });
+    assert.equal(uploads, 1);
+    assert.equal(fixture.posted.length, 1);
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].traceImage.feedbackConfirmed, true);
+  } finally { fixture.cleanup(); }
+});
+
+test("trace feedback rechecks assignment after upload and never repeats an uncertain upload on restart", async () => {
+  for (const receiptStatus of ["uploaded", "uploading"]) {
+    const fixture = traceImageFixture();
+    let uploads = 0;
+    try {
+      fixture.client.uploadTraceImage = async () => {
+        uploads++;
+        fixture.item.assignedToCurrentUser = false;
+        return "12345678-1234-1234-1234-123456789abc";
+      };
+      fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
+      await assert.rejects(fixture.run({ plan: fixture.plan, execute: fixture.execute }), /changed before feedback/u);
+      assert.equal(uploads, 1);
+      assert.equal(fixture.posted.length, 0);
+      const state = JSON.parse(readFileSync(fixture.journalPath));
+      assert.equal(state.entries[0].traceImage.status, "uploaded");
+      if (receiptStatus === "uploading") {
+        state.entries[0].traceImage = { status: "uploading" };
+        delete state.entries[0].feedback;
+        writeFileSync(fixture.journalPath, JSON.stringify(state));
+      }
+      fixture.item.assignedToCurrentUser = true;
+      await fixture.run({ plan: fixture.plan, execute() { assert.fail("Retain the investigation."); } });
+      assert.equal(uploads, 1);
+      assert.equal(fixture.posted.length, 1);
+      assert.match(fixture.posted[0].text, receiptStatus === "uploaded" ? /!\[Rendered trace results\]/u : /image unavailable.*upload was not confirmed/u);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("pending legacy readable and table trace feedback keep their delivery format without adding images", async () => {
+  for (const format of [undefined, "readable", "table"]) {
+    const fixture = traceImageFixture();
+    try {
+      await assert.rejects(fixture.run({ plan: fixture.plan, execute: async () => {
+        fixture.item.assignedToCurrentUser = false;
+        return fixture.execute();
+      } }), /changed during execution/u);
+      const state = JSON.parse(readFileSync(fixture.journalPath));
+      state.entries[0].status = "feedback-pending";
+      if (format === undefined) { delete state.entries[0].feedbackFormat; }
+      else { state.entries[0].feedbackFormat = format; }
+      writeFileSync(fixture.journalPath, JSON.stringify(state));
+      fixture.item.assignedToCurrentUser = true;
+      fixture.client.uploadTraceImage = async () => assert.fail("Historical feedback must not upload.");
+      await fixture.run({ plan: fixture.plan, execute() { assert.fail("Resume feedback only."); } });
+      assert.equal(fixture.posted.length, 1);
+      assert.doesNotMatch(fixture.posted[0].text, /Rendered trace results|image unavailable/u);
+      assert.match(fixture.posted[0].text, /Trace snapshot/u);
+      await fixture.run({ plan: fixture.plan, execute() { assert.fail("Do not duplicate historical feedback."); } });
+      assert.equal(fixture.posted.length, 1);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("ADO trace upload sends bounded PNG bytes and embeds only canonical attachment images", async t => {
+  const policy = { id: "app-traces", policyRevision: "1".repeat(64), maxWindowMinutes: 30 };
+  const bytes = renderTraceImage({ source: policy.id, policyRevision: policy.policyRevision,
+    start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+    rows: [{ table: "traces", timestamp: "2026-11-19T10:01:00Z",
+      operation_Id: null, operation_ParentId: null, severityLevel: 3 }] }, policy);
+  const calls = [];
+  let attachmentId = "12345678-1234-1234-1234-123456789abc";
+  const client = createAzureDevOpsTicketClient({
+    profile: { azureDevOps: { organization: "example-org", project: "Example Project" } },
+    tokenProvider: () => "synthetic-token",
+    requestJson: async (url, token, options) => {
+      assert.equal(token, "synthetic-token");
+      calls.push({ url, options });
+      return { id: attachmentId, url: "https://untrusted.invalid/ignored" };
+    }
+  });
+  const id = await client.uploadTraceImage(bytes);
+  assert.equal(id, attachmentId);
+  assert.match(calls[0].url, /^https:\/\/dev.azure.com\/example-org\/Example%20Project\/_apis\/wit\/attachments\?fileName=rendered-trace-results.png&api-version=7.1$/u);
+  assert.equal(calls[0].options.contentType, "application/octet-stream");
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(calls[0].options.body, bytes);
+  const url = client.traceImageUrl(id);
+  await client.comment(42, `Observed evidence only.\n\n![Rendered trace results](${url})`);
+  assert.equal(calls[1].options.body.text, `Observed evidence only.<br><br><img src="${url}" alt="Rendered trace results">`);
+  const punctuatedProject = url.replace("Example%20Project", encodeURIComponent("Example Project (reviewer's)"));
+  assert.match(formatAzureDevOpsComment(`![Rendered trace results](${punctuatedProject})`), /<img/u);
+  for (const unsafe of ["https://example.invalid/a.png", `${url}?token=private`, `${url}" onerror="alert(1)`,
+    `http:${url.slice(6)}`, `javascript:alert(1)`]) {
+    assert.doesNotMatch(formatAzureDevOpsComment(`![Rendered trace results](${unsafe})`), /<img/u);
+  }
+  assert.throws(() => client.traceImageUrl("../outside"), /exact attachment/u);
+  await assert.rejects(client.uploadTraceImage(Buffer.alloc(100)), /bounded PNG/u);
+  await assert.rejects(client.uploadTraceImage(Buffer.alloc(65537)), /bounded PNG/u);
+  attachmentId = "../invalid";
+  await assert.rejects(client.uploadTraceImage(bytes), /confirm the trace attachment/u);
+  let wirePayload;
+  const requestMock = t.mock.method(https, "request", (_url, options, callback) => {
+    assert.equal(options.headers["Content-Type"], "application/octet-stream");
+    assert.equal(options.headers["Content-Length"], bytes.length);
+    const request = new EventEmitter();
+    request.setTimeout = () => {};
+    request.end = payload => {
+      wirePayload = payload;
+      const response = new EventEmitter();
+      response.statusCode = 200;
+      callback(response);
+      response.emit("data", Buffer.from(JSON.stringify({ id: "12345678-1234-1234-1234-123456789abc" })));
+      response.emit("end");
+    };
+    return request;
+  });
+  syncBuiltinESMExports();
+  try {
+    const wireClient = createAzureDevOpsTicketClient({
+      profile: { azureDevOps: { organization: "example-org", project: "Example Project" } },
+      tokenProvider: () => "synthetic-token"
+    });
+    await wireClient.uploadTraceImage(bytes);
+    assert.deepEqual(wirePayload, bytes, "the default adapter must not JSON-serialize PNG bytes");
+  } finally {
+    requestMock.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("ticket trace evidence rejects unbounded, unrelated and private fields before publication", () => {

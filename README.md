@@ -74,6 +74,10 @@ ticket and related PRs, confirm the scope, then prepare and submit a normal
 local job. Existing work is preserved; tool/data grants do not transfer.
 Ticket comments use a moderate high-level summary with changes, actual checks
 and a next action; expandable reports retain the technical detail.
+New watcher trace feedback also attaches **Rendered trace results**, a local PNG
+grid of approved telemetry metadata, not an Azure Portal screenshot or validation
+proof. Private identifiers and diagnostic text are excluded; unavailable images
+are explicitly reported without blocking text findings.
 Optional [incident evidence helpers](docs/commands.md#incident-evidence-helpers)
 make approved, environment-bound Cosmos/trace tooling discoverable without
 automatically connecting, copying credentials or granting production access.
