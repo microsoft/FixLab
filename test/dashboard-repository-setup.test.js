@@ -135,6 +135,8 @@ test("owned checkout recovery retains verified configuration when only watcher d
 test("owned checkout onboarding runs declared setup and reports a failed restore without claiming readiness", async () => {
   const f = fixture();
   try {
+    f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
     const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
     const packageRoot = join(f.root, "helper");
     mkdirSync(join(packageRoot, "bin"), { recursive: true });
@@ -239,6 +241,78 @@ test("watcher preparation runs real profile restores before review without copyi
     assert.equal(readFileSync(join(changed.repository, "tracked.txt"), "utf8"), "changed by restore");
     createExecutorLease(changed.repository, "verified-setup-successor", { worktree: true })
       .acquire(changed.jobId).release();
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("dependency preparation blocks missing directories and rejects restore-modified reviewed setup", async () => {
+  const f = fixture();
+  try {
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    const cli = join(packageRoot, "bin", "fixlab.js");
+    f.profile.applications = { backend: { workingDirectory: "missing-backend" } };
+    f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+    for (const directory of ["missing-backend", "tracked.txt"]) {
+      f.profile.applications.backend.workingDirectory = directory;
+      writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      writeFileSync(cli, "process.exit(8);");
+      const result = await restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true });
+      assert.equal(result.ready, false);
+      assert.match(result.message, /backend restore directory.*missing|backend restore directory.*not a directory/u);
+    }
+    f.profile.applications.backend.workingDirectory = ".";
+    for (const parts of [[".github", "fixlab", "repository-profile.json"], ["frontend", "playwright.local.ts"]]) {
+      writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      writeFileSync(cli, `require('node:fs').writeFileSync(require('node:path').join(...${JSON.stringify(parts)}),'{}');`);
+      await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }),
+        /reviewed profile|reviewed setup/u);
+      assert.equal(readFileSync(join(workspace.repository, ...parts), "utf8"), "{}");
+      createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+        .acquire(workspace.jobId).release();
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("dependency preparation force-stops a POSIX restore that ignores graceful termination",
+  { skip: process.platform === "win32", timeout: 20000 }, async () => {
+    const f = fixture();
+    try {
+      f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+      writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      const packageRoot = join(f.root, "helper");
+      mkdirSync(join(packageRoot, "bin"), { recursive: true });
+      writeFileSync(join(packageRoot, "bin", "fixlab.js"),
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);");
+      const result = await restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true, timeoutMs: 1000 });
+      assert.equal(result.ready, false);
+      assert.match(result.message, /timed out/u);
+      createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+        .acquire(workspace.jobId).release();
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+test("a failed frontend restore does not prevent independent backend preparation", async () => {
+  const f = fixture();
+  try {
+    f.profile.applications = { frontend: { workingDirectory: "frontend" }, backend: { workingDirectory: "." } };
+    f.profile.validation = { commands: { frontendRestore: "node restore-fixture.cjs", backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    writeFileSync(join(packageRoot, "bin", "fixlab.js"), `
+      if (process.argv.includes('--application=frontend')) process.exit(7);
+      if (!process.argv.includes('--application=backend')) process.exit(8);
+      const fs = require('node:fs'); fs.mkdirSync('obj', {recursive:true});
+      fs.writeFileSync(require('node:path').join('obj','project.assets.json'),'restored');
+    `);
+    const result = await restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true });
+    assert.equal(result.ready, false);
+    assert.match(result.message, /frontend restore.*exited 7.*backend restore.*completed/u);
+    assert.equal(readFileSync(join(workspace.repository, "obj", "project.assets.json"), "utf8"), "restored");
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 

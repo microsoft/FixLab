@@ -1350,6 +1350,11 @@ test("prepare plans and runs repository-owned restore commands", () => {
       false
     );
 
+    const backendOnly = run(["prepare", repository, "--application=backend", "--yes"], repository);
+    assert.equal(backendOnly.status, 0, backendOnly.stderr);
+    assert.equal(existsSync(join(repository, "backend", "src", "prepared.txt")), true);
+    assert.equal(existsSync(join(repository, "frontend", "prepared.txt")), false);
+    assert.equal(run(["prepare", repository, "--application=unknown", "--yes"], repository).status, 1);
     const prepared = run(["prepare", repository, "--yes"], repository);
     assert.equal(prepared.status, 0);
     assert.match(prepared.stdout, /PASS  frontend restore/);

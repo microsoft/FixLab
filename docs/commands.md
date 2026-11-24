@@ -858,16 +858,20 @@ retained; private credentials and browser state are not copied.
 
 The watcher preview includes the configured frontend, backend and browser restore
 commands. Before each fresh owned snapshot enters read-only review, the host runs
-only those commands through `fixlab prepare --yes`, with a ten-minute limit.
+only those commands through `fixlab prepare --application=<frontend|backend|browser>
+--yes`. A ten-minute restore-command budget is divided between the configured
+applications, with bounded owned-process termination grace. Each application is
+attempted independently, so a failed frontend restore cannot prevent backend setup.
 Application/browser startup, sign-in and onboarding are not requested.
 Restore directories must remain inside the owned snapshot, and its reviewed
 profile revision must match the configuration approved when the watcher started.
 Changed configuration requires review and a watcher restart.
 Preparation is not repeated on authentication resume
 or entry to the fix phase. A failed restore is a blocked prerequisite, not a passed
-test; independent source and approved evidence analysis can still continue.
-The existing preparation command stops at the first failed restore, so subsequent
-restores remain unattempted until that prerequisite is repaired.
+test; independent existing checks with available prerequisites, source analysis
+and approved evidence analysis can still continue.
+Direct `fixlab prepare` without `--application` retains its existing fail-fast,
+all-applications behavior.
 
 Adding `FixLab` to an active Bug, User Story, Feature or Product Backlog Item
 assigned to the signed-in Azure DevOps user, in a configured area or descendant,
