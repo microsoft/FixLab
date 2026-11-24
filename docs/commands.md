@@ -924,7 +924,11 @@ work-item/verified PR links. This does not start a watcher or grant permissions.
 Finished means feedback was recorded, not that tests passed. Check/scenario
 messages are agent-reported, not independent runner proof. Old attempts may
 have basic history only. Detailed history retains the latest 20 attempts,
-20 activity and 10 check updates per attempt; raw console output is not stored.
+20 activity and 10 check updates per attempt; completed/reconciled evidence
+also expires after 15 days. Journal saves and watcher polling remove expired
+details, version comparisons and retained result payloads, not the lightweight
+duplicate-prevention records, feedback receipts or recovery audit. Active,
+paused and pending-feedback evidence is preserved. Raw console output is not stored.
 Worker status is the last reported state, not a process health check.
 Work-item links show the ADO ID and a safely bounded title. New attempts retain
 their title; older missing titles are read from ADO for at most 20 recent attempts

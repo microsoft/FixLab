@@ -61,10 +61,18 @@ The existing dashboard's **Watcher jobs** panel reads the scope-checked private
 journal through `GET /api/ticket-automation`; reading never starts or changes
 watcher work. Future attempts retain timestamps, safe structured activity and
 agent-reported check/scenario outcomes. Raw output is not retained. The latest
-20 attempts retain at most 20 activity and 10 check updates each; older entries
-keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown.
-Detailed version comparisons follow the same latest-20-attempt retention;
-pending authentication resumes retain their required phase evidence.
+20 attempts retain at most 20 activity and 10 check updates each. Completed and
+reconciled attempts lose detailed history, version comparisons and retained
+result payloads when outside that latest-20 window or more than 15 days after
+completion, whichever occurs first. Cleanup runs on journal saves and each
+watcher polling pass, including idle polling; reading history never writes it.
+Legacy entries without a completion timestamp use their last-update timestamp;
+missing or invalid timestamps do not trigger age-based deletion.
+Basic deduplication/outcome metadata, feedback receipts and recovery audit remain.
+Running, snapshot-pending, feedback-pending and authentication-paused attempts
+retain their evidence regardless of age or position. The journal's existing
+size and entry-count limits still fail explicitly rather than deleting duplicate
+barriers. Legacy missing evidence stays unknown.
 Optional structured trace evidence follows the same retention. Watcher feedback
 retains up to ten observed rows privately, including timestamps, correlation IDs,
 codes and severity. Discussion receives a short failure summary and trace

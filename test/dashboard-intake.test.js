@@ -328,7 +328,12 @@ test("version evidence retention prunes old completed details but preserves paus
       ...structuredClone(original), id: index === 21 ? original.id : 500 + index,
       snapshot: { jobId: randomUUID(), commit: "1".repeat(40) },
       versionComparison: { latestCommit: "1".repeat(40), finding: "unknown",
-        evidence: "No approved deployment metadata." }
+        evidence: "No approved deployment metadata." },
+      result: { outcome: "analysis", summary: "Retained recovery result.",
+        traceEvidence: { source: "app-traces", policyRevision: "1".repeat(64),
+          start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+          rows: [{ table: "traces", timestamp: "2026-11-19T10:01:00Z",
+            operation_Id: "op-42", operation_ParentId: null, severityLevel: 3 }] } }
     }));
     const paused = state.entries[0];
     paused.status = "authentication-pending";
@@ -342,8 +347,68 @@ test("version evidence retention prunes old completed details but preserves paus
     assert.deepEqual(saved.entries[0], paused);
     assert.equal(saved.entries[1].versionComparison, undefined);
     assert.equal(saved.entries[1].details, undefined);
+    assert.equal(saved.entries[1].result, undefined);
     assert.equal(saved.entries[1].snapshot.commit, "1".repeat(40));
     assert.ok(saved.entries.slice(2).every(entry => entry.versionComparison && entry.details));
+  } finally { f.cleanup(); }
+});
+
+test("15-day cleanup removes only completed evidence and preserves duplicate barriers and unfinished jobs", async t => {
+  const f = ticketFixture({ readable: true });
+  try {
+    await f.run({ execute: async () => ({ outcome: "analysis", summary: "Completed synthetic investigation." }) });
+    const path = join(f.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    const original = state.entries[0];
+    const now = Date.parse("2026-12-20T12:00:00Z");
+    t.mock.method(Date, "now", () => now);
+    const cutoff = now - 15 * 24 * 60 * 60 * 1000;
+    const cases = [
+      { status: "complete", finishedAt: new Date(cutoff - 1).toISOString(), expired: true },
+      { status: "reconciled", finishedAt: new Date(cutoff - 1).toISOString(), expired: true },
+      { status: "complete", finishedAt: new Date(cutoff).toISOString() },
+      { status: "complete", finishedAt: new Date(cutoff + 1).toISOString() },
+      { status: "complete", finishedAt: new Date(now + 1).toISOString() },
+      { status: "complete", finishedAt: undefined, updatedAt: undefined },
+      { status: "complete", finishedAt: "unknown" },
+      { status: "complete", finishedAt: undefined, updatedAt: new Date(cutoff - 1).toISOString(), expired: true },
+      ...["running", "snapshot-pending", "feedback-pending", "authentication-pending"].map(status => ({
+        status, finishedAt: new Date(cutoff - 1).toISOString()
+      }))
+    ];
+    state.entries = cases.map(({ expired: _expired, ...values }, index) => ({
+      ...structuredClone(original), ...values, id: 500 + index,
+      sessionId: randomUUID(),
+      ...(values.status === "authentication-pending"
+        ? { authenticationRequired: { provider: "azure-cli", reason: "Human sign-in required." } } : {}),
+      versionComparison: { latestCommit: "1".repeat(40), finding: "unknown", evidence: "Source review." },
+      result: { outcome: "analysis", summary: "Retained evidence.",
+        traceEvidence: { source: "app-traces", policyRevision: "1".repeat(64),
+          start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+          rows: [{ table: "traces", timestamp: "2026-11-19T10:01:00Z",
+            operation_Id: "op-42", operation_ParentId: null, severityLevel: 3 }] } }
+    }));
+    writeFileSync(path, JSON.stringify(state));
+    await assert.rejects(f.run({ signal: AbortSignal.abort(),
+      execute() { assert.fail("Cleanup must not start or resume an investigation."); }
+    }), { name: "AbortError" });
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    assert.equal(saved.entries.length, state.entries.length);
+    for (const [index, entry] of state.entries.entries()) {
+      const expected = JSON.parse(JSON.stringify(entry));
+      if (cases[index].expired) {
+        delete expected.details;
+        delete expected.versionComparison;
+        delete expected.result;
+      }
+      assert.deepEqual(saved.entries[index], expected);
+    }
+    const completed = structuredClone(original);
+    completed.finishedAt = new Date(cutoff - 1).toISOString();
+    writeFileSync(path, JSON.stringify({ ...state, entries: [completed] }));
+    await f.run({ execute() { assert.fail("Expired evidence must not remove the completed revision's duplicate barrier."); } });
+    assert.equal(f.posted.length, 1);
+    assert.equal(readTicketAutomationHistory(f.repository).attempts[0].historyAvailable, false);
   } finally { f.cleanup(); }
 });
 

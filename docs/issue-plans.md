@@ -136,7 +136,10 @@ unconfirmed underlying cause. Approved incident-resolution comments can inform
 the summary when actually available; a resolved incident state alone is not
 root-cause or deployment evidence. Inaccessible resolution comments stay
 explicitly unverified. Full bounded evidence follows normal private history
-retention. Evidence is agent-reported correlation, not proof
+retention: completed/reconciled details and retained result payloads expire
+after 15 days or when outside the latest 20 attempts. Duplicate-prevention
+records remain; active, paused and pending-feedback evidence is not expired.
+Evidence is agent-reported correlation, not proof
 of a cause, deployment identity, successful validation or a source fix.
 
 ## Reviewed browser adapter

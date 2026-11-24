@@ -807,14 +807,27 @@ function replaceAutomationJournal(temporary, path) {
   }
 }
 
-function saveAutomationJournal(root, path, state, owner) {
-  privateFile(path, 1024 * 1024);
-  for (const entry of state.entries.slice(0, -20)) {
-    if (["complete", "reconciled"].includes(entry.status)) {
-      delete entry.details;
-      delete entry.versionComparison;
+function pruneAutomationEvidence(state) {
+  const cutoff = Date.now() - 15 * 24 * 60 * 60 * 1000;
+  let changed = false;
+  for (const [index, entry] of state.entries.entries()) {
+    if (!["complete", "reconciled"].includes(entry.status)) { continue; }
+    const timestamp = entry.finishedAt ?? entry.updatedAt;
+    const finished = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
+    if (index >= state.entries.length - 20 && !(finished < cutoff)) { continue; }
+    for (const key of ["details", "versionComparison", "result"]) {
+      if (Object.hasOwn(entry, key)) {
+        delete entry[key];
+        changed = true;
+      }
     }
   }
+  return changed;
+}
+
+function saveAutomationJournal(root, path, state, owner) {
+  privateFile(path, 1024 * 1024);
+  pruneAutomationEvidence(state);
   const contents = JSON.stringify(state);
   if (Buffer.byteLength(contents) > 1024 * 1024) {
     throw new Error("The automation journal reached its size limit; review and archive it before continuing.");
@@ -1488,6 +1501,7 @@ export async function watchTickets({
     do {
       signal?.throwIfAborted();
       verifyScope();
+      if (pruneAutomationEvidence(state)) { save(); }
       const pending = state.entries.find(entry => entry.status === "feedback-pending");
       if (pending) {
         await feedback(pending);
