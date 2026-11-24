@@ -57,8 +57,10 @@ keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown
 Detailed version comparisons follow the same latest-20-attempt retention;
 pending authentication resumes retain their required phase evidence.
 Optional structured trace evidence follows the same retention. Watcher feedback
-publishes up to ten observed rows, including timestamps, correlation IDs, codes
-and severity. Endpoint/message details require exact reviewed profile literals;
+retains up to ten observed rows privately, including timestamps, correlation IDs,
+codes and severity. Discussion receives a short failure summary and trace
+snapshot rather than raw rows or correlation IDs. Endpoint/message details
+require exact reviewed profile literals;
 unmatched text is omitted before reader output. Source revisions, UTC windows
 and diagnostic membership are revalidated before storage and pending feedback.
 These agent-reported correlations never establish a cause or deployed revision.

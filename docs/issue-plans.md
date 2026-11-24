@@ -123,8 +123,17 @@ return no row evidence. Query overflow remains a failing, partial read even
 when bounded evidence is available. The watcher requests this object in the
 agent's final result, validates its fields, window and current source revision,
 and checks every diagnostic literal before saving or posting it. Discussion
-gets a dedicated trace-evidence section; full bounded evidence follows normal
-private history retention. Evidence is agent-reported correlation, not proof
+gets a short trace snapshot: observed failure codes, at most two reviewed
+messages (preferring error/critical logs), an approved endpoint if available,
+and explicit omission/partial-evidence limits. Full rows and correlation IDs
+remain in private history instead of cluttering Discussion. A downstream
+failure is labelled correlated only when its operation ID matches an observed
+failed request. The summary distinguishes the observed failure chain from an
+unconfirmed underlying cause. Approved incident-resolution comments can inform
+the summary when actually available; a resolved incident state alone is not
+root-cause or deployment evidence. Inaccessible resolution comments stay
+explicitly unverified. Full bounded evidence follows normal private history
+retention. Evidence is agent-reported correlation, not proof
 of a cause, deployment identity, successful validation or a source fix.
 
 ## Reviewed browser adapter

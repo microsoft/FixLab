@@ -829,13 +829,13 @@ test("ticket feedback gives a high-level summary while retaining detailed work a
   }
 });
 
-test("ticket feedback posts bounded approved trace details and retains them without confirming a cause", async () => {
+test("ticket feedback summarizes the failure and trace snapshot while retaining full rows privately", async () => {
   const fixture = ticketFixture({ readable: true });
   try {
     fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
       subscriptionId: "12345678-1234-1234-1234-123456789abc",
       applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10,
-      diagnostics: { endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed."] }
+      diagnostics: { endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed.", "Lookup started."] }
     }] };
     writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
     const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
@@ -844,22 +844,31 @@ test("ticket feedback posts bounded approved trace details and retains them with
       start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z", rows: [
         { table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "op-42",
           operation_ParentId: "|root-42.span.", success: false, resultCode: "500", endpoint: "GET /v1/items/lookup" },
+        { table: "dependencies", timestamp: "2026-11-19T10:01:00.500Z", operation_Id: "op-42",
+          operation_ParentId: "|root-42.span.", success: false, resultCode: "404", endpoint: null },
+        { table: "traces", timestamp: "2026-11-19T10:01:00.750Z", operation_Id: "op-42",
+          operation_ParentId: null, severityLevel: 1, logMessage: "Lookup started." },
         { table: "traces", timestamp: "2026-11-19T10:01:01Z", operation_Id: "op-42",
           operation_ParentId: null, severityLevel: 3, logMessage: "Backend request failed." }
       ] };
     await fixture.run({ plan, execute: async ({ request }) => {
       assert.match(request, /traceEvidence/);
+      assert.match(request, /incident resolution was not verified/);
       return { outcome: "analysis", summary: "Observed a failed request; its cause remains unknown.", traceEvidence };
     } });
     const text = fixture.posted[0].text;
-    assert.match(text, /Trace evidence/);
-    for (const value of ["10:01:00", "op-42", "|root-42.span.", "500", "severityLevel=3",
+    assert.match(text, /Trace snapshot/);
+    for (const value of ["10:01:00", "Request: HTTP 500", "Correlated downstream call: HTTP 404",
       "GET /v1/items/lookup", "Backend request failed."]) {
       assert.ok(text.includes(value), `Missing trace evidence: ${value}`);
     }
     const attempt = readTicketAutomationHistory(fixture.repository).attempts[0];
     assert.equal(attempt.traceEvidence.rows[0].endpoint, "GET /v1/items/lookup");
-    assert.equal(attempt.traceEvidence.rows[1].logMessage, "Backend request failed.");
+    assert.equal(attempt.traceEvidence.rows[3].logMessage, "Backend request failed.");
+    assert.equal(attempt.traceEvidence.rows[0].operation_Id, "op-42");
+    assert.doesNotMatch(text, /op-42|root-42|operation_Id=|operation_ParentId=|severityLevel=|Lookup started\./u);
+    assert.match(text, /Underlying cause not confirmed/u);
+    assert.ok(text.length < 1500);
     assert.equal(attempt.confirmedCause, null);
     assert.equal(fixture.item.state, "Active");
     await fixture.run({ plan, execute() { assert.fail("Own trace feedback must not trigger another attempt."); } });
@@ -898,6 +907,39 @@ test("ticket trace evidence rejects unbounded, unrelated and private fields befo
     start: "2026-03-02T10:00:00Z", end: "2026-03-02T10:15:00Z",
     rows: [{ ...traceEvidence.rows[0], timestamp: "2026-02-30T10:01:00Z" }]
   } }));
+});
+
+test("trace snapshots do not imply correlation or root cause from unrelated failures and retain omissions", async () => {
+  const fixture = ticketFixture();
+  try {
+    fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
+      subscriptionId: "12345678-1234-1234-1234-123456789abc",
+      applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10
+    }] };
+    writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+    const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+    const policy = issuePlanConfiguration(fixture.repository, fixture.profile, "dev").traces[0];
+    await fixture.run({ plan, execute: async () => ({
+      outcome: "failed", summary: "The investigation stopped after observing failures; their cause remains unknown.",
+      traceEvidence: { source: policy.id, policyRevision: policy.policyRevision,
+        start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z", truncated: true, omittedDiagnostics: 2,
+        rows: [
+          { table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: null,
+            operation_ParentId: null, success: false, resultCode: "500" },
+          { table: "dependencies", timestamp: "2026-11-19T10:01:01Z", operation_Id: "unrelated-op",
+            operation_ParentId: null, success: false, resultCode: "404" }
+        ]
+      }
+    }) });
+    const text = fixture.posted[0].text;
+    assert.match(text, /correlation unconfirmed/u);
+    assert.doesNotMatch(text, /Correlated downstream call|unrelated-op|Confirmed cause/u);
+    assert.match(text, /Endpoint not returned or not approved/u);
+    assert.match(text, /2 unapproved diagnostic details omitted/u);
+    assert.match(text, /Evidence is partial/u);
+    assert.match(text, /Underlying cause not confirmed/u);
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].traceEvidence.rows.length, 2);
+  } finally { fixture.cleanup(); }
 });
 
 test("ticket trace details reject unapproved sources, revisions, windows and literals before saving or posting", async () => {
