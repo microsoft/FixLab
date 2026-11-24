@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { assignedJobWorktree, needsJobWorktree, prepareJobWorktree, restoreJobWorktree } from "../dashboard/job-worktree.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { executeVersionedTicketAgent } from "../dashboard/ticket-automation.js";
+import { resolveEvidenceRoot } from "../bin/structured-command.js";
 import { applyWorktreeSetup, browserConfigurationErrors, planWorktreeSetup, SETUP_PROFILE_PATH } from "../dashboard/repository-setup.js";
 
 function fixture() {
@@ -313,6 +314,64 @@ test("a failed frontend restore does not prevent independent backend preparation
     assert.equal(result.ready, false);
     assert.match(result.message, /frontend restore.*exited 7.*backend restore.*completed/u);
     assert.equal(readFileSync(join(workspace.repository, "obj", "project.assets.json"), "utf8"), "restored");
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("dependency preparation rejects linked evidence and releases ownership on pre-launch failures", async () => {
+  const f = fixture();
+  try {
+    f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    writeFileSync(join(packageRoot, "bin", "fixlab.js"), "process.exit(0);");
+    for (const linked of [true, false]) {
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      const evidence = resolveEvidenceRoot(workspace.repository);
+      mkdirSync(dirname(evidence), { recursive: true });
+      if (linked) {
+        const outside = join(f.root, "outside-evidence");
+        mkdirSync(outside);
+        symlinkSync(outside, evidence, process.platform === "win32" ? "junction" : "dir");
+        await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }), /symbolic links/u);
+      } else {
+        mkdirSync(evidence);
+        writeFileSync(join(evidence, "cache"), "not a directory");
+        await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }), error => {
+          assert.equal(error.code, "ENOTDIR");
+          assert.notEqual(error.ownedExecutorRunning, true);
+          return true;
+        });
+      }
+      createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+        .acquire(workspace.jobId).release();
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("each restore rechecks its directory after earlier restore scripts run", async () => {
+  const f = fixture();
+  try {
+    f.profile.applications = { frontend: { workingDirectory: "." }, backend: { workingDirectory: "backend" } };
+    f.profile.validation = { commands: { frontendRestore: "node restore-fixture.cjs", backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    mkdirSync(join(workspace.repository, "backend"));
+    const outside = join(f.root, "outside-backend");
+    mkdirSync(outside);
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    writeFileSync(join(packageRoot, "bin", "fixlab.js"), `
+      const fs=require('node:fs'), path=require('node:path');
+      if(process.argv.includes('--application=frontend')){
+        fs.rmdirSync('backend');
+        fs.symlinkSync(${JSON.stringify(outside)}, 'backend', process.platform==='win32'?'junction':'dir');
+      } else {
+        fs.writeFileSync(path.join('backend','must-not-execute.txt'),'escaped');
+      }
+    `);
+    await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }), /symbolic links/u);
+    assert.equal(existsSync(join(outside, "must-not-execute.txt")), false);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 

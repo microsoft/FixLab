@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { canonicalExecutionRepository, createExecutorLease } from "./executor-lease.js";
 import { spawnWindowsExecutor } from "./windows-executor.js";
 import { applyWorktreeSetup, planWorktreeSetup, setupPath, SETUP_PROFILE_PATH } from "./repository-setup.js";
-import { runStructuredCommand } from "../bin/structured-command.js";
+import { resolveEvidenceRoot, runStructuredCommand } from "../bin/structured-command.js";
 
 function git(repository, args) {
   const result = spawnSync("git", args, {
@@ -173,21 +173,11 @@ async function restoreDependencies({ workspace, packageRoot, signal, approvedPro
   const steps = [];
   for (const application of ["frontend", "backend", "browser"]) {
     if (typeof commands[`${application}Restore`] !== "string" || !commands[`${application}Restore`].trim()) { continue; }
-    const directory = setupPath(workspace.repository, application === "browser"
+    const workingDirectory = application === "browser"
       ? profile.browserAutomation?.workingDirectory ?? profile.applications?.frontend?.workingDirectory ?? "."
-      : profile.applications?.[application]?.workingDirectory ?? ".");
-    let info;
-    try { info = lstatSync(directory); }
-    catch (error) {
-      if (error.code !== "ENOENT") { throw error; }
-      steps.push({ application, blocker: `${application} restore directory is missing inside the owned checkout` });
-      continue;
-    }
-    if (!info.isDirectory()) {
-      steps.push({ application, blocker: `${application} restore directory is not a directory` });
-      continue;
-    }
-    steps.push({ application });
+      : profile.applications?.[application]?.workingDirectory ?? ".";
+    setupPath(workspace.repository, workingDirectory);
+    steps.push({ application, workingDirectory });
   }
   if (!steps.length) {
     return { ready: false, message: "No dependency restore commands are configured; dependent checks require reviewed setup. Continue independent source analysis; no test is claimed passed." };
@@ -199,23 +189,34 @@ async function restoreDependencies({ workspace, packageRoot, signal, approvedPro
   const lease = createExecutorLease(workspace.repository, `setup-${workspace.jobId}`, { worktree: true }).acquire(workspace.jobId);
   const outcomes = [];
   const diagnostics = new Set();
-  const commandTimeoutSeconds = Math.ceil(timeoutMs / Math.max(1, steps.filter(step => !step.blocker).length) / 1000);
+  const commandTimeoutSeconds = Math.ceil(timeoutMs / steps.length / 1000);
   let quiescent = true;
   try {
     for (const step of steps) {
       signal?.throwIfAborted();
-      if (step.blocker) {
-        outcomes.push({ ready: false, message: step.blocker });
+      const directory = setupPath(workspace.repository, step.workingDirectory);
+      let info;
+      try { info = lstatSync(directory); }
+      catch (error) {
+        if (error.code !== "ENOENT") { throw error; }
+        outcomes.push({ ready: false, message: `${step.application} restore directory is missing inside the owned checkout` });
         continue;
       }
+      if (!info.isDirectory()) {
+        outcomes.push({ ready: false, message: `${step.application} restore directory is not a directory` });
+        continue;
+      }
+      const evidenceRoot = resolveEvidenceRoot(workspace.repository);
+      const gitDirectory = realpathSync.native(resolve(evidenceRoot, "..", ".."));
+      setupPath(gitDirectory, join("fixlab", "command-evidence"));
       let result;
-      quiescent = false;
       const code = await runStructuredCommand([
         "--stage", `watcher-${step.application}-restore`, "--timeout-seconds", String(commandTimeoutSeconds),
         "--", process.execPath, join(packageRoot, "bin", "fixlab.js"), "prepare", workspace.repository,
         "--yes", `--application=${step.application}`
       ], workspace.repository, {
         signal, stdout: { write() {} }, stderr: { write() {} },
+        onSpawn() { quiescent = false; },
         onResult(value) { result = value; quiescent = value.terminationVerified; }
       });
       if (!quiescent) {
@@ -239,6 +240,7 @@ async function restoreDependencies({ workspace, packageRoot, signal, approvedPro
         code === 0 ? "completed" : code === 124 ? "timed out" : `failed (exited ${code})`}` });
     }
   } catch (error) {
+    if (error.ownedExecutorRunning) { quiescent = false; }
     if (!quiescent) { error.ownedExecutorRunning = true; }
     throw error;
   } finally {

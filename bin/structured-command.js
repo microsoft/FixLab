@@ -960,6 +960,7 @@ export async function executeStructuredCommand(options, io = {}) {
       });
     }
     child = containment?.child ?? spawnProcess(executable, spawnedArguments, spawnOptions);
+    io.onSpawn?.(child);
     child.stdout.on("data", stdoutCollector.write);
     child.stderr.on("data", stderrCollector.write);
     io.signal?.addEventListener("abort", abort, { once: true });
