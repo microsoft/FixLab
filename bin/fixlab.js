@@ -66,6 +66,7 @@ import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboar
 import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand } from "../dashboard/issue-plans.js";
 import { runSessionRecoveryCommand } from "../dashboard/session-recovery.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
+import { restoreJobWorktree } from "../dashboard/job-worktree.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -2298,6 +2299,12 @@ async function main(args) {
       pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,
       codeBaseline: "Fetch origin's configured target for each new ticket into a private ticket ref; investigate in an owned, commit-pinned snapshot. Resume keeps the same snapshot, never pulls into active work.",
       versionReview: "Read-only deployed-versus-latest comparison before fix/PR work. Approved incident-time metadata only; otherwise deployed version unknown. Already-fixed findings produce analysis rather than duplicate fix PRs.",
+      dependencyPreparation: {
+        scope: "Before a fresh owned snapshot enters read-only review, run only its reviewed frontendRestore, backendRestore and browserRestore commands. No application/browser startup or sign-in; failed setup does not pass dependent tests.",
+        commands: Object.fromEntries(["frontendRestore", "backendRestore", "browserRestore"]
+          .filter(name => typeof profile.validation?.commands?.[name] === "string")
+          .map(name => [name, profile.validation.commands[name]]))
+      },
       resolution: plan.resolveOnCompletion
         ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
         : "No work-item state changes.",
@@ -2327,6 +2334,10 @@ async function main(args) {
               repository: checkout, prompt,
               ...(sessionId ? { sessionId } : {}), resume: resume === true, onSession,
               runtimeDirectories: [packageRoot], signal: controller.signal,
+              prepareWorkspace: assigned => restoreJobWorktree({
+                workspace: assigned, packageRoot, runtime: parsed.runtime,
+                dependenciesOnly: true, approvedProfile: profile, signal: controller.signal
+              }),
               onActivity,
               idleTimeoutMs: (profile.validation?.agentIdleTimeoutMinutes ?? 20) * 60000
             })

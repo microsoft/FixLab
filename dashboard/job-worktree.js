@@ -156,14 +156,45 @@ export function assignedJobWorktree({ repository, jobId, branchPrefix = "fixlab"
   return prepareJobWorktree({ repository: receipt.source, jobId, branchPrefix });
 }
 
-export async function restoreJobWorktree({ workspace, packageRoot, runtime, onOutput, signal }) {
+export async function restoreJobWorktree({
+  workspace, packageRoot, runtime, onOutput, signal, dependenciesOnly = false, approvedProfile, timeoutMs = 10 * 60 * 1000
+}) {
   signal?.throwIfAborted();
+  let originalDiff;
+  let originalHead;
+  if (dependenciesOnly) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2147483647) {
+      throw new Error("Dependency preparation requires a positive bounded timeout.");
+    }
+    const content = checkoutProfile(workspace.repository);
+    if (createHash("sha256").update(content).digest("hex") !== workspace.profileRevision) {
+      throw new Error("Dependency preparation requires this checkout's reviewed profile revision.");
+    }
+    const profile = JSON.parse(content);
+    if (approvedProfile !== undefined && !isDeepStrictEqual(profile, approvedProfile)) {
+      throw new Error("The dependency preparation profile changed since watcher approval; review it and restart the watcher.");
+    }
+    const commands = profile.validation?.commands ?? {};
+    for (const application of ["frontend", "backend", "browser"]) {
+      if (typeof commands[`${application}Restore`] !== "string" || !commands[`${application}Restore`].trim()) { continue; }
+      const directory = setupPath(workspace.repository, application === "browser"
+        ? profile.browserAutomation?.workingDirectory ?? profile.applications?.frontend?.workingDirectory ?? "."
+        : profile.applications?.[application]?.workingDirectory ?? ".");
+      if (!lstatSync(directory).isDirectory()) {
+        throw new Error("Dependency preparation requires existing directories inside the owned checkout.");
+      }
+    }
+    originalDiff = git(workspace.repository, ["diff", "HEAD", "--"]);
+    originalHead = git(workspace.repository, ["rev-parse", "HEAD"]);
+  }
   const useSavedProfile = workspace.profileSource === "saved-checkout";
   if (useSavedProfile) {
     onOutput?.("Source profile formatting or watcher-only diagnostics changed; retaining this job's verified saved configuration. No new diagnostic access was granted.\n");
   }
   const lease = createExecutorLease(workspace.repository, `setup-${workspace.jobId}`, { worktree: true }).acquire(workspace.jobId);
-  const args = [
+  const args = dependenciesOnly
+    ? [join(packageRoot, "bin", "fixlab.js"), "prepare", workspace.repository, "--yes"]
+    : [
     join(packageRoot, "bin", "fixlab.js"), "onboard", workspace.repository,
     ...(useSavedProfile ? [] : ["--from", workspace.source]), "--runtime", runtime, "--yes"
   ];
@@ -188,10 +219,22 @@ export async function restoreJobWorktree({ workspace, packageRoot, runtime, onOu
       catch (error) { if (error.code !== "ESRCH") { throw error; } }
     }
   };
+  let timedOut = false;
+  const timeout = dependenciesOnly ? setTimeout(() => { timedOut = true; cancel(); }, timeoutMs) : undefined;
+  timeout?.unref();
   signal?.addEventListener("abort", cancel, { once: true });
   let bytes = 0;
+  const diagnostics = new Set();
+  let failedRestore;
   for (const stream of [child.stdout, child.stderr]) {
     stream.on("data", chunk => {
+      if (dependenciesOnly) {
+        const text = chunk.toString("utf8");
+        for (const code of text.match(/\b(?:NETSDK\d{4}|NU\d{4}|MSB\d{4}|E401|E403|ENOTFOUND|ECONNREFUSED|ETIMEDOUT)\b/gu) ?? []) {
+          if (diagnostics.size < 5) { diagnostics.add(code); }
+        }
+        failedRestore ??= /(?:^|\n)(frontend|backend|browser) restore failed:/u.exec(text)?.[1];
+      }
       if (bytes < 8192) { onOutput?.(chunk.toString("utf8").slice(0, 8192 - bytes)); }
       bytes += chunk.length;
     });
@@ -209,11 +252,19 @@ export async function restoreJobWorktree({ workspace, packageRoot, runtime, onOu
     }
     lease.release();
     signal?.throwIfAborted();
-    return { ready: code === 0, message: code === 0
-        ? "Owned checkout onboarding and configured restores completed; authentication was not copied or started."
-        : `Checkout onboarding exited ${code ?? "without a code"}. Continue independent code work and repair the reported setup prerequisite before its dependent validation; no check is claimed passed.` };
+    if (dependenciesOnly && (originalHead !== git(workspace.repository, ["rev-parse", "HEAD"]) ||
+        originalDiff !== git(workspace.repository, ["diff", "HEAD", "--"]))) {
+      throw new Error("Dependency preparation changed tracked snapshot files; changes were preserved and read-only review was not started.");
+    }
+    const prerequisite = `${failedRestore ? ` ${failedRestore} restore failed.` : ""}${diagnostics.size ? ` Diagnostic codes: ${[...diagnostics].join(", ")}.` : ""}`;
+    const ready = code === 0 && !timedOut;
+    return { ready, message: ready
+        ? dependenciesOnly
+          ? "Owned checkout configured dependency restores completed; no application, browser or authentication was started. Tests have not yet run."
+          : "Owned checkout onboarding and configured restores completed; authentication was not copied or started."
+        : `Checkout ${dependenciesOnly ? "dependency preparation" : "onboarding"} ${timedOut ? "timed out" : `exited ${code ?? "without a code"}`}.${prerequisite} Continue independent code work and repair the reported setup prerequisite before its dependent validation; no check is claimed passed.` };
   } catch (error) {
     if (!child.pid) { lease.release(); }
     throw error;
-  } finally { signal?.removeEventListener("abort", cancel); }
+  } finally { clearTimeout(timeout); signal?.removeEventListener("abort", cancel); }
 }
