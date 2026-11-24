@@ -54,6 +54,9 @@ checks with available prerequisites can still run. Tracked-file changes or chang
 reviewed profile/setup file hashes stop read-only review rather
 than silently reviewing modified source. Authentication resumes and later fix
 phases do not repeat host preparation.
+Restore directories and the Git-private command-evidence path are checked again
+immediately before each invocation. Verified pre-launch failures release setup
+ownership; only launched work without stopped proof retains its reservation.
 Read-only review never provisions dependencies or changes configuration; any
 fix-phase setup still requires its existing scoped approval. Missing prerequisites
 block dependent checks, not independent source analysis. No extra folder grants,

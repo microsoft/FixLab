@@ -93,17 +93,21 @@ function capture() {
 test("owned structured commands inherit the selected DEV browser configuration context", async () => {
   const repository = createRepository();
   const output = capture();
+  let spawned = false;
   try {
     const status = await executeStructuredCommand({
       repository, cwd: repository, stage: "validation", reuse: false,
       timeoutSeconds: 30, command: process.execPath,
       commandArgs: ["-e", "if(process.env.FIXLAB_DEV_API_ENVIRONMENT!=='dev'||process.env.FIXLAB_DEV_API_MUTATION_MODE!=='none'||process.env.FIXLAB_DEV_API_SELECTED_MUTATION_MODE!=='none'||process.env.FIXLAB_REPOSITORY!==process.cwd()||process.env.FIXLAB_HELPER_ROOT!=='fixture-helper-root')process.exit(3);"]
-    }, { stdout: output.stream, stderr: output.stream, environment: {
+    }, { stdout: output.stream, stderr: output.stream,
+      onSpawn(child) { assert.ok(Number.isInteger(child.pid)); spawned = true; },
+      environment: {
       FIXLAB_REPOSITORY: repository, FIXLAB_HELPER_ROOT: "fixture-helper-root",
       FIXLAB_DEV_API_ENVIRONMENT: "dev", FIXLAB_DEV_API_MUTATION_MODE: "none",
       FIXLAB_DEV_API_SELECTED_MUTATION_MODE: "none"
     } });
     assert.equal(status, 0, output.text());
+    assert.equal(spawned, true);
   } finally { rmSync(repository, { recursive: true, force: true }); }
 });
 
