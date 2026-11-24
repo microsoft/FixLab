@@ -866,6 +866,11 @@ Application/browser startup, sign-in and onboarding are not requested.
 Restore directories must remain inside the owned snapshot, and its reviewed
 profile revision must match the configuration approved when the watcher started.
 Changed configuration requires review and a watcher restart.
+Preparation also checks untracked and Git-ignored instructions, source and
+configuration before and after each restore. Only `node_modules` below declared
+restore directories and `obj` below backend restore directories are permitted
+dependency outputs; tracked and reviewed setup files remain protected there.
+Unexpected changes are preserved and block read-only review.
 Preparation is not repeated on authentication resume
 or entry to the fix phase. A failed restore is a blocked prerequisite, not a passed
 test; independent existing checks with available prerequisites, source analysis

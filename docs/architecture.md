@@ -51,8 +51,13 @@ one missing folder, failure or timeout does not starve other applications.
 Setup records a separate passed/blocked prerequisite, not a passed test. Restore
 failures retain only bounded diagnostic codes in the review prompt; independent
 checks with available prerequisites can still run. Tracked-file changes or changed
-reviewed profile/setup file hashes stop read-only review rather
-than silently reviewing modified source. Authentication resumes and later fix
+reviewed profile/setup file hashes stop read-only review. A bounded content
+inventory also protects untracked and Git-ignored instructions, source and
+configuration before and after every restore. Only `node_modules` below declared
+restore directories and `obj` below backend restore directories are dependency
+outputs; tracked and explicitly reviewed files remain protected there too.
+Changes are preserved rather than silently reviewing modified source.
+Authentication resumes and later fix
 phases do not repeat host preparation.
 Restore directories and the Git-private command-evidence path are checked again
 immediately before each invocation. Verified pre-launch failures release setup

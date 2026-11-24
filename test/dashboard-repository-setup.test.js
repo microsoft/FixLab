@@ -195,7 +195,7 @@ test("watcher preparation runs real profile restores before review without copyi
   try {
     f.profile.applications = { backend: { workingDirectory: "." } };
     f.profile.validation = { commands: { backendRestore:
-      `node -e "const f=require('node:fs'); f.mkdirSync('obj',{recursive:true}); f.writeFileSync(require('node:path').join('obj','project.assets.json'),'restored');"`
+      `node -e "const f=require('node:fs'); const p=require('node:path'); f.mkdirSync('obj',{recursive:true}); f.writeFileSync(p.join('obj','project.assets.json'),'restored'); f.mkdirSync(p.join('node_modules','fixture'),{recursive:true}); f.writeFileSync(p.join('node_modules','fixture','index.js'),'restored dependency');"`
     } };
     writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
     const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
@@ -209,6 +209,7 @@ test("watcher preparation runs real profile restores before review without copyi
       execute: async options => {
         assert.equal(options.mode, "validate-only");
         assert.equal(readFileSync(join(workspace.repository, "obj", "project.assets.json"), "utf8"), "restored");
+        assert.equal(readFileSync(join(workspace.repository, "node_modules", "fixture", "index.js"), "utf8"), "restored dependency");
         assert.equal(existsSync(join(f.source, "obj")), false);
         assert.match(options.prompt, /configured dependency restores completed/u);
         return { outcome: "analysis", summary: "Existing source inspected.",
@@ -242,6 +243,37 @@ test("watcher preparation runs real profile restores before review without copyi
     assert.equal(readFileSync(join(changed.repository, "tracked.txt"), "utf8"), "changed by restore");
     createExecutorLease(changed.repository, "verified-setup-successor", { worktree: true })
       .acquire(changed.jobId).release();
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("dependency preparation rejects added instructions and modified untracked or ignored source before review", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.source, ".gitignore"), "ignored-source/\n");
+    f.git("add", ".gitignore");
+    f.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "source ignores");
+    f.profile.applications = { backend: { workingDirectory: "." } };
+    f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    const cli = join(packageRoot, "bin", "fixlab.js");
+    for (const parts of [["AGENTS.md"], ["ignored-source", "new.js"], ["source", "config.json"], ["obj"]]) {
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      const target = join(workspace.repository, ...parts);
+      mkdirSync(dirname(target), { recursive: true });
+      if (parts[0] === "source") { writeFileSync(target, "reviewed configuration"); }
+      writeFileSync(cli, `const fs = require('node:fs'); const p = require('node:path').join(...${JSON.stringify(parts)});
+        fs.mkdirSync(require('node:path').dirname(p), { recursive: true }); fs.writeFileSync(p, 'restore-modified source');`);
+      await assert.rejects(executeVersionedTicketAgent({
+        workspace, prompt: "Review only the original snapshot.",
+        prepareWorkspace: assigned => restoreJobWorktree({ workspace: assigned, packageRoot, dependenciesOnly: true }),
+        execute() { assert.fail("Restore-modified instructions or source must not enter read-only review."); }
+      }), /changed protected snapshot files/u);
+      assert.equal(readFileSync(target, "utf8"), "restore-modified source");
+      createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+        .acquire(workspace.jobId).release();
+    }
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
