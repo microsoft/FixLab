@@ -1143,6 +1143,11 @@ test("rendered trace PNG draws only approved safe metadata with no network or pr
   const maximum = renderTraceImage({ ...evidence, rows: Array(10).fill(evidence.rows[0]) }, policy);
   assert.ok(maximum.length < 64 * 1024);
   assert.equal(decodeTracePng(maximum).height, 620);
+  const unspecifiedLimits = { ...evidence };
+  delete unspecifiedLimits.truncated;
+  delete unspecifiedLimits.omittedDiagnostics;
+  assert.match(decodeTracePng(renderTraceImage(unspecifiedLimits, policy)).description,
+    /TRUNCATED: UNKNOWN\nOMITTED DIAGNOSTICS: N\/A/u);
 });
 
 test("ticket feedback summarizes the failure and trace snapshot while retaining full rows privately", async () => {
@@ -1263,14 +1268,16 @@ test("trace attachment and uncertain comment receipts survive restart without ch
   } finally { fixture.cleanup(); }
 });
 
-test("trace feedback rechecks assignment after upload and never repeats an uncertain upload on restart", async () => {
-  for (const receiptStatus of ["uploaded", "uploading"]) {
+test("trace feedback rechecks assignment and revision after upload without repeating uncertain uploads", async () => {
+  for (const receiptStatus of ["uploaded", "uploading", "edited"]) {
     const fixture = traceImageFixture();
+    const description = fixture.item.description;
     let uploads = 0;
     try {
       fixture.client.uploadTraceImage = async () => {
         uploads++;
-        fixture.item.assignedToCurrentUser = false;
+        if (receiptStatus === "edited") { fixture.item.description = "A changed scenario needs review."; }
+        else { fixture.item.assignedToCurrentUser = false; }
         return "12345678-1234-1234-1234-123456789abc";
       };
       fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
@@ -1285,10 +1292,11 @@ test("trace feedback rechecks assignment after upload and never repeats an uncer
         writeFileSync(fixture.journalPath, JSON.stringify(state));
       }
       fixture.item.assignedToCurrentUser = true;
+      fixture.item.description = description;
       await fixture.run({ plan: fixture.plan, execute() { assert.fail("Retain the investigation."); } });
       assert.equal(uploads, 1);
       assert.equal(fixture.posted.length, 1);
-      assert.match(fixture.posted[0].text, receiptStatus === "uploaded" ? /!\[Rendered trace results\]/u : /image unavailable.*upload was not confirmed/u);
+      assert.match(fixture.posted[0].text, receiptStatus !== "uploading" ? /!\[Rendered trace results\]/u : /image unavailable.*upload was not confirmed/u);
     } finally { fixture.cleanup(); }
   }
 });
@@ -1337,7 +1345,7 @@ test("ADO trace upload sends bounded PNG bytes and embeds only canonical attachm
   });
   const id = await client.uploadTraceImage(bytes);
   assert.equal(id, attachmentId);
-  assert.match(calls[0].url, /^https:\/\/dev.azure.com\/example-org\/Example%20Project\/_apis\/wit\/attachments\?fileName=rendered-trace-results.png&api-version=7.1$/u);
+  assert.match(calls[0].url, /^https:\/\/dev\.azure\.com\/example-org\/Example%20Project\/_apis\/wit\/attachments\?fileName=rendered-trace-results\.png&api-version=7.1$/u);
   assert.equal(calls[0].options.contentType, "application/octet-stream");
   assert.equal(calls[0].options.method, "POST");
   assert.deepEqual(calls[0].options.body, bytes);

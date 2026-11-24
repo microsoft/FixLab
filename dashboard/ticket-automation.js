@@ -1273,11 +1273,12 @@ export async function watchTickets({
     if (!policy) { throw new Error("Trace feedback does not match an approved source."); }
     result.traceEvidence = normalizeTraceEvidence(result.traceEvidence, policy);
   };
-  async function revalidateFeedback(entry) {
+  async function revalidateFeedback(entry, resolutionNotice = false) {
     const latest = await client.load(entry.id);
     const reviewed = entry.resolution && latest.state === "Resolved"
       ? { ...latest, state: entry.resolution.previousState } : latest;
-    if (!eligible(reviewed, plan) || revisionFor(reviewed, entry).fingerprint !== entry.fingerprint) {
+    // Resolution warnings may describe a post-feedback edit, but still require current assignment and scope.
+    if (!eligible(reviewed, plan) || !resolutionNotice && revisionFor(reviewed, entry).fingerprint !== entry.fingerprint) {
       throw new Error("The work item changed before feedback; no further feedback write was attempted.");
     }
     signal?.throwIfAborted();
@@ -1353,7 +1354,7 @@ export async function watchTickets({
       if (!await client.hasComment(entry.id, legacyMarker)) {
         signal?.throwIfAborted();
         verifyScope();
-        await revalidateFeedback(entry);
+        await revalidateFeedback(entry, key === "resolutionFeedback");
         await client.comment(entry.id, text);
       }
       return;
@@ -1371,7 +1372,7 @@ export async function watchTickets({
     }
     signal?.throwIfAborted();
     verifyScope();
-    await revalidateFeedback(entry);
+    await revalidateFeedback(entry, key === "resolutionFeedback");
     entry[key].attempted = true;
     save();
     await client.comment(entry.id, text);
