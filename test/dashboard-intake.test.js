@@ -1971,7 +1971,7 @@ test("completed stories resolve only with evidenced findings and the existing op
       } });
       assert.equal(fixture.item.state === "Resolved", expected);
       assert.ok(fixture.posted[0].text.startsWith("[Fixlab automation]\n"));
-      assert.match(fixture.posted[0].text, /Finding: The supported search behavior/);
+      assert.match(fixture.posted[0].text, /\| Finding \| The supported search behavior/u);
       assert.match(fixture.posted[0].text, /Evidence: The reviewed implementation/);
       assert.deepEqual(readTicketAutomationHistory(fixture.repository).attempts[0].completedStory, completedStory);
       await fixture.run({ execute() { assert.fail("Tagged feedback must not retrigger completed work."); } });
