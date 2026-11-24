@@ -87,8 +87,16 @@ size and entry-count limits still fail explicitly rather than deleting duplicate
 barriers. Legacy missing evidence stays unknown.
 Optional structured trace evidence follows the same retention. Watcher feedback
 retains up to ten observed rows privately, including timestamps, correlation IDs,
-codes and severity. Discussion receives a short failure summary and trace
-snapshot rather than raw rows or correlation IDs. Endpoint/message details
+codes and severity. Discussion receives a short analysis table and observed trace table rather than
+raw rows or correlation IDs. A bounded optional `report.evidence` array carries
+code locations and attributed supporting findings; confirmed-cause evidence is
+also visible in the summary. Reported explanations remain distinct from observed
+facts, and status-code correlation does not establish a batch count or limit
+violation. Screenshots are evidence only after actual approved validation, not a
+requirement for readable analysis. New attempts use a versioned table format;
+pending legacy and readable attempts retain their original rendering and saved
+delivery receipts. Table cells are HTML-escaped, escaped pipes/backslashes are
+preserved, and malformed tables fall back to escaped text. Endpoint/message details
 require exact reviewed profile literals;
 unmatched text is omitted before reader output. Source revisions, UTC windows
 and diagnostic membership are revalidated before storage and pending feedback.

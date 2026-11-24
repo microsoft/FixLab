@@ -325,10 +325,40 @@ export function azureDevOpsCommentFingerprint(text) {
   return createHash("sha256").update(text.replace(/\s+/gu, " ").trim()).digest("hex");
 }
 
+function commentTableCells(line) {
+  line = line.trim();
+  if (!line.startsWith("|") || !line.endsWith("|")) { return []; }
+  const cells = [];
+  let cell = "";
+  for (let index = 1; index < line.length - 1; index++) {
+    const character = line[index];
+    if (character === "\\" && ["\\", "|"].includes(line[index + 1])) {
+      cell += line[++index];
+    } else if (character === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += character;
+    }
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
 export function formatAzureDevOpsComment(text) {
   const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   return escaped.split("\n\n").map(block => {
     const [heading, ...lines] = block.split("\n");
+    const hasHeading = heading.startsWith("## ");
+    const [header = [], separator = [], ...rows] =
+      (hasHeading ? lines : [heading, ...lines]).map(commentTableCells);
+    if (header.length && separator.length === header.length &&
+        separator.every(cell => /^:?-{3,}:?$/u.test(cell)) && rows.length &&
+        rows.every(row => row.length === header.length)) {
+      return `${hasHeading ? `<h3>${heading.slice(3)}</h3>` : ""}` +
+        `<table border="1" cellpadding="6" cellspacing="0"><thead><tr>${header.map(cell => `<th>${cell}</th>`).join("")}</tr></thead>` +
+        `<tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    }
     if (heading.startsWith("## ") && lines.length && lines.every(line => line.startsWith("- "))) {
       return `<h3>${heading.slice(3)}</h3><ul>${lines.map(line => `<li>${line.slice(2)}</li>`).join("")}</ul>`;
     }

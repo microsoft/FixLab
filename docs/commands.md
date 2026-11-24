@@ -872,10 +872,18 @@ evidence, limitations and next steps, not an empty PR or a new story.
 Meaningful ticket edits or new human Discussion comments can trigger another
 investigation. FixLab's own feedback does not retrigger it.
 
-Discussion feedback uses three short sections: **Summary**, **Changes and
-validation**, and **Next action**. Expect two summary sentences and a few compact
-bullets, not a long paragraph or a full implementation plan. Detailed cause,
-completed/proposed work and evidence remain expandable in **Watcher jobs**.
+New Discussion feedback uses a readable **Analysis summary** table: what happened,
+the confirmed cause or explicitly unconfirmed assessment, supporting evidence,
+code changes, actual validation and the next action. Code evidence includes
+relative file/line references where available. Trace evidence has a separate
+**Trace snapshot (observed)** table showing the request/downstream/log chain and
+its limits. Reported incident explanations are attributed; status codes alone
+do not establish request counts, exceeded limits or an oversized URL.
+Tables do not require screenshots. Screenshot evidence must come from actual
+approved validation; missing screenshots or inaccessible incident notes are never
+invented. Detailed findings, completed/proposed work and evidence remain
+expandable in **Watcher jobs**. Older pending attempts retain their saved feedback
+format so an update does not change delivery fingerprints or duplicate comments.
 Version-reviewed attempts also include a bounded **Code version comparison**
 section with the pinned target, deployed revision or explicit unknown, and evidence.
 The executor reports these separately; missing evidence remains unknown.

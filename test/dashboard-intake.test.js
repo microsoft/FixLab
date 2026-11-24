@@ -944,13 +944,31 @@ test("revoking a migration approval during execution retains its result and bloc
   }
 });
 
+test("ADO tables render escaped cells without interpreting HTML or splitting escaped pipes", () => {
+  const text = [
+    "## Analysis summary",
+    "| Topic | Findings |",
+    "| --- | --- |",
+    String.raw`| Evidence | src\\parser.cs:20 \| inspected, not tested |`,
+    '| Assessment | <img src=x onerror=alert(1)> & "unverified" |'
+  ].join("\n");
+  const html = formatAzureDevOpsComment(text);
+  assert.match(html, /<h3>Analysis summary<\/h3><table/u);
+  assert.match(html, /<th>Topic<\/th><th>Findings<\/th>/u);
+  assert.ok(html.includes("<td>src\\parser.cs:20 | inspected, not tested</td>"));
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt; &amp; "unverified"'));
+  assert.doesNotMatch(html, /<img|<script/u);
+  assert.doesNotMatch(formatAzureDevOpsComment("| Topic | Findings |\n| --- | --- |\n| Incomplete |"), /<table/u);
+});
+
 test("ticket feedback gives a high-level summary while retaining detailed work and evidence in history", async () => {
-  const fixture = ticketFixture();
+  const fixture = ticketFixture({ readable: true });
   try {
     const result = {
       outcome: "analysis", summary: "The saved edit is overwritten by a stale row snapshot.",
       confirmedCause: { cause: "A stale row snapshot wins.", evidence: "The reducer replaces the saved value.", nextSteps: "Update the reducer and add a focused regression." },
       report: {
+        evidence: ["src/editor.js:42 replaces the saved value with an older row."],
         changesMade: ["No product changes made."],
         inProgress: ["None; investigation has finished."],
         plannedWork: ["Update the reducer after scope approval."],
@@ -962,16 +980,20 @@ test("ticket feedback gives a high-level summary while retaining detailed work a
     await fixture.run({ execute: async ({ request }) => {
       assert.match(request, /Include a report object for structured ADO feedback/);
       assert.match(request, /Distinguish completed changes from actual continuing work/);
+      assert.match(request, /relative file\/line references/u);
       return result;
     } });
     const text = fixture.posted[0].text;
-    for (const heading of ["Summary", "Changes and validation", "Next action"]) {
-      assert.match(text, new RegExp(`## ${heading}\\n- `));
+    assert.match(text, /## Analysis summary\n\| Topic \| Findings \|/u);
+    for (const row of ["What happened", "Confirmed cause", "Evidence", "Code changes", "Validation", "Next action"]) {
+      assert.ok(text.includes(`| ${row} |`), `Missing analysis row: ${row}`);
     }
-    assert.match(text, /- Confirmed cause: A stale row snapshot wins\./);
+    assert.match(text, /\| Confirmed cause \| A stale row snapshot wins\./u);
     assert.doesNotMatch(text, /## (Overview|Work in progress|Planned work|Root cause)/);
-    assert.doesNotMatch(text, /- Evidence: The reducer replaces the saved value\./);
-    assert.match(text, /- Not run: type-check, build and live journey\./);
+    assert.match(text, /The reducer replaces the saved value/u);
+    assert.match(text, /src\/editor\.js:42/u);
+    assert.match(text, /Not run: type-check, build and live journey/u);
+    assert.match(formatAzureDevOpsComment(text), /<table/u);
     assert.ok(text.length < 1500);
     const history = readTicketAutomationHistory(fixture.repository);
     assert.deepEqual(history.attempts[0].report, result.report);
@@ -980,7 +1002,8 @@ test("ticket feedback gives a high-level summary while retaining detailed work a
     await fixture.run({ execute() { assert.fail("Feedback must remain deduplicated."); } });
     assert.equal(fixture.posted.length, 1);
     for (const report of [{}, { rootCause: "x".repeat(501) }, { validation: "Passed" },
-      { validation: ["x".repeat(201)] }, { inProgress: Array(5).fill("Pending") }, { extra: ["Unexpected field"] }]) {
+      { validation: ["x".repeat(201)] }, { evidence: ["x".repeat(201)] },
+      { inProgress: Array(5).fill("Pending") }, { extra: ["Unexpected field"] }]) {
       assert.throws(() => ticketOutcome({ ...result, report }), /valid bounded/);
     }
   } finally {
@@ -1013,7 +1036,12 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     await fixture.run({ plan, execute: async ({ request }) => {
       assert.match(request, /traceEvidence/);
       assert.match(request, /incident resolution was not verified/);
+      assert.match(request, /Do not infer request size.*HTTP 404\/500 alone/u);
       return { outcome: "analysis", summary: "Observed a failed request; its cause remains unknown.", traceEvidence,
+        report: {
+          rootCause: "Incident notes attribute this to a batch larger than 50; the request count was not captured in these traces.",
+          evidence: ["Reported limit: 50 per request. Telemetry establishes the failure chain, not the request size."]
+        },
         versionComparison: { latestCommit: "1".repeat(40), finding: "unknown", evidence: "Deployment metadata could not be read." } };
     } });
     const text = fixture.posted[0].text;
@@ -1032,7 +1060,11 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     assert.equal(attempt.versionComparison.deployedCommit, null);
     assert.equal(attempt.versionComparison.evidence, "Deployment metadata could not be read.");
     assert.match(text, /Underlying cause not confirmed/u);
-    assert.ok(text.length < 1500);
+    assert.match(text, /\| Assessment \(not confirmed\) \| Incident notes attribute/u);
+    assert.match(text, /request count was not captured/u);
+    assert.doesNotMatch(text, /\| Confirmed cause \|/u);
+    assert.match(formatAzureDevOpsComment(text), /<table/u);
+    assert.ok(text.length < 2300);
     assert.equal(attempt.confirmedCause, null);
     assert.equal(fixture.item.state, "Active");
     await fixture.run({ plan, execute() { assert.fail("Own trace feedback must not trigger another attempt."); } });
@@ -1749,13 +1781,25 @@ test("untagged pending feedback from older builds reconciles without changing it
     await assert.rejects(fixture.run({ execute: async () =>
       ({ outcome: "analysis", summary: "The earlier investigation remains provisional." })
     }), /read-back is unconfirmed/);
-    const legacyText = fixture.posted[0].text.replace(/^\[Fixlab automation\]\n/u, "");
+    const legacyText = [
+      "## Summary",
+      "- The earlier investigation remains provisional.",
+      "",
+      "## Changes and validation",
+      "- See Watcher jobs for recorded checks. Unreported, blocked or skipped checks are not passed.",
+      "",
+      "## Next action",
+      "- Review the findings and outstanding evidence in Watcher jobs before continuing.",
+      "",
+      "Detailed findings, evidence and planned work remain in Watcher jobs."
+    ].join("\n");
     const plain = sanitizeAzureDevOpsHtml(formatAzureDevOpsComment(legacyText));
     const fingerprint = azureDevOpsCommentFingerprint(plain);
     fixture.item.comments[0].text = plain;
     fixture.item.comments[0].contentFingerprint = fingerprint;
     const path = join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json");
     const journal = JSON.parse(readFileSync(path, "utf8"));
+    journal.entries[0].feedbackFormat = "readable";
     journal.entries[0].feedback.fingerprint = fingerprint;
     writeFileSync(path, JSON.stringify(journal));
     fixture.client.commentIds = commentIds;
