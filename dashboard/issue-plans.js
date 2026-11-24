@@ -25,11 +25,19 @@ function requireValue(condition, message) {
   if (!condition) { throw new Error(message); }
 }
 
+function credentialFreeTraceText(value, maximum) {
+  const normalized = value.replace(/\b(Basic|Bearer)[:=]+/giu, "$1 ");
+  return !secret.test(normalized) && safeRuntimeText(normalized, maximum);
+}
+
 function traceMetadataReason(column, value) {
   if (value === null) { return column === "timestamp" ? "expected a non-null timestamp" : null; }
   if (column === "timestamp") {
-    return typeof value === "string" && value.length <= 40 && Number.isFinite(Date.parse(value))
-      ? null : "expected a valid timestamp of at most 40 characters";
+    const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
+    return typeof value === "string" && value.length <= 40 && Number.isFinite(timestamp) &&
+      /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?Z$/u.test(value) &&
+      new Date(timestamp).toISOString().slice(0, 19) === value.slice(0, 19)
+      ? null : "expected a valid UTC timestamp of at most 40 characters";
   }
   if (column === "success") {
     return typeof value === "boolean" || (typeof value === "string" && /^(?:true|false)$/iu.test(value))
@@ -40,7 +48,7 @@ function traceMetadataReason(column, value) {
   }
   if (typeof value !== "string" || value.length > 160) { return "expected a string of at most 160 characters"; }
   if (column === "operation_Id" || column === "operation_ParentId") {
-    if (!safeRuntimeText(value.replace(/\b(Basic|Bearer)[:=]+/giu, "$1 "), 160)) {
+    if (!credentialFreeTraceText(value, 160)) {
       return "credential-shaped identifier";
     }
     return /^[A-Za-z0-9_.:|+/=\-]*$/u.test(value) ? null : "unsupported identifier format";
@@ -51,7 +59,7 @@ function traceMetadataReason(column, value) {
 
 function diagnosticLiteral(value, endpoint = false) {
   text(value, 200);
-  requireValue(safeRuntimeText(value, 200) && !/https?:\/\/|@|[\\?=]/iu.test(value),
+  requireValue(credentialFreeTraceText(value, 200) && !/https?:\/\/|@|[\\?=]/iu.test(value),
     "Diagnostic literals must not contain credentials, identities, URLs or query strings.");
   requireValue(endpoint
     ? /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) \/[A-Za-z0-9_./{}-]*$/u.test(value) && !value.includes("..") && !value.includes("//")
@@ -463,8 +471,7 @@ export async function executeTracePlan(compiled, { tokenProvider = azureToken, r
   const traceEvidence = accepted.length ? normalizeTraceEvidence({
     source: compiled.policy.id, policyRevision: compiled.policy.policyRevision, start, end,
     rows: accepted.slice(0, 10).map(row => ({ table: compiled.table,
-      ...Object.fromEntries(compiled.columns.map((column, index) => [column, column === "timestamp"
-        ? new Date(Date.parse(row[index])).toISOString() : row[index]])) })),
+      ...Object.fromEntries(compiled.columns.map((column, index) => [column, row[index]])) })),
     truncated: rows.length > Math.min(10, compiled.limit), omittedDiagnostics
   }, compiled.policy) : undefined;
   return { status: table.rows.length > compiled.limit ? "partial" : "passed",

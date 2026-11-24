@@ -150,7 +150,7 @@ test("trace metadata rejection identifies only the trusted column and reason wit
   const row = ["2026-11-19T10:01:00Z", "0123456789abcdef", null, 3];
   const cases = [
     [0, null, "timestamp", "expected a non-null timestamp"],
-    [0, "private-invalid-time", "timestamp", "expected a valid timestamp of at most 40 characters"],
+    [0, "private-invalid-time", "timestamp", "expected a valid UTC timestamp of at most 40 characters"],
     [1, 123, "operation_Id", "expected a string of at most 160 characters"],
     [1, "private-value".repeat(20), "operation_Id", "expected a string of at most 160 characters"],
     [2, "Bearer private-token", "operation_ParentId", "credential-shaped identifier"],
@@ -180,6 +180,7 @@ test("trace correlation IDs reject credential shapes before output without rejec
   const encoded = Buffer.from("synthetic-user:synthetic-password").toString("base64");
   const jwt = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"synthetic"}').toString("base64url")}.synthetic-signature`;
   for (const credential of [
+    `AccountKey=${Buffer.alloc(64, 42).toString("base64")}`,
     `Authorization:Basic:${encoded}`, "Authorization=Bearer=synthetic-token",
     "token=synthetic-token", "client_secret=synthetic-secret", "api_key=synthetic-key",
     `ghp_${"A".repeat(36)}`, jwt, `Basic:${encoded}`, `basic=${encoded.replace(/=+$/u, "")}`,
@@ -196,6 +197,27 @@ test("trace correlation IDs reject credential shapes before output without rejec
         ] }))
       }), { message: `Trace response contained unsupported metadata in ${column}: credential-shaped identifier; no rows accepted.` });
     }
+  }
+});
+
+test("trace transport validates original UTC timestamps before calendar normalization", async t => {
+  const f = fixture(t);
+  f.policy.maxRows = 20;
+  const configuration = issuePlanConfiguration(f.repository, f.profile, "dev");
+  const compiled = compileIssuePlan(f.repository, f.profile, { ...f.trace,
+    policyRevision: configuration.traces[0].policyRevision,
+    start: "2026-03-02T10:00:00Z", end: "2026-03-02T10:15:00Z", limit: 20
+  }, f.options);
+  for (const timestamp of ["2026-02-30T10:01:00Z", "2026-03-02T11:01:00+01:00"]) {
+    await assert.rejects(executeTracePlan(compiled, {
+      tokenProvider: async () => "unit-test-placeholder",
+      request: async () => new Response(JSON.stringify({ tables: [
+        { columns: compiled.columns.map(name => ({ name })), rows: [
+          ...Array.from({ length: 10 }, () => ["2026-03-02T10:01:00Z", "op-42", null, 3]),
+          [timestamp, "op-42", null, 3]
+        ] }
+      ] }))
+    }), /valid UTC timestamp/u);
   }
 });
 
@@ -230,8 +252,12 @@ test("trace diagnostics expose only reviewed route and message literals and disc
     assert.doesNotMatch(JSON.stringify(result), /private@example|private\.example|private-value/u);
   }
   assert.throws(() => compileIssuePlan(f.repository, f.profile, f.trace, f.options), /revision/u);
-  f.profile.analysis.traceQueries[0].diagnostics.messages = ["Authorization: Bearer private-value"];
-  assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"));
+  const encoded = Buffer.from("synthetic-user:synthetic-password").toString("base64").replace(/=+$/u, "");
+  for (const message of ["Authorization: Bearer private-value", "Bearer:synthetic-token",
+    `Basic:${encoded}`, `basic=${encoded}`, "AccountKey=synthetic-key"]) {
+    f.profile.analysis.traceQueries[0].diagnostics.messages = [message];
+    assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"), /credential/u);
+  }
 });
 
 test("browser plans generate runnable grounded actions and non-leaking assertions, not arbitrary scripts", t => {

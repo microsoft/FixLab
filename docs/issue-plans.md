@@ -76,9 +76,12 @@ Do not silently expand scope or equate business request numbers with operation I
 By default, results contain only bounded telemetry metadata, not messages or raw payloads.
 Correlation IDs accept bounded hierarchical identifiers, including the `|`
 separator and Base64 characters used by legacy IDs.
-Credential-shaped assignments, recognizable tokens and Basic/Bearer values are
+Credential-shaped assignments (including `AccountKey`), recognizable tokens and Basic/Bearer values are
 rejected before identifier-format acceptance, including colon/equal-separated
-schemes. Ordinary Base64 and hierarchical correlation IDs remain supported.
+schemes. The same credential screening applies to reviewed diagnostic literals.
+Ordinary Base64 and hierarchical correlation IDs remain supported.
+Original wire timestamps must be valid UTC calendar dates before normalization,
+including rows beyond the ten-row feedback snapshot.
 Canonical `true`/`false`
 strings from Application Insights are normalized to booleans; numeric values
 and arbitrary truthy strings are rejected. Invalid metadata rejects the entire result

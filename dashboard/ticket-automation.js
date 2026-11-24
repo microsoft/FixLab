@@ -486,6 +486,7 @@ export async function executeTicketAgent({
     }
     if (stream === "stdout") { line(text); }
     const display = stripVTControlCharacters(text);
+    if (display.trim().startsWith("FIXLAB_TICKET_RESULT|")) { return; }
     if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/u.test(display)) { privateKey = true; }
     onOutput(stream, `${privateKey ? "[Sensitive detail omitted]" : recordedText(display, 10000)}\n`);
     if (/-----END [A-Z ]*PRIVATE KEY-----/u.test(display)) { privateKey = false; }
@@ -569,9 +570,27 @@ export async function executeTicketAgent({
   }
 }
 
+function mergeTraceEvidence(previous, value) {
+  const next = normalizeTraceEvidence(value);
+  if (!previous) { return next; }
+  if (previous.source !== next.source || previous.policyRevision !== next.policyRevision) {
+    throw new Error("Trace evidence phases must retain the same source and policy revision.");
+  }
+  if (JSON.stringify(previous) === JSON.stringify(next)) { return previous; }
+  const rows = [...new Map([...previous.rows, ...next.rows].map(row => [JSON.stringify(row), row])).values()];
+  return normalizeTraceEvidence({
+    source: previous.source, policyRevision: previous.policyRevision,
+    start: new Date(Math.min(Date.parse(previous.start), Date.parse(next.start))).toISOString(),
+    end: new Date(Math.max(Date.parse(previous.end), Date.parse(next.end))).toISOString(),
+    rows: rows.slice(0, 10),
+    truncated: previous.truncated === true || next.truncated === true || rows.length > 10,
+    omittedDiagnostics: (previous.omittedDiagnostics ?? 0) + (next.omittedDiagnostics ?? 0)
+  });
+}
+
 export async function executeVersionedTicketAgent({
   workspace, phase = "version-review", versionComparison, onPhase = () => {},
-  onComparison = () => {}, execute = executeTicketAgent, ...options
+  traceEvidence, onTraceEvidence = () => {}, onComparison = () => {}, execute = executeTicketAgent, ...options
 }) {
   if (!workspace) { return execute(options); }
   if (!commitPattern.test(workspace.baseCommit) || !["version-review", "fix"].includes(phase)) {
@@ -581,13 +600,22 @@ export async function executeVersionedTicketAgent({
     throw new Error("Resuming the fix phase requires its existing owned runtime session.");
   }
   const sessionId = options.sessionId ?? randomUUID();
-  const run = (prompt, mode, resume) => execute({
-    ...options, prompt, mode, sessionId, resume,
-    onSession(id) {
-      if (id !== sessionId) { throw new Error("Version review must retain the same owned runtime session."); }
-      options.onSession?.(id);
+  let retainedTrace = traceEvidence === undefined ? undefined : normalizeTraceEvidence(traceEvidence);
+  if (retainedTrace) { onTraceEvidence(retainedTrace); }
+  const run = async (prompt, mode, resume) => {
+    const result = ticketOutcome(await execute({
+      ...options, prompt, mode, sessionId, resume,
+      onSession(id) {
+        if (id !== sessionId) { throw new Error("Version review must retain the same owned runtime session."); }
+        options.onSession?.(id);
+      }
+    }));
+    if (result.traceEvidence) {
+      retainedTrace = mergeTraceEvidence(retainedTrace, result.traceEvidence);
+      onTraceEvidence(retainedTrace);
     }
-  });
+    return { ...result, ...(retainedTrace ? { traceEvidence: retainedTrace } : {}) };
+  };
   let comparison = versionComparison;
   if (phase === "version-review") {
     const result = ticketOutcome(await run(`${options.prompt}
@@ -1155,6 +1183,17 @@ export async function watchTickets({
     if (!policy) { throw new Error("Trace feedback does not match an approved source."); }
     result.traceEvidence = normalizeTraceEvidence(result.traceEvidence, policy);
   };
+  async function reconcileFeedback(entry, key) {
+    const receipt = entry[key];
+    if (entry.feedbackFormat !== "readable" || !receipt) { return false; }
+    const recorded = (await client.commentIds(entry.id, receipt.fingerprint))
+      .filter(id => !receipt.previousCommentIds.includes(id));
+    if (recorded.length > 1) { throw new Error("Multiple matching feedback submissions need review; no duplicate was posted."); }
+    if (recorded.length !== 1) { return false; }
+    receipt.commentId = recorded[0];
+    save();
+    return true;
+  }
   async function submitFeedback(entry, text, key, legacyMarker) {
     const tagged = text.startsWith(legacyMarker)
       ? `${legacyMarker}\n${feedbackLabel}${text.slice(legacyMarker.length)}`
@@ -1176,10 +1215,7 @@ export async function watchTickets({
     entry[key] ??= { fingerprint, attempted: false,
       previousCommentIds: await client.commentIds(entry.id, fingerprint) };
     save();
-    const recorded = (await client.commentIds(entry.id, entry[key].fingerprint))
-      .filter(id => !entry[key].previousCommentIds.includes(id));
-    if (recorded.length === 1) { entry[key].commentId = recorded[0]; save(); return; }
-    if (recorded.length > 1) { throw new Error("Multiple matching feedback submissions need review; no duplicate was posted."); }
+    if (await reconcileFeedback(entry, key)) { return; }
     if (entry[key].fingerprint !== fingerprint) {
       throw new Error("Pending feedback changed. Review the existing Discussion before posting another result.");
     }
@@ -1211,8 +1247,21 @@ export async function watchTickets({
       throw new Error(`Work item ${entry.id} changed before feedback; review its existing result.`);
     }
     const marker = `${ownComment}${entry.id}:${entry.fingerprint}]`;
+    const delivered = entry.feedback?.attempted && await reconcileFeedback(entry, "feedback");
     const result = ticketOutcome(entry.result);
-    validateTraceEvidence(result);
+    try {
+      validateTraceEvidence(result);
+    } catch (error) {
+      if (!delivered) { throw error; }
+      const message = "Existing feedback delivery verified. Review required for stale trace evidence; no new feedback or state change was submitted.";
+      entry.status = "reconciled";
+      entry.updatedAt = entry.finishedAt = new Date().toISOString();
+      entry.details ??= { summary: "", activity: [], checks: [], omittedActivity: 0 };
+      entry.details.summary = recordedText(`${message}\n${entry.details.summary}`, 2000);
+      save();
+      onEvent(`Work item ${entry.id}: ${message} ${recordedText(error.message)}`);
+      return;
+    }
     if (result.outcome === "draft-pr") {
       try {
         result.pullRequestUrl = await client.verifyDraft(plan.repository, result.pullRequestId, plan.targetBranch, entry.id);
@@ -1238,7 +1287,7 @@ export async function watchTickets({
     if (result.authenticationRequired) {
       text += `\n\n## Sign-in required\n- ${result.authenticationRequired.reason}\n- This investigation is paused; the watcher can continue other tickets.\n- When the watcher is idle, stop it in its existing terminal, run az login with the approved account and complete sign-in/MFA. Do not paste credentials into Discussion.\n- Restart the same reviewed watcher command with --resume-ticket ${entry.id} and its normal --yes --allow-all-tools confirmations. This resumes the existing job; it does not grant missing database roles.`;
     }
-    await submitFeedback(entry, text, "feedback", marker);
+    if (!delivered) { await submitFeedback(entry, text, "feedback", marker); }
     if (resolveItem || entry.resolution) {
       const previousAttempt = Boolean(entry.resolution);
       entry.resolution ??= { status: "pending", previousState: current.state };
@@ -1360,7 +1409,7 @@ export async function watchTickets({
     onEvent(`Work item ${item.id}: ${resume ? "resuming its existing" : "starting one authorized"} ${plan.runtime} investigation.`);
     const result = ticketOutcome(await execute({
       repository: workspace?.repository ?? repository, workspace, phase: entry.phase,
-      versionComparison: entry.versionComparison,
+      versionComparison: entry.versionComparison, traceEvidence: entry.details.traceEvidence,
       item, request, ...(resume ? { sessionId: entry.sessionId, resume: true } : {}),
       onPhase(phase) {
         if (phase !== "fix") { throw new Error("The executor supplied an invalid investigation phase."); }
@@ -1373,6 +1422,12 @@ export async function watchTickets({
           throw new Error("Version evidence does not match the ticket's pinned baseline.");
         }
         entry.versionComparison = comparison;
+        save();
+      },
+      onTraceEvidence(value) {
+        const evidence = { traceEvidence: value };
+        validateTraceEvidence(evidence);
+        entry.details.traceEvidence = evidence.traceEvidence;
         save();
       },
       onSession(sessionId) {

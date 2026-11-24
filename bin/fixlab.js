@@ -2315,12 +2315,12 @@ async function main(args) {
         repository, plan, once: flags.has("--once"), confirmed: true,
         resumeWorkItemId,
         allowAllTools: flags.has("--allow-all-tools"), signal: controller.signal,
-        execute: async ({ repository: snapshotRepository, workspace, phase, versionComparison,
-          onPhase, onComparison, request, onActivity, sessionId, resume, onSession }) => {
+        execute: async ({ repository: snapshotRepository, workspace, phase, versionComparison, traceEvidence,
+          onPhase, onComparison, onTraceEvidence, request, onActivity, sessionId, resume, onSession }) => {
           const result = await launch(snapshotRepository, request, parsed.runtime, environment, parsed.model, false, "", {
             ticketAutomation: true, ownedTicketSnapshot: Boolean(workspace),
             execute: ({ repository: checkout, prompt }) => executeVersionedTicketAgent({
-              workspace, phase, versionComparison, onPhase, onComparison,
+              workspace, phase, versionComparison, traceEvidence, onPhase, onComparison, onTraceEvidence,
               executor: createRuntimeExecutor({ packageRoot, runtime: parsed.runtime, model: parsed.model, native: false }),
               repository: checkout, prompt,
               ...(sessionId ? { sessionId } : {}), resume: resume === true, onSession,

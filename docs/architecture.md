@@ -47,6 +47,11 @@ analysis; only `needs-fix` continues in the same session, retaining its comparis
 through authentication pauses. A deployment gap requires a known, different
 deployed commit. Profile/helper approval, ordinary authentication, read-only
 business-data access and normal publication gates remain unchanged.
+Validated trace evidence is checkpointed before entering fix work and restored
+on authentication resume. Phase results merge only one source/revision within
+the approved bounded window, deduplicate observed rows, retain at most ten and
+disclose truncation and omitted diagnostics. Incompatible evidence blocks rather
+than replacing the earlier observations.
 
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
 journal through `GET /api/ticket-automation`; reading never starts or changes
@@ -63,6 +68,12 @@ snapshot rather than raw rows or correlation IDs. Endpoint/message details
 require exact reviewed profile literals;
 unmatched text is omitted before reader output. Source revisions, UTC windows
 and diagnostic membership are revalidated before storage and pending feedback.
+Structured result frames are parsed privately, never forwarded to runtime output
+before policy validation. Pending readable feedback first reconciles its saved
+delivery fingerprint. If that proves an existing comment but the trace policy
+is now stale, the attempt is marked reconciled with an explicit review notice;
+no stale result is reposted and no new resolution is attempted. Unconfirmed or
+unsent stale feedback remains blocked for review.
 These agent-reported correlations never establish a cause or deployed revision.
 Last reported worker status is not a process-liveness assertion.
 On Windows, atomic journal replacement retries transient reader-sharing errors

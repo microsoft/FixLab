@@ -340,11 +340,17 @@ test("fix execution follows the completed pinned version review and retains its 
   let phase;
   let comparison;
   const sessionId = randomUUID();
+  const traceEvidence = { source: "app-traces", policyRevision: "1".repeat(64),
+    start: "2026-11-19T10:00:00.000Z", end: "2026-11-19T10:15:00.000Z",
+    rows: [{ table: "traces", timestamp: "2026-11-19T10:01:00.000Z",
+      operation_Id: "op-42", operation_ParentId: null, severityLevel: 3 }] };
+  let retainedTrace;
   const execute = async options => {
     calls.push(options);
     options.onSession(options.sessionId);
     if (calls.length === 1) {
       return { outcome: "analysis", summary: "Latest source still contains the defect.",
+        traceEvidence,
         versionComparison: { latestCommit: "b".repeat(40), finding: "needs-fix", evidence: "Focused source analysis." } };
     }
     return calls.length === 2
@@ -353,11 +359,15 @@ test("fix execution follows the completed pinned version review and retains its 
       : { outcome: "draft-pr", summary: "Focused fix verified and published as draft.", pullRequestId: 9 };
   };
   const options = { workspace: { baseCommit: "b".repeat(40) }, prompt: "Synthetic scope.", sessionId, execute,
-    onPhase(value) { phase = value; }, onComparison(value) { comparison = value; } };
+    onPhase(value) { assert.deepEqual(retainedTrace, traceEvidence); phase = value; },
+    onTraceEvidence(value) { retainedTrace = value; },
+    onComparison(value) { comparison = value; } };
   const blocked = await executeVersionedTicketAgent(options);
   assert.equal(phase, "fix");
   assert.equal(blocked.outcome, "blocked");
-  const result = await executeVersionedTicketAgent({ ...options, phase, versionComparison: comparison, resume: true });
+  assert.deepEqual(blocked.traceEvidence, traceEvidence);
+  const result = await executeVersionedTicketAgent({ ...options, phase, versionComparison: comparison,
+    traceEvidence: retainedTrace, resume: true });
   assert.equal(calls.length, 3);
   assert.deepEqual(calls.map(call => call.mode), ["validate-only", "fix-and-validate", "fix-and-validate"]);
   assert.ok(calls.every(call => call.sessionId === sessionId));
@@ -365,6 +375,43 @@ test("fix execution follows the completed pinned version review and retains its 
   assert.equal(calls[2].resume, true);
   assert.equal(result.pullRequestId, 9);
   assert.match(result.summary, /Deployed version unknown/u);
+  assert.deepEqual(result.traceEvidence, traceEvidence);
+});
+
+test("version phases merge only compatible bounded trace evidence and preserve truncation", async () => {
+  const evidence = { source: "app-traces", policyRevision: "1".repeat(64),
+    start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+    rows: Array.from({ length: 6 }, (_, index) => ({ table: "traces",
+      timestamp: `2026-11-19T10:01:0${index}Z`, operation_Id: `op-${index}`,
+      operation_ParentId: null, severityLevel: 3 })), omittedDiagnostics: 2 };
+  for (const mismatch of [null, "source", "policyRevision", "window"]) {
+    let calls = 0;
+    const next = structuredClone(evidence);
+    next.rows = next.rows.map(row => ({ ...row, operation_Id: `next-${row.operation_Id}` }));
+    next.omittedDiagnostics = 3;
+    if (mismatch === "source") { next.source = "other-traces"; }
+    if (mismatch === "policyRevision") { next.policyRevision = "2".repeat(64); }
+    if (mismatch === "window") {
+      next.start = "2026-11-19T11:00:00Z";
+      next.end = "2026-11-19T11:15:00Z";
+      next.rows = next.rows.map(row => ({ ...row, timestamp: row.timestamp.replace("T10:", "T11:") }));
+    }
+    const run = executeVersionedTicketAgent({
+      workspace: { baseCommit: "b".repeat(40) }, prompt: "Synthetic scope.",
+      execute: async () => ++calls === 1
+        ? { outcome: "analysis", summary: "Source review.", traceEvidence: evidence,
+          versionComparison: { latestCommit: "b".repeat(40), finding: "needs-fix", evidence: "Source defect." } }
+        : { outcome: "analysis", summary: "Focused checks.", traceEvidence: next }
+    });
+    if (mismatch) {
+      await assert.rejects(run, /same source|bounded explicit UTC/u);
+    } else {
+      const result = await run;
+      assert.equal(result.traceEvidence.rows.length, 10);
+      assert.equal(result.traceEvidence.truncated, true);
+      assert.equal(result.traceEvidence.omittedDiagnostics, 5);
+    }
+  }
 });
 
 test("incident evidence discovers environment-bound source helpers without executing or granting access", () => {
@@ -896,7 +943,7 @@ test("ticket trace evidence rejects unbounded, unrelated and private fields befo
     assert.throws(() => ticketOutcome({ ...outcome, traceEvidence: { ...traceEvidence, ...change } }));
   }
   for (const field of ["operation_Id", "operation_ParentId"]) {
-    for (const credential of ["client_secret=synthetic-secret", "Bearer:synthetic-token",
+    for (const credential of ["AccountKey=synthetic-key", "client_secret=synthetic-secret", "Bearer:synthetic-token",
       `Basic:${Buffer.from("synthetic-user:synthetic-password").toString("base64")}`]) {
       assert.throws(() => ticketOutcome({ ...outcome, traceEvidence: { ...traceEvidence,
         rows: [{ ...traceEvidence.rows[0], [field]: credential }]
@@ -1449,6 +1496,88 @@ test("readable feedback reconciles uncertain delivery and ignores its truncated 
   } finally { fixture.cleanup(); }
 });
 
+test("saved trace feedback receipts reconcile after policy changes without reposting stale evidence", async () => {
+  for (const delivered of [true, false]) {
+    const fixture = ticketFixture({ readable: true });
+    try {
+      fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
+        subscriptionId: "12345678-1234-1234-1234-123456789abc",
+        applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10 }] };
+      const path = join(fixture.repository, ".github", "fixlab", "repository-profile.json");
+      writeFileSync(path, JSON.stringify(fixture.profile));
+      const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+      const policy = issuePlanConfiguration(fixture.repository, fixture.profile, "dev").traces[0];
+      const commentIds = fixture.client.commentIds;
+      fixture.client.commentIds = async () => [];
+      await assert.rejects(fixture.run({ plan, execute: async () => ({
+        outcome: "analysis", summary: "Observed a failure, cause unknown.",
+        traceEvidence: { source: policy.id, policyRevision: policy.policyRevision,
+          start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+          rows: [{ table: "traces", timestamp: "2026-11-19T10:01:00Z", operation_Id: "op-42",
+            operation_ParentId: null, severityLevel: 3 }] }
+      }) }), /read-back is unconfirmed/u);
+      fixture.profile.analysis.traceQueries[0].maxRows = 9;
+      writeFileSync(path, JSON.stringify(fixture.profile));
+      const updatedPlan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+      fixture.client.commentIds = delivered ? commentIds : async () => [];
+      const run = () => fixture.run({ plan: updatedPlan,
+        execute() { assert.fail("Receipt reconciliation must not rerun code."); } });
+      if (delivered) {
+        await run();
+        const history = readTicketAutomationHistory(fixture.repository);
+        assert.equal(history.attempts[0].status, "reconciled");
+        assert.match(history.attempts[0].summary, /review.*stale trace evidence/iu);
+        await run();
+      } else {
+        await assert.rejects(run(), /approved source revision/u);
+        assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status, "feedback-pending");
+      }
+      assert.equal(fixture.posted.length, 1);
+      assert.equal(fixture.item.state, "Active");
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("watcher checkpoints trace evidence before fix work and restores it on authentication resume", async () => {
+  const fixture = ticketFixture({ readable: true });
+  try {
+    fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
+      subscriptionId: "12345678-1234-1234-1234-123456789abc",
+      applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10 }] };
+    writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+    const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+    const policy = issuePlanConfiguration(fixture.repository, fixture.profile, "dev").traces[0];
+    const traceEvidence = { source: policy.id, policyRevision: policy.policyRevision,
+      start: "2026-11-19T10:00:00.000Z", end: "2026-11-19T10:15:00.000Z",
+      rows: [{ table: "traces", timestamp: "2026-11-19T10:01:00.000Z", operation_Id: "op-42",
+        operation_ParentId: null, severityLevel: 3 }] };
+    let calls = 0;
+    const execute = options => executeVersionedTicketAgent({ ...options, prompt: options.request,
+      execute: async native => {
+        native.onSession(native.sessionId);
+        calls++;
+        if (calls === 1) {
+          return { outcome: "analysis", summary: "Source defect found.", traceEvidence,
+            versionComparison: { latestCommit: "1".repeat(40), finding: "needs-fix", evidence: "Source review." } };
+        }
+        assert.deepEqual(readTicketAutomationHistory(fixture.repository).attempts[0].traceEvidence, traceEvidence);
+        return calls === 2
+          ? { outcome: "blocked", summary: "Approved session expired.",
+            authenticationRequired: { provider: "azure-cli", reason: "Human sign-in required." } }
+          : { outcome: "analysis", summary: "Focused validation complete." };
+      }
+    });
+    await fixture.run({ plan, execute });
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].status, "authentication-pending");
+    await fixture.run({ plan, resumeWorkItemId: 42, execute });
+    const attempt = readTicketAutomationHistory(fixture.repository).attempts[0];
+    assert.equal(attempt.status, "complete");
+    assert.deepEqual(attempt.traceEvidence, traceEvidence);
+    assert.equal(calls, 3);
+    assert.ok(fixture.posted.every(post => /Trace snapshot/u.test(post.text)));
+  } finally { fixture.cleanup(); }
+});
+
 test("authentication pauses one ticket while others proceed and explicit restart resumes the same owned session", async () => {
   const fixture = ticketFixture({ readable: true });
   const sessionId = randomUUID();
@@ -1967,6 +2096,35 @@ test("ticket output is redacted before forwarding, including split credentials a
       assert.equal(result.outcome, invalidResult ? "blocked" : "analysis");
       assert.match(displayed.map(value => value.text).join(""), /Safe progress|Sensitive detail omitted/);
       assert.ok(displayed.some(value => value.stream === "stderr" && value.text.includes("omitted")));
+    }
+  } finally { fixture.cleanup(); }
+});
+
+test("ticket result frames are parsed but never forwarded before trace policy validation", async () => {
+  const fixture = ticketFixture();
+  try {
+    for (const stream of ["stdout", "stderr"]) {
+      const displayed = [];
+      const result = await executeTicketAgent({
+        repository: fixture.repository, prompt: "Synthetic scope.",
+        onOutput(_stream, text) { displayed.push(text); },
+        executor(options) {
+          options.onOutput("stdout", "Safe progress.\n");
+          const frame = `  FIXLAB_TICKET_RESULT|${JSON.stringify({
+            outcome: "analysis", summary: "Observed evidence.",
+            traceEvidence: { source: "unapproved-traces", policyRevision: "1".repeat(64),
+              start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+              rows: [{ table: "traces", timestamp: "2026-11-19T10:01:00Z",
+                operation_Id: "private-correlation-42", operation_ParentId: null, severityLevel: 3,
+                logMessage: "Unapproved literal." }] }
+          })}`;
+          options.onOutput(stream, frame.slice(0, 30));
+          options.onOutput(stream, frame.slice(30));
+          return { completion: Promise.resolve({ code: 0 }), hasStopped: () => true, terminate() {} };
+        }
+      });
+      assert.equal(result.outcome, stream === "stdout" ? "analysis" : "blocked");
+      assert.equal(displayed.join(""), "Safe progress.\n");
     }
   } finally { fixture.cleanup(); }
 });
