@@ -1191,7 +1191,9 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
         postPrLiveReview: Boolean(request) && allowsPostPrLiveReview({ mode: "fix-and-validate", workflow, testEvidence, ...choices }) })
       : "Use strict delivery: all applicable local gates and required approvals remain mandatory before readiness. Honor the saved draft/ready publication choice. Read-only runs never create or update a PR.",
     "Do not delete or edit transient test artifacts while validation is discovering or executing them; wait for owned validation to finish before cleanup.",
-    "Before validation in a new isolated worktree, plan `fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME`. After scoped setup approval, add `--yes`. The source profile declares non-sensitive configuration in `worktreeSetup.files`. Never copy credentials or browser state. Missing configuration, authentication or denied runtime access is a blocker for the dependent check; do not retry unchanged approvals or grant blanket path access. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration; report missing prerequisites as blocked.",
+    ...(choices.ownedTicketSnapshot ? [] : [
+      "Before validation in a new isolated worktree, plan `fixlab onboard WORKTREE --from SOURCE --runtime RUNTIME`. After scoped setup approval, add `--yes`. The source profile declares non-sensitive configuration in `worktreeSetup.files`. Never copy credentials or browser state. Missing configuration, authentication or denied runtime access is a blocker for the dependent check; do not retry unchanged approvals or grant blanket path access. Sign-in and MFA remain human-controlled. In read-only modes, do not provision or alter configuration; report missing prerequisites as blocked."
+    ]),
     "Dashboard isolation is assigned automatically when required; continue the same job in its owned checkout. Code work remains parallel in separate owned checkouts. Before directly starting local applications, authentication helpers or live checks outside configured gates, acquire the assigned dashboard's `fixlab gate --port <port> --job <id> --resource local-testing --repository <worktree>`. Local-stack/live-test gates reserve shared testing automatically and wait without failing. A kept-open preview retains the reservation until it stops. Acquisition is not validation evidence; never clear another owner's reservation or copy credentials, runtime grants or validation evidence.",
     "Prefix FixLab-created pull-request titles with `FLAB:` followed by a concise coding-change description. Use the repository's PR template with clear Markdown sections for the problem, changes, validation and risks, and accurate validation checkboxes.",
     readOnly
@@ -2300,7 +2302,7 @@ async function main(args) {
         ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
         : "No work-item state changes.",
       requiresConfirmation: true,
-      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. ${plan.allowProductionEvidence ? "Only the displayed ticket/correlation-bound production diagnostic readers are approved; no production application testing, business-data writes, merges or deployments." : "No business-data writes, production, merges or deployments."}`
+      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper and each assigned checkout's own command-evidence folder for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. ${plan.allowProductionEvidence ? "Only the displayed ticket/correlation-bound production diagnostic readers are approved; no production application testing, business-data writes, merges or deployments." : "No business-data writes, production, merges or deployments."}`
     }, null, 2));
     if (!flags.has("--yes")) {
       console.log("Plan only. Review this scope, then add --yes --allow-all-tools to start. Installing or onboarding alone never starts a watcher.");
@@ -2315,12 +2317,12 @@ async function main(args) {
         repository, plan, once: flags.has("--once"), confirmed: true,
         resumeWorkItemId,
         allowAllTools: flags.has("--allow-all-tools"), signal: controller.signal,
-        execute: async ({ repository: snapshotRepository, workspace, phase, versionComparison,
-          onPhase, onComparison, request, onActivity, sessionId, resume, onSession }) => {
+        execute: async ({ repository: snapshotRepository, workspace, phase, versionComparison, traceEvidence,
+          onPhase, onComparison, onTraceEvidence, request, onActivity, sessionId, resume, onSession }) => {
           const result = await launch(snapshotRepository, request, parsed.runtime, environment, parsed.model, false, "", {
             ticketAutomation: true, ownedTicketSnapshot: Boolean(workspace),
             execute: ({ repository: checkout, prompt }) => executeVersionedTicketAgent({
-              workspace, phase, versionComparison, onPhase, onComparison,
+              workspace, phase, versionComparison, traceEvidence, onPhase, onComparison, onTraceEvidence,
               executor: createRuntimeExecutor({ packageRoot, runtime: parsed.runtime, model: parsed.model, native: false }),
               repository: checkout, prompt,
               ...(sessionId ? { sessionId } : {}), resume: resume === true, onSession,

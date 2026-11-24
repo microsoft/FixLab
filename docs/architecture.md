@@ -37,26 +37,82 @@ on recovery. The journal records `snapshot-pending` before preparation and the
 pinned commit before checkout creation; failed fetches never fall back to an old
 ref and can retry before any executor has started. Active/authentication-paused
 attempts keep the same snapshot. Legacy resumes are not silently moved.
+Preparation already installs the reviewed profile and declared non-sensitive
+setup files in the snapshot. Watcher phases review remaining setup locally,
+without repeating onboarding with `--from` or requesting source-clone access.
+Read-only review never provisions dependencies or changes configuration; any
+fix-phase setup still requires its existing scoped approval. Missing prerequisites
+block dependent checks, not independent source analysis. No extra folder grants,
+credentials or browser state transfer to the runtime.
+The reviewed watcher scope includes the assigned checkout's own command-evidence
+folder, which lives under its per-worktree Git metadata for linked checkouts.
+Only that artifact folder is passed to the runtime, not the Git directory,
+source clone or sibling worktrees. Linked artifact paths are rejected before
+executor launch.
 
 The CLI runs a read-only version-review phase before fix/PR authority takes
 effect. A bounded, agent-reported comparison binds latest-code findings to the
 pinned commit and identifies the affected component's incident-time deployed
-revision only from existing approved evidence. Missing deployment evidence is
-explicitly unknown, never inferred from `main`. Existing fixes terminate as
+revision only from existing approved evidence. Missing deployment evidence stays
+unknown in structured private evidence, never inferred from `main`. It does not
+block source-grounded review and focused existing checks on the latest pinned
+target. Feedback leads with latest-code findings and actual validation, not
+repeated unavailable-deployment warnings; local checks do not prove a production
+deployment. Existing fixes terminate as
 analysis; only `needs-fix` continues in the same session, retaining its comparison
 through authentication pauses. A deployment gap requires a known, different
 deployed commit. Profile/helper approval, ordinary authentication, read-only
 business-data access and normal publication gates remain unchanged.
+Validated trace evidence is checkpointed before entering fix work and restored
+on authentication resume. Phase results merge only one source/revision within
+the approved bounded window, deduplicate observed rows, retain at most ten and
+disclose truncation and omitted diagnostics. Incompatible evidence blocks rather
+than replacing the earlier observations.
 
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
 journal through `GET /api/ticket-automation`; reading never starts or changes
 watcher work. Future attempts retain timestamps, safe structured activity and
 agent-reported check/scenario outcomes. Raw output is not retained. The latest
-20 attempts retain at most 20 activity and 10 check updates each; older entries
-keep basic deduplication/outcome metadata. Legacy missing evidence stays unknown.
-Detailed version comparisons follow the same latest-20-attempt retention;
-pending authentication resumes retain their required phase evidence.
+20 attempts retain at most 20 activity and 10 check updates each. Completed and
+reconciled attempts lose detailed history, version comparisons and retained
+result payloads when outside that latest-20 window or more than 15 days after
+completion, whichever occurs first. Cleanup runs on journal saves and each
+watcher polling pass, including idle polling; reading history never writes it.
+Legacy entries without a completion timestamp use their last-update timestamp;
+missing or invalid timestamps do not trigger age-based deletion.
+Basic deduplication/outcome metadata, feedback receipts and recovery audit remain.
+Running, snapshot-pending, feedback-pending and authentication-paused attempts
+retain their evidence regardless of age or position. The journal's existing
+size and entry-count limits still fail explicitly rather than deleting duplicate
+barriers. Legacy missing evidence stays unknown.
+Optional structured trace evidence follows the same retention. Watcher feedback
+retains up to ten observed rows privately, including timestamps, correlation IDs,
+codes and severity. Discussion receives a short analysis table and observed trace table rather than
+raw rows or correlation IDs. A bounded optional `report.evidence` array carries
+code locations and attributed supporting findings; confirmed-cause evidence is
+also visible in the summary. Reported explanations remain distinct from observed
+facts, and status-code correlation does not establish a batch count or limit
+violation. Screenshots are evidence only after actual approved validation, not a
+requirement for readable analysis. New attempts use a versioned table format;
+pending legacy and readable attempts retain their original rendering and saved
+delivery receipts. Table cells are HTML-escaped, escaped pipes/backslashes are
+preserved, and malformed tables fall back to escaped text. Endpoint/message details
+require exact reviewed profile literals;
+unmatched text is omitted before reader output. Source revisions, UTC windows
+and diagnostic membership are revalidated before storage and pending feedback.
+Structured result frames are parsed privately, never forwarded to runtime output
+before policy validation. Pending readable feedback first reconciles its saved
+delivery fingerprint. If that proves an existing comment but the trace policy
+is now stale, the attempt is marked reconciled with an explicit review notice;
+no stale result is reposted and no new resolution is attempted. Unconfirmed or
+unsent stale feedback remains blocked for review.
+These agent-reported correlations never establish a cause or deployed revision.
 Last reported worker status is not a process-liveness assertion.
+On Windows, atomic journal replacement retries transient reader-sharing errors
+for at most eight attempts with 25 ms between attempts. Other filesystem errors
+are not retried. Persistent activity-save failures stop the investigation and
+report only a known filesystem error code, never private paths or raw errors;
+the previous journal and ownership barriers remain intact.
 
 Completed attempts support a separate local-job handoff review. An exact-origin
 POST refreshes the ticket and linked PRs and binds a token to the attempt,

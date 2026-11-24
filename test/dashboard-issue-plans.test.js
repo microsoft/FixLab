@@ -97,6 +97,13 @@ test("trace transport sends bounded compiled KQL once and preserves only metadat
   const options = { tokenProvider: async subscription => { assert.equal(subscription, f.policy.subscriptionId); return "unit-test-placeholder"; }, request };
   assert.equal((await executeTracePlan(compiled, options)).status, "passed");
   assert.equal(calls, 1);
+  const hierarchical = ["2026-11-19T10:01:00Z", "root-42", "|root-42.span_1.", 3];
+  const legacy = await executeTracePlan(compiled, { ...options, request: async () => response([hierarchical]) });
+  assert.deepEqual(legacy.rows, [hierarchical]);
+  const encoded = ["2026-11-19T10:01:00Z", "x/Ysh+M1TfU=", "|x/Ysh+M1TfU=.span_1.", 3];
+  assert.deepEqual((await executeTracePlan(compiled, {
+    ...options, request: async () => response([encoded])
+  })).rows, [encoded]);
   const partial = await executeTracePlan(compiled, { ...options, request: async () => response(Array.from({ length: 6 }, () => row)) });
   assert.equal(partial.status, "partial");
   assert.equal(partial.rows.length, 5);
@@ -111,6 +118,145 @@ test("trace transport sends bounded compiled KQL once and preserves only metadat
     await assert.rejects(executeTracePlan(compiled, { ...options, request: async (...args) => { attempted += 1; return request(...args); } }),
       error => !/sensitive|raw denial/u.test(error.message));
     assert.equal(attempted, 1);
+  }
+});
+
+test("trace request and dependency success accepts canonical wire booleans without truthy coercion", async t => {
+  const f = fixture(t);
+  for (const table of ["requests", "dependencies"]) {
+    const compiled = compileIssuePlan(f.repository, f.profile, { ...f.trace, table }, f.options);
+    const response = success => new Response(JSON.stringify({ tables: [
+      { columns: compiled.columns.map(name => ({ name })),
+        rows: [["2026-11-19T10:01:00Z", "root-42", "|root-42.span_1.", success, "500"]] }
+    ] }));
+    for (const [wire, expected] of [[true, true], [false, false], ["True", true], ["False", false],
+      ["true", true], ["false", false], [null, null]]) {
+      const result = await executeTracePlan(compiled, {
+        tokenProvider: async () => "unit-test-placeholder", request: async () => response(wire)
+      });
+      assert.equal(result.rows[0][3], expected);
+    }
+    for (const wire of ["", " false ", "private-token", 0, 1, {}, []]) {
+      await assert.rejects(executeTracePlan(compiled, {
+        tokenProvider: async () => "unit-test-placeholder", request: async () => response(wire)
+      }), { message: "Trace response contained unsupported metadata in success: expected a boolean or canonical true/false string; no rows accepted." });
+    }
+  }
+});
+
+test("trace metadata rejection identifies only the trusted column and reason without leaking values", async t => {
+  const f = fixture(t);
+  const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+  const row = ["2026-11-19T10:01:00Z", "0123456789abcdef", null, 3];
+  const cases = [
+    [0, null, "timestamp", "expected a non-null timestamp"],
+    [0, "private-invalid-time", "timestamp", "expected a valid UTC timestamp of at most 40 characters"],
+    [1, 123, "operation_Id", "expected a string of at most 160 characters"],
+    [1, "private-value".repeat(20), "operation_Id", "expected a string of at most 160 characters"],
+    [2, "Bearer private-token", "operation_ParentId", "credential-shaped identifier"],
+    [2, "private-value\n", "operation_ParentId", "unsupported identifier format"],
+    [3, 5, "severityLevel", "expected an integer from 0 to 4"]
+  ];
+  for (const [index, value, column, reason] of cases) {
+    const invalid = [...row];
+    invalid[index] = value;
+    let calls = 0;
+    await assert.rejects(executeTracePlan(compiled, {
+      tokenProvider: async () => "unit-test-placeholder",
+      request: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ tables: [
+          { columns: compiled.columns.map(name => ({ name })), rows: [row, invalid] }
+        ] }));
+      }
+    }), { message: `Trace response contained unsupported metadata in ${column}: ${reason}; no rows accepted.` });
+    assert.equal(calls, 1);
+  }
+});
+
+test("trace correlation IDs reject credential shapes before output without rejecting legacy Base64 IDs", async t => {
+  const f = fixture(t);
+  const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+  const encoded = Buffer.from("synthetic-user:synthetic-password").toString("base64");
+  const jwt = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"synthetic"}').toString("base64url")}.synthetic-signature`;
+  for (const credential of [
+    `AccountKey=${Buffer.alloc(64, 42).toString("base64")}`,
+    `Authorization:Basic:${encoded}`, "Authorization=Bearer=synthetic-token",
+    "token=synthetic-token", "client_secret=synthetic-secret", "api_key=synthetic-key",
+    `ghp_${"A".repeat(36)}`, jwt, `Basic:${encoded}`, `basic=${encoded.replace(/=+$/u, "")}`,
+    "Bearer:synthetic-token", "|root.BEARER=synthetic-token"
+  ]) {
+    for (const index of [1, 2]) {
+      const row = ["2026-11-19T10:01:00Z", "x/Ysh+M1TfU=", "|x/Ysh+M1TfU=.span_1.", 3];
+      row[index] = credential;
+      const column = compiled.columns[index];
+      await assert.rejects(executeTracePlan(compiled, {
+        tokenProvider: async () => "unit-test-placeholder",
+        request: async () => new Response(JSON.stringify({ tables: [
+          { columns: compiled.columns.map(name => ({ name })), rows: [row] }
+        ] }))
+      }), { message: `Trace response contained unsupported metadata in ${column}: credential-shaped identifier; no rows accepted.` });
+    }
+  }
+});
+
+test("trace transport validates original UTC timestamps before calendar normalization", async t => {
+  const f = fixture(t);
+  f.policy.maxRows = 20;
+  const configuration = issuePlanConfiguration(f.repository, f.profile, "dev");
+  const compiled = compileIssuePlan(f.repository, f.profile, { ...f.trace,
+    policyRevision: configuration.traces[0].policyRevision,
+    start: "2026-03-02T10:00:00Z", end: "2026-03-02T10:15:00Z", limit: 20
+  }, f.options);
+  for (const timestamp of ["2026-02-30T10:01:00Z", "2026-03-02T11:01:00+01:00"]) {
+    await assert.rejects(executeTracePlan(compiled, {
+      tokenProvider: async () => "unit-test-placeholder",
+      request: async () => new Response(JSON.stringify({ tables: [
+        { columns: compiled.columns.map(name => ({ name })), rows: [
+          ...Array.from({ length: 10 }, () => ["2026-03-02T10:01:00Z", "op-42", null, 3]),
+          [timestamp, "op-42", null, 3]
+        ] }
+      ] }))
+    }), /valid UTC timestamp/u);
+  }
+});
+
+test("trace diagnostics expose only reviewed route and message literals and disclose omissions", async t => {
+  const f = fixture(t);
+  f.profile.analysis.traceQueries[0].diagnostics = {
+    endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed."]
+  };
+  const configuration = issuePlanConfiguration(f.repository, f.profile, "dev");
+  for (const table of ["requests", "dependencies", "traces", "exceptions"]) {
+    const compiled = compileIssuePlan(f.repository, f.profile, {
+      ...f.trace, table, policyRevision: configuration.traces[0].policyRevision
+    }, f.options);
+    const endpoint = ["requests", "dependencies"].includes(table);
+    assert.match(compiled.query, endpoint ? /endpoint = name/u
+      : table === "traces" ? /logMessage = message/u : /logMessage = outerMessage/u);
+    const base = ["2026-11-19T10:01:00Z", "op-42", null,
+      ...(endpoint ? [false, "500"] : table === "exceptions" ? [3, "System.Exception"] : [3])];
+    const approved = endpoint ? "GET /v1/items/lookup" : "Backend request failed.";
+    const result = await executeTracePlan(compiled, {
+      tokenProvider: async () => "unit-test-placeholder",
+      request: async () => new Response(JSON.stringify({ tables: [
+        { columns: compiled.columns.map(name => ({ name })), rows: [
+          [...base, approved], [...base, "private@example.test https://private.example.test?token=private-value".repeat(100)]
+        ] }
+      ] }))
+    });
+    assert.equal(result.rows[0].at(-1), approved);
+    assert.equal(result.rows[1].at(-1), null);
+    assert.equal(result.traceEvidence.omittedDiagnostics, 1);
+    assert.equal(result.traceEvidence.rows[0][endpoint ? "endpoint" : "logMessage"], approved);
+    assert.doesNotMatch(JSON.stringify(result), /private@example|private\.example|private-value/u);
+  }
+  assert.throws(() => compileIssuePlan(f.repository, f.profile, f.trace, f.options), /revision/u);
+  const encoded = Buffer.from("synthetic-user:synthetic-password").toString("base64").replace(/=+$/u, "");
+  for (const message of ["Authorization: Bearer private-value", "Bearer:synthetic-token",
+    `Basic:${encoded}`, `basic=${encoded}`, "AccountKey=synthetic-key"]) {
+    f.profile.analysis.traceQueries[0].diagnostics.messages = [message];
+    assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"), /credential/u);
   }
 });
 

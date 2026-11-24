@@ -9,19 +9,19 @@ import { stripVTControlCharacters } from "node:util";
 import { configuredPostSafety } from "./dev-post.js";
 import { createExecutorLease } from "./executor-lease.js";
 import { configuredValidationEnvironments, validateTargetEnvironment } from "./validation-environments.js";
-import { sanitizeCommandOutput } from "../bin/structured-command.js";
+import { resolveEvidenceRoot, sanitizeCommandOutput } from "../bin/structured-command.js";
 import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-policy.js";
 import { apiSessionHelper } from "./api-authentication.js";
 import { setupPath } from "./repository-setup.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence, configuredProductionEvidence, productionEvidenceContext, productionEvidenceFor } from "./analysis-evidence.js";
-import { issuePlanConfiguration, issuePlanContext } from "./issue-plans.js";
+import { issuePlanConfiguration, issuePlanContext, normalizeTraceEvidence } from "./issue-plans.js";
 import { prepareJobWorktree } from "./job-worktree.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
 const feedbackLabel = "[Fixlab automation]";
 const supportedTypes = new Set(["Bug", "User Story", "Feature", "Product Backlog Item"]);
-const reportLists = ["changesMade", "inProgress", "plannedWork", "validation", "nextSteps"];
+const reportLists = ["evidence", "changesMade", "inProgress", "plannedWork", "validation", "nextSteps"];
 const commitPattern = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 
 export function prepareTicketSnapshot({
@@ -232,6 +232,10 @@ function feedbackFingerprints(entries, id) {
   ]).filter(Boolean);
 }
 
+function readableFeedback(entry) {
+  return ["readable", "table"].includes(entry.feedbackFormat);
+}
+
 function ownFeedback(comment, fingerprints) {
   return comment.text.startsWith(ownComment) || comment.text.startsWith(feedbackLabel) ||
     fingerprints.includes(comment.contentFingerprint ?? azureDevOpsCommentFingerprint(comment.text));
@@ -296,6 +300,7 @@ export function ticketOutcome(value) {
   return {
     outcome: value.outcome, summary: recordedText(value.summary, 6000),
     ...(value.versionComparison !== undefined ? { versionComparison: ticketVersionComparison(value.versionComparison) } : {}),
+    ...(value.traceEvidence !== undefined ? { traceEvidence: normalizeTraceEvidence(value.traceEvidence) } : {}),
     ...(value.authenticationRequired ? { authenticationRequired: {
       provider: "azure-cli", reason: recordedText(value.authenticationRequired.reason, 300)
     } } : {}),
@@ -312,7 +317,7 @@ export function ticketOutcome(value) {
   };
 }
 
-function ticketFeedback(marker, result, resolveItem) {
+function ticketFeedback(marker, result, resolveItem, tableFormat = false) {
   const report = result.report;
   const cause = result.confirmedCause;
   const brief = (text, maximum) => text.length <= maximum
@@ -320,15 +325,49 @@ function ticketFeedback(marker, result, resolveItem) {
   const versions = result.versionComparison;
   const versionLines = versions ? [
     `Latest target commit: ${versions.latestCommit}`,
-    `Deployed commit: ${versions.deployedCommit ?? "unknown (not established from approved evidence)"}`,
-    `Comparison: ${versions.finding}. ${brief(versions.evidence, 200)}`,
-    ...(versions.deployedEvidence ? [`Deployment evidence: ${brief(versions.deployedEvidence, 200)}`] : [])
+    ...(versions.deployedCommit ? [
+      `Deployed commit: ${versions.deployedCommit}`,
+      `Comparison: ${versions.finding}. ${brief(versions.evidence, 200)}`,
+      `Deployment evidence: ${brief(versions.deployedEvidence, 200)}`
+    ] : [`Latest-code finding: ${versions.finding}. Source review and local checks do not prove a production deployment.`])
   ] : [];
-  if (["blocked", "failed"].includes(result.outcome) && !report && !cause) {
+  if (["blocked", "failed"].includes(result.outcome) && !report && !cause && !result.traceEvidence) {
     const summary = brief(result.summary.replace(/\s+/gu, " ").trim(), 240);
     return `${marker ? `${marker}\n` : ""}Run ${result.outcome}: ${summary}\nNo fix or successful validation is confirmed.${versionLines.length ? `\n${versionLines.join("\n")}` : ""}`;
   }
   const section = (heading, lines) => `## ${heading}\n${lines.map(line => `- ${line}`).join("\n")}`;
+  const table = (heading, rows) => {
+    const cell = text => text.replaceAll("\\", "\\\\").replaceAll("|", "\\|");
+    return `## ${heading}\n| Topic | Findings |\n| --- | --- |\n` +
+      rows.map(row => `| ${row.map(cell).join(" | ")} |`).join("\n");
+  };
+  const traces = result.traceEvidence;
+  const traceRows = [];
+  if (traces) {
+    const failed = row => row.success === false || /^\d{3}$/u.test(row.resultCode ?? "") && Number(row.resultCode) >= 400;
+    const requests = traces.rows.filter(row => row.table === "requests" && failed(row));
+    const operations = new Set(requests.map(row => row.operation_Id).filter(Boolean));
+    const dependencies = traces.rows.filter(row => row.table === "dependencies" && failed(row));
+    const correlated = dependencies.length > 0 && dependencies.every(row => operations.has(row.operation_Id));
+    const codes = rows => [...new Set(rows.map(row => row.resultCode ? `HTTP ${row.resultCode}` : "failure (status unavailable)"))].join(", ");
+    const observations = [
+      ...(requests.length ? [`Request: ${codes(requests)}`] : []),
+      ...(dependencies.length ? [`${correlated ? "Correlated downstream call" : "Downstream observation (correlation unconfirmed)"}: ${codes(dependencies)}`] : [])
+    ];
+    traceRows.push(["Observed failure", `${traces.rows.map(row => row.timestamp).sort()[0]}: ${observations.join("; ") || `${traces.rows.length} telemetry rows observed`}.`]);
+    const logs = traces.rows.filter(row => row.logMessage);
+    const errors = logs.filter(row => row.severityLevel >= 3);
+    const messages = [...new Set((errors.length ? errors : [...logs]
+      .sort((a, b) => (b.severityLevel ?? -1) - (a.severityLevel ?? -1))).map(row => row.logMessage))].slice(0, 2);
+    if (messages.length) { traceRows.push(["Log detail", `Log snapshot: ${messages.map(message => `"${message}"`).join("; ")}`]); }
+    const endpoints = [...new Set(traces.rows.filter(row => row.endpoint).map(row => row.endpoint))].slice(0, 2);
+    traceRows.push(["Endpoint", endpoints.length ? `Endpoint: ${endpoints.join("; ")}` : "Endpoint not returned or not approved; no URL inferred."]);
+    traceRows.push(["Evidence limits", [
+      ...(traces.omittedDiagnostics ? [`${traces.omittedDiagnostics} unapproved diagnostic details omitted.`] : []),
+      ...(traces.truncated ? ["Evidence is partial because a row limit was reached."] : []),
+      cause ? "Trace correlation alone does not establish cause." : "Underlying cause not confirmed by these traces."
+    ].join(" ")]);
+  }
   const story = result.completedStory;
   const finding = cause ? `Confirmed cause: ${brief(cause.cause, 200)}` :
     story ? `Finding: ${brief(story.finding, 200)}` : report?.rootCause;
@@ -338,15 +377,35 @@ function ticketFeedback(marker, result, resolveItem) {
   ];
   const next = story?.reason ?? cause?.nextSteps ?? report?.nextSteps?.[0] ?? report?.plannedWork?.[0] ??
     "Review the findings and outstanding evidence in Watcher jobs before continuing.";
+  const evidence = [...new Set([...(cause ? [cause.evidence] : []), ...(report?.evidence ?? [])])]
+    .slice(0, 3).map(text => brief(text, 240));
+  const analysisRows = [
+    ["What happened", brief(result.summary, 360)],
+    ...(cause ? [["Confirmed cause", brief(cause.cause, 240)]] :
+      report?.rootCause ? [["Assessment (not confirmed)", brief(report.rootCause, 240)]] :
+        story ? [["Finding", brief(story.finding, 240)]] :
+          traces ? [["Cause", "Not confirmed by the available evidence."]] : []),
+    ...(evidence.length ? [["Evidence", evidence.join("; ")]] : []),
+    ["Code changes", report?.changesMade?.length
+      ? report.changesMade.slice(0, 2).map(text => brief(text, 180)).join("; ")
+      : result.outcome === "draft-pr" ? "Review the linked draft PR; changes were not summarized." : "No code changes reported."],
+    ["Validation", validation.map(line => brief(line, 180)).join("; ")],
+    ["Next action", brief(next, 240)]
+  ];
   const blocks = [
     ...(marker ? [`${marker}\nOutcome: ${result.outcome}`] : []),
-    section("Summary", [brief(result.summary, 360), ...(finding ? [brief(finding, 220)] : [])]),
-    ...(versionLines.length ? [section("Code version comparison", versionLines)] : []),
-    section("Changes and validation", [
+    tableFormat ? table("Analysis summary", analysisRows)
+      : section("Summary", [brief(result.summary, 360), ...(finding ? [brief(finding, 220)] : [])]),
+    ...(versionLines.length ? [section("Code version comparison", traces && versions.deployedCommit ? [
+      `Deployed commit: ${versions.deployedCommit}. Latest-code finding: ${versions.finding}; detailed comparison retained in private history.`
+    ] : versionLines)] : []),
+    ...(traceRows.length ? [tableFormat ? table("Trace snapshot (observed)", traceRows)
+      : section("Trace snapshot (observed)", traceRows.map(([, text]) => text))] : []),
+    ...(!tableFormat ? [section("Changes and validation", [
       ...(report?.changesMade?.length ? [brief(report.changesMade[0], 200)] : []),
       ...validation.map(line => brief(line, 180))
     ]),
-    section("Next action", [brief(next, 240)])
+    section("Next action", [brief(next, 240)])] : [])
   ];
   if (result.pullRequestUrl) { blocks.push(section("Draft pull request", [`Draft PR: ${result.pullRequestUrl}`])); }
   if (resolveItem) {
@@ -354,7 +413,9 @@ function ticketFeedback(marker, result, resolveItem) {
       "Automatic resolution is requested after this feedback. Resolved means the investigation is handed off for human review, not that a fix is merged, deployed or fully live-tested. Check the work item's actual state."
     ]));
   }
-  return `${blocks.join("\n\n")}\n\nDetailed findings, evidence and planned work remain in Watcher jobs.`;
+  return `${blocks.join("\n\n")}\n\n${traces
+    ? "Full trace rows and correlation IDs remain in private watcher history."
+    : "Detailed findings, evidence and planned work remain in Watcher jobs."}`;
 }
 
 export async function executeTicketAgent({
@@ -377,6 +438,10 @@ export async function executeTicketAgent({
       typeof resume !== "boolean") {
     throw new Error("Ticket execution requires a valid owned runtime session.");
   }
+  const evidenceRoot = resolveEvidenceRoot(repository);
+  const gitDirectory = realpathSync.native(resolve(evidenceRoot, "..", ".."));
+  const artifactDirectory = setupPath(gitDirectory, join("fixlab", "command-evidence"));
+  mkdirSync(artifactDirectory, { recursive: true, mode: 0o700 });
   const buffers = { stdout: "", stderr: "" };
   let privateKey = false;
   const lease = createExecutorLease(repository, randomUUID()).acquire(sessionId);
@@ -424,8 +489,10 @@ export async function executeTicketAgent({
     if (activity) {
       try {
         onActivity(activity);
-      } catch {
-        stop("The private watcher history could not be saved. Review local storage before retrying.");
+      } catch (error) {
+        const code = ["EACCES", "EPERM", "EBUSY", "ENOSPC", "EIO", "ENOENT", "EEXIST", "EROFS"]
+          .includes(error?.code) ? ` (${error.code})` : "";
+        stop(`The private watcher history could not be saved${code}. Review local storage before retrying.`);
       }
     }
     const match = text.trim().match(/^FIXLAB_TICKET_RESULT\|(\{.*\})$/u);
@@ -451,6 +518,7 @@ export async function executeTicketAgent({
     }
     if (stream === "stdout") { line(text); }
     const display = stripVTControlCharacters(text);
+    if (display.trim().startsWith("FIXLAB_TICKET_RESULT|")) { return; }
     if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/u.test(display)) { privateKey = true; }
     onOutput(stream, `${privateKey ? "[Sensitive detail omitted]" : recordedText(display, 10000)}\n`);
     if (/-----END [A-Z ]*PRIVATE KEY-----/u.test(display)) { privateKey = false; }
@@ -458,6 +526,7 @@ export async function executeTicketAgent({
   try {
     handle = executor({
       repository, prompt, sessionId, resume, runtimeDirectories,
+      artifactDirectories: [artifactDirectory],
       toolApprovalMode: "allow-all", mode,
       testMutationMode: "none", selectedTestMutationMode: "none",
       onOutput(stream, text) {
@@ -534,9 +603,27 @@ export async function executeTicketAgent({
   }
 }
 
+function mergeTraceEvidence(previous, value) {
+  const next = normalizeTraceEvidence(value);
+  if (!previous) { return next; }
+  if (previous.source !== next.source || previous.policyRevision !== next.policyRevision) {
+    throw new Error("Trace evidence phases must retain the same source and policy revision.");
+  }
+  if (JSON.stringify(previous) === JSON.stringify(next)) { return previous; }
+  const rows = [...new Map([...previous.rows, ...next.rows].map(row => [JSON.stringify(row), row])).values()];
+  return normalizeTraceEvidence({
+    source: previous.source, policyRevision: previous.policyRevision,
+    start: new Date(Math.min(Date.parse(previous.start), Date.parse(next.start))).toISOString(),
+    end: new Date(Math.max(Date.parse(previous.end), Date.parse(next.end))).toISOString(),
+    rows: rows.slice(0, 10),
+    truncated: previous.truncated === true || next.truncated === true || rows.length > 10,
+    omittedDiagnostics: (previous.omittedDiagnostics ?? 0) + (next.omittedDiagnostics ?? 0)
+  });
+}
+
 export async function executeVersionedTicketAgent({
   workspace, phase = "version-review", versionComparison, onPhase = () => {},
-  onComparison = () => {}, execute = executeTicketAgent, ...options
+  traceEvidence, onTraceEvidence = () => {}, onComparison = () => {}, execute = executeTicketAgent, ...options
 }) {
   if (!workspace) { return execute(options); }
   if (!commitPattern.test(workspace.baseCommit) || !["version-review", "fix"].includes(phase)) {
@@ -546,20 +633,31 @@ export async function executeVersionedTicketAgent({
     throw new Error("Resuming the fix phase requires its existing owned runtime session.");
   }
   const sessionId = options.sessionId ?? randomUUID();
-  const run = (prompt, mode, resume) => execute({
-    ...options, prompt, mode, sessionId, resume,
-    onSession(id) {
-      if (id !== sessionId) { throw new Error("Version review must retain the same owned runtime session."); }
-      options.onSession?.(id);
+  let retainedTrace = traceEvidence === undefined ? undefined : normalizeTraceEvidence(traceEvidence);
+  if (retainedTrace) { onTraceEvidence(retainedTrace); }
+  const run = async (prompt, mode, resume) => {
+    const result = ticketOutcome(await execute({
+      ...options, prompt: `${prompt}
+
+This watcher-owned snapshot's reviewed profile and declared non-sensitive setup files are already prepared. Do not repeat onboarding with --from or access the source checkout to prepare this job. Stay in the assigned snapshot; review remaining setup locally with \`fixlab onboard . --runtime <selected-runtime>\` (substitute the current runtime). Read-only review must not provision dependencies or change configuration. In the fix phase, apply local setup only under the existing scoped setup approval. Never copy credentials, browser state or runtime grants. Missing dependencies, authentication or denied access blocks only dependent checks; continue independent source analysis and report the exact prerequisite. Never grant yourself folder access or retry unchanged denied commands.`, mode, sessionId, resume,
+      onSession(id) {
+        if (id !== sessionId) { throw new Error("Version review must retain the same owned runtime session."); }
+        options.onSession?.(id);
+      }
+    }));
+    if (result.traceEvidence) {
+      retainedTrace = mergeTraceEvidence(retainedTrace, result.traceEvidence);
+      onTraceEvidence(retainedTrace);
     }
-  });
+    return { ...result, ...(retainedTrace ? { traceEvidence: retainedTrace } : {}) };
+  };
   let comparison = versionComparison;
   if (phase === "version-review") {
     const result = ticketOutcome(await run(`${options.prompt}
 
 This is the read-only VERSION REVIEW phase, before any fix or PR authority takes effect.
 Use this assigned snapshot at exact target commit ${workspace.baseCommit}. Do not pull, switch revisions, create another checkout, edit source, or create/update a PR in this phase.
-Identify the deployed commit for the affected component at the incident time only from the already-approved deployment metadata or correlated telemetry. Existing production-evidence restrictions and normal authentication still apply. If unavailable, explicitly report "deployed version unknown"; never treat main or the current deployment as proof of the incident revision.
+Identify the deployed commit for the affected component at the incident time only from the already-approved deployment metadata or correlated telemetry. Existing production-evidence restrictions and normal authentication still apply. If unavailable, retain deployedCommit:null in structured evidence and continue source-grounded diagnosis and focused existing repository-owned checks on this pinned latest target commit. Missing deployment metadata alone must not block latest-code verification. Report actual passed, failed, blocked or skipped checks accurately; never treat source inspection as a passed test. Lead the summary with the latest-code findings and validation, without repeating unavailable-deployment warnings. Never treat main, local validation or the current deployment as proof of the incident revision or a production fix.
 Compare the incident/deployed behavior with this pinned latest target code and check existing fixes. Report finding "already-fixed" only with source-grounded comparison evidence; a deployment gap additionally requires a known, different deployed commit. If the latest code still needs a justified fix, report "needs-fix". Otherwise report "unknown". Do not invent a version or a code change.
 Return outcome "analysis", "blocked" or "failed", never "draft-pr". For analysis include versionComparison:{latestCommit:"${workspace.baseCommit}",deployedCommit:null,finding:"unknown|needs-fix|already-fixed",evidence:"Bounded comparison evidence"}. Replace deployedCommit with an exact Git SHA only when verified, and include deployedEvidence describing the approved source and incident-time evidence. Keep raw records, private endpoints and credentials out of the result.`, "validate-only", options.resume === true));
     if (result.outcome === "blocked" || result.outcome === "failed") { return result; }
@@ -572,7 +670,9 @@ Return outcome "analysis", "blocked" or "failed", never "draft-pr". For analysis
     }
     onComparison(comparison);
     if (comparison.finding !== "needs-fix") {
-      let conclusion = "Deployed version unknown. No new fix or PR phase was started.";
+      let conclusion = comparison.finding === "already-fixed"
+        ? "An existing fix was identified in the latest target code; no duplicate fix PR was created."
+        : "Latest target code reviewed; the required change remains unconfirmed. No fix or PR phase was started.";
       if (comparison.deployedCommit) {
         conclusion = comparison.finding === "already-fixed" && comparison.deployedCommit !== comparison.latestCommit
           ? "Deployment gap identified; the fix already exists in the pinned target. No duplicate fix PR was created."
@@ -594,9 +694,6 @@ The original conditional fix/draft-PR authority now applies only to the justifie
   const final = { ...result, versionComparison: result.versionComparison ?? comparison };
   if (final.versionComparison.latestCommit !== workspace.baseCommit) {
     throw new Error("The completed investigation changed its pinned version evidence.");
-  }
-  if (!final.versionComparison.deployedCommit) {
-    final.summary = recordedText(`Deployed version unknown.\n${final.summary}`, 6000);
   }
   return ticketOutcome(final);
 }
@@ -644,7 +741,8 @@ function ticketRequest(item, plan, fingerprints = []) {
     "Only for an analysis with a confirmed root cause, add confirmedCause:{cause,evidence,nextSteps} to the result JSON. All three are required, concise and source-grounded. Do not claim a confirmed cause for an assumption, missing information, a failed prerequisite or an access blocker. The watcher alone owns any explicitly enabled work-item state transition; never change state yourself. Resolved is an investigation handoff, not proof of merge, deployment or full live validation.",
     "For an analysis-only User Story, Feature or Product Backlog Item whose requested answer and acceptance criteria are fully satisfied by verified findings, add completedStory:{finding,evidence,reason}. State the finding, its source-grounded evidence and why the story is logically complete. Do not emit this for bugs, an implementation plan, missing information, outstanding changes or required failed, blocked, skipped or not-run checks. No ongoing or planned implementation may remain; omit empty inProgress and plannedWork arrays rather than filling them with prose. This extends only the owner's existing resolution opt-in; the watcher writes the tagged finding before any state transition.",
     'Finish by emitting exactly one single-line FIXLAB_TICKET_RESULT|{"outcome":"draft-pr|analysis|blocked|failed","summary":"Concise diagnosis, evidence, checks, limitations and next steps; no secrets, identities, customer records or private endpoints","pullRequestId":123}. Include pullRequestId only for draft-pr. Summarize technical findings, not raw logs. Attachments are not loaded by this text-only watcher; report missing visual evidence rather than inventing it.',
-    'Include a report object for structured ADO feedback: rootCause (optional, at most 500 characters; source-grounded cause only when established or applicable), changesMade, inProgress, plannedWork, validation and nextSteps (each optional array of at most 4 concise strings, each at most 200 characters). Write a moderate-length high-level summary, not a long technical paragraph: use two short sentences for summary, put the overall change outcome first in changesMade and the primary next action first in nextSteps, and retain technical detail in the report. Distinguish completed changes from actual continuing work and future proposals; explicitly state when none exist. Identify failed, blocked, skipped and not-run validation accurately. Do not claim a pending change is implemented or a planned check has passed. These sections are agent-reported; confirmedCause retains its separate evidence requirements.',
+    'Include a report object for structured ADO feedback: rootCause (optional, at most 500 characters; label an unconfirmed assessment or attributed incident explanation explicitly), evidence, changesMade, inProgress, plannedWork, validation and nextSteps (each optional array of at most 4 concise strings, each at most 200 characters). Use plain language suitable for the work-item owner, not a long technical paragraph: two short summary sentences explain what happened and why, with the primary next action first in nextSteps. Include relative file/line references and the behavior they establish in evidence for code analysis; distinguish source inspection from executed tests. For trace analysis, explain the observed request/downstream/log chain and compare relevant request shape, batch counts and documented limits only when supported by approved evidence. Do not infer request size, item count, exceeded limits or an oversized URL from HTTP 404/500 alone. Attribute reported incident notes separately from independently verified telemetry and code evidence; inaccessible notes, screenshots and unobserved values stay unverified. Only use confirmedCause when the actual cause is established, not merely quoted or correlated. The watcher formats readable code/trace tables when no real screenshot is available; never fabricate a screenshot, claim an attachment was read, or request a screenshot just for decoration. Distinguish completed changes from actual continuing work and future proposals; explicitly state when none exist. Identify failed, blocked, skipped and not-run validation accurately. Do not claim a pending change is implemented or a planned check has passed. These sections are agent-reported; confirmedCause retains its separate evidence requirements.',
+    "When approved trace reads return traceEvidence, include it in the final result for a short observed trace snapshot; full rows and IDs stay in private history. Lead summary with why the operation failed in plain language, distinguishing the observed failure chain from an unconfirmed underlying cause. If approved incident resolution comments are actually available, use them as attributed resolution evidence; a Resolved state alone does not establish cause or prove a deployment. If those comments are inaccessible, say the incident resolution was not verified; do not infer it from status codes. Keep report validation concise, retaining every failed, skipped or blocked gate. Merge only evidence from the same source and policy revision within one approved bounded UTC window; retain at most ten observed rows, set truncated when more exist, and sum omittedDiagnostics. Never invent rows or replace omitted diagnostics with raw logs, URLs, payloads or guessed endpoints. Correlation does not establish cause or deployment identity.",
     "With completedStory, leave inProgress and plannedWork empty or absent; explain why nothing remains in its reason instead of putting 'none' prose into implementation arrays.",
     `Untrusted work-item data:\n${JSON.stringify(context)}`
   ].join("\n");
@@ -674,7 +772,7 @@ function validateJournal(state, scope) {
           !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(entry.sessionId))) ||
         (entry.runtime !== undefined && !["agency", "copilot"].includes(entry.runtime)) ||
         (entry.configuration !== undefined && !/^[a-f0-9]{64}$/u.test(entry.configuration)) ||
-        (entry.feedbackFormat !== undefined && entry.feedbackFormat !== "readable") ||
+        (entry.feedbackFormat !== undefined && !readableFeedback(entry)) ||
         [entry.feedback, entry.resolutionFeedback].some(receipt => receipt !== undefined &&
           (!receipt || !/^[a-f0-9]{64}$/u.test(receipt.fingerprint) || typeof receipt.attempted !== "boolean" ||
             !Array.isArray(receipt.previousCommentIds) || receipt.previousCommentIds.length > 1000 ||
@@ -695,6 +793,8 @@ function validateJournal(state, scope) {
   }
   for (const entry of state.entries) {
     if (entry.versionComparison !== undefined) { ticketVersionComparison(entry.versionComparison); }
+    if (entry.result?.traceEvidence !== undefined) { normalizeTraceEvidence(entry.result.traceEvidence); }
+    if (entry.details?.traceEvidence !== undefined) { normalizeTraceEvidence(entry.details.traceEvidence); }
   }
 }
 
@@ -725,14 +825,42 @@ function loadAutomationJournal(repository) {
   return { root, path, state, plan, profileRevision: hash(readFileSync(join(repository, ".github", "fixlab", "repository-profile.json"))) };
 }
 
-function saveAutomationJournal(root, path, state, owner) {
-  privateFile(path, 1024 * 1024);
-  for (const entry of state.entries.slice(0, -20)) {
-    if (["complete", "reconciled"].includes(entry.status)) {
-      delete entry.details;
-      delete entry.versionComparison;
+function replaceAutomationJournal(temporary, path) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(temporary, path);
+      return;
+    } catch (error) {
+      if (process.platform !== "win32" || attempt >= 7 || !["EACCES", "EPERM", "EBUSY"].includes(error?.code)) {
+        throw error;
+      }
+      // Windows readers can briefly deny atomic replacement while the journal is open.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
+}
+
+function pruneAutomationEvidence(state) {
+  const cutoff = Date.now() - 15 * 24 * 60 * 60 * 1000;
+  let changed = false;
+  for (const [index, entry] of state.entries.entries()) {
+    if (!["complete", "reconciled"].includes(entry.status)) { continue; }
+    const timestamp = entry.finishedAt ?? entry.updatedAt;
+    const finished = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
+    if (index >= state.entries.length - 20 && !(finished < cutoff)) { continue; }
+    for (const key of ["details", "versionComparison", "result"]) {
+      if (Object.hasOwn(entry, key)) {
+        delete entry[key];
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function saveAutomationJournal(root, path, state, owner) {
+  privateFile(path, 1024 * 1024);
+  pruneAutomationEvidence(state);
   const contents = JSON.stringify(state);
   if (Buffer.byteLength(contents) > 1024 * 1024) {
     throw new Error("The automation journal reached its size limit; review and archive it before continuing.");
@@ -740,7 +868,7 @@ function saveAutomationJournal(root, path, state, owner) {
   const temporary = join(root, `state-${owner}.tmp`);
   try {
     writeFileSync(temporary, contents, { flag: "wx", mode: 0o600 });
-    renameSync(temporary, path);
+    replaceAutomationJournal(temporary, path);
   } finally {
     if (existsSync(temporary)) { unlinkSync(temporary); }
   }
@@ -784,6 +912,7 @@ export function readTicketAutomationHistory(repository) {
       historyAvailable: Boolean(details), summary: details ? recordedText(details.summary ?? "", 2000) : "",
       latestCommit: entry.snapshot?.commit ?? null,
       versionComparison: entry.versionComparison ? ticketVersionComparison(entry.versionComparison) : null,
+      ...(details?.traceEvidence ? { traceEvidence: normalizeTraceEvidence(details.traceEvidence) } : {}),
       report: details?.report ? ticketOutcome({
         outcome: "analysis", summary: "Recorded structured investigation.", report: details.report
       }).report : null,
@@ -1095,16 +1224,33 @@ export async function watchTickets({
   };
   const revisionFor = (item, entry) =>
     ticketRevision(item, entry, feedbackFingerprints(state.entries, item.id));
+  const validateTraceEvidence = result => {
+    if (!result.traceEvidence) { return; }
+    const policy = plan.issuePlans.traces.find(source => source.id === result.traceEvidence.source);
+    if (!policy) { throw new Error("Trace feedback does not match an approved source."); }
+    result.traceEvidence = normalizeTraceEvidence(result.traceEvidence, policy);
+  };
+  async function reconcileFeedback(entry, key) {
+    const receipt = entry[key];
+    if (!readableFeedback(entry) || !receipt) { return false; }
+    const recorded = (await client.commentIds(entry.id, receipt.fingerprint))
+      .filter(id => !receipt.previousCommentIds.includes(id));
+    if (recorded.length > 1) { throw new Error("Multiple matching feedback submissions need review; no duplicate was posted."); }
+    if (recorded.length !== 1) { return false; }
+    receipt.commentId = recorded[0];
+    save();
+    return true;
+  }
   async function submitFeedback(entry, text, key, legacyMarker) {
     const tagged = text.startsWith(legacyMarker)
       ? `${legacyMarker}\n${feedbackLabel}${text.slice(legacyMarker.length)}`
-      : `${feedbackLabel}\n${text}`;
+      : `${feedbackLabel}${entry.feedbackFormat === "table" ? "\n\n" : "\n"}${text}`;
     const fingerprintFor = value =>
       azureDevOpsCommentFingerprint(sanitizeAzureDevOpsHtml(formatAzureDevOpsComment(value)));
-    if (entry.feedbackFormat !== "readable" || entry[key]?.fingerprint !== fingerprintFor(text)) {
+    if (!readableFeedback(entry) || entry[key]?.fingerprint !== fingerprintFor(text)) {
       text = tagged;
     }
-    if (entry.feedbackFormat !== "readable") {
+    if (!readableFeedback(entry)) {
       if (!await client.hasComment(entry.id, legacyMarker)) {
         signal?.throwIfAborted();
         verifyScope();
@@ -1116,10 +1262,7 @@ export async function watchTickets({
     entry[key] ??= { fingerprint, attempted: false,
       previousCommentIds: await client.commentIds(entry.id, fingerprint) };
     save();
-    const recorded = (await client.commentIds(entry.id, entry[key].fingerprint))
-      .filter(id => !entry[key].previousCommentIds.includes(id));
-    if (recorded.length === 1) { entry[key].commentId = recorded[0]; save(); return; }
-    if (recorded.length > 1) { throw new Error("Multiple matching feedback submissions need review; no duplicate was posted."); }
+    if (await reconcileFeedback(entry, key)) { return; }
     if (entry[key].fingerprint !== fingerprint) {
       throw new Error("Pending feedback changed. Review the existing Discussion before posting another result.");
     }
@@ -1151,7 +1294,21 @@ export async function watchTickets({
       throw new Error(`Work item ${entry.id} changed before feedback; review its existing result.`);
     }
     const marker = `${ownComment}${entry.id}:${entry.fingerprint}]`;
+    const delivered = entry.feedback?.attempted && await reconcileFeedback(entry, "feedback");
     const result = ticketOutcome(entry.result);
+    try {
+      validateTraceEvidence(result);
+    } catch (error) {
+      if (!delivered) { throw error; }
+      const message = "Existing feedback delivery verified. Review required for stale trace evidence; no new feedback or state change was submitted.";
+      entry.status = "reconciled";
+      entry.updatedAt = entry.finishedAt = new Date().toISOString();
+      entry.details ??= { summary: "", activity: [], checks: [], omittedActivity: 0 };
+      entry.details.summary = recordedText(`${message}\n${entry.details.summary}`, 2000);
+      save();
+      onEvent(`Work item ${entry.id}: ${message} ${recordedText(error.message)}`);
+      return;
+    }
     if (result.outcome === "draft-pr") {
       try {
         result.pullRequestUrl = await client.verifyDraft(plan.repository, result.pullRequestId, plan.targetBranch, entry.id);
@@ -1167,16 +1324,17 @@ export async function watchTickets({
     entry.details ??= { summary: "", activity: [], checks: [], omittedActivity: 0 };
     entry.details.summary = recordedText(result.summary, 2000);
     if (result.report) { entry.details.report = result.report; }
+    if (result.traceEvidence) { entry.details.traceEvidence = result.traceEvidence; }
     if (result.confirmedCause) { entry.details.confirmedCause = result.confirmedCause; }
     if (result.completedStory) { entry.details.completedStory = result.completedStory; }
     save();
     const resolveItem = plan.resolveOnCompletion && (result.outcome === "draft-pr" || Boolean(result.confirmedCause) ||
       Boolean(result.completedStory && reviewedCurrent.workItemType !== "Bug"));
-    let text = ticketFeedback(entry.feedbackFormat === "readable" ? null : marker, result, resolveItem);
+    let text = ticketFeedback(readableFeedback(entry) ? null : marker, result, resolveItem, entry.feedbackFormat === "table");
     if (result.authenticationRequired) {
       text += `\n\n## Sign-in required\n- ${result.authenticationRequired.reason}\n- This investigation is paused; the watcher can continue other tickets.\n- When the watcher is idle, stop it in its existing terminal, run az login with the approved account and complete sign-in/MFA. Do not paste credentials into Discussion.\n- Restart the same reviewed watcher command with --resume-ticket ${entry.id} and its normal --yes --allow-all-tools confirmations. This resumes the existing job; it does not grant missing database roles.`;
     }
-    await submitFeedback(entry, text, "feedback", marker);
+    if (!delivered) { await submitFeedback(entry, text, "feedback", marker); }
     if (resolveItem || entry.resolution) {
       const previousAttempt = Boolean(entry.resolution);
       entry.resolution ??= { status: "pending", previousState: current.state };
@@ -1225,7 +1383,7 @@ export async function watchTickets({
           entry.resolution = { ...entry.resolution, status: "blocked", message: recordedText(error.message, 200) };
           save();
           const failureMarker = `${ownComment}${entry.id}:resolution-${entry.fingerprint}]`;
-          const failureText = `${entry.feedbackFormat === "readable" ? "" : `${failureMarker}\n`}The investigation result is recorded, but automatic resolution could not finish: ${entry.resolution.message}\nPlease have the work-item owner review its state. No merged, deployed or fully validated fix is claimed.`;
+          const failureText = `${readableFeedback(entry) ? "" : `${failureMarker}\n`}The investigation result is recorded, but automatic resolution could not finish: ${entry.resolution.message}\nPlease have the work-item owner review its state. No merged, deployed or fully validated fix is claimed.`;
           await submitFeedback(entry, failureText, "resolutionFeedback", failureMarker);
         }
       }
@@ -1298,7 +1456,7 @@ export async function watchTickets({
     onEvent(`Work item ${item.id}: ${resume ? "resuming its existing" : "starting one authorized"} ${plan.runtime} investigation.`);
     const result = ticketOutcome(await execute({
       repository: workspace?.repository ?? repository, workspace, phase: entry.phase,
-      versionComparison: entry.versionComparison,
+      versionComparison: entry.versionComparison, traceEvidence: entry.details.traceEvidence,
       item, request, ...(resume ? { sessionId: entry.sessionId, resume: true } : {}),
       onPhase(phase) {
         if (phase !== "fix") { throw new Error("The executor supplied an invalid investigation phase."); }
@@ -1313,6 +1471,12 @@ export async function watchTickets({
         entry.versionComparison = comparison;
         save();
       },
+      onTraceEvidence(value) {
+        const evidence = { traceEvidence: value };
+        validateTraceEvidence(evidence);
+        entry.details.traceEvidence = evidence.traceEvidence;
+        save();
+      },
       onSession(sessionId) {
         if (typeof sessionId !== "string" ||
             !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(sessionId) ||
@@ -1324,6 +1488,7 @@ export async function watchTickets({
       },
       onActivity: event => record(entry, event)
     }));
+    validateTraceEvidence(result);
     if (result.versionComparison) {
       if (result.versionComparison.latestCommit !== entry.snapshot?.commit) {
         throw new Error("The ticket result changed its pinned version evidence.");
@@ -1369,6 +1534,7 @@ export async function watchTickets({
     do {
       signal?.throwIfAborted();
       verifyScope();
+      if (pruneAutomationEvidence(state)) { save(); }
       const pending = state.entries.find(entry => entry.status === "feedback-pending");
       if (pending) {
         await feedback(pending);
@@ -1422,7 +1588,7 @@ export async function watchTickets({
           const request = ticketRequest(item, plan, feedbackFingerprints(state.entries, id));
           const entry = { id, title: recordedText(item.title, 200), ...revision, status: "snapshot-pending",
             runtime: plan.runtime, configuration: approvedConfiguration,
-            ...(typeof client.commentIds === "function" ? { feedbackFormat: "readable" } : {}),
+            ...(typeof client.commentIds === "function" ? { feedbackFormat: "table" } : {}),
             startedAt: new Date().toISOString(),
             details: { summary: "", activity: [], checks: [], omittedActivity: 0 } };
           state.entries.push(entry);

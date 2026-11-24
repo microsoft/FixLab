@@ -843,8 +843,13 @@ the reviewed command can retry that not-yet-executed attempt.
 
 Each new snapshot first receives a read-only version review. The executor
 identifies the affected component's deployed commit at the incident time from
-already-approved deployment metadata or telemetry, or reports **deployed version
-unknown**. `main` and today's deployment are not assumed to represent that
+already-approved deployment metadata or telemetry. If unavailable, it retains
+`deployedCommit: null` privately and continues source-grounded diagnosis and
+focused existing checks against the latest pinned target. Missing deployment
+metadata alone does not block this verification. Feedback reports latest-code
+findings and actual check results without repeating deployment-access warnings;
+source review is not a passed test, and local checks do not prove production
+deployment. `main` and today's deployment are not assumed to represent the
 incident. An evidence-backed existing fix produces analysis and, when the
 deployed commit is known and different, a deployment-gap report instead of a
 duplicate PR. Only a completed `needs-fix` review continues into the same
@@ -867,10 +872,18 @@ evidence, limitations and next steps, not an empty PR or a new story.
 Meaningful ticket edits or new human Discussion comments can trigger another
 investigation. FixLab's own feedback does not retrigger it.
 
-Discussion feedback uses three short sections: **Summary**, **Changes and
-validation**, and **Next action**. Expect two summary sentences and a few compact
-bullets, not a long paragraph or a full implementation plan. Detailed cause,
-completed/proposed work and evidence remain expandable in **Watcher jobs**.
+New Discussion feedback uses a readable **Analysis summary** table: what happened,
+the confirmed cause or explicitly unconfirmed assessment, supporting evidence,
+code changes, actual validation and the next action. Code evidence includes
+relative file/line references where available. Trace evidence has a separate
+**Trace snapshot (observed)** table showing the request/downstream/log chain and
+its limits. Reported incident explanations are attributed; status codes alone
+do not establish request counts, exceeded limits or an oversized URL.
+Tables do not require screenshots. Screenshot evidence must come from actual
+approved validation; missing screenshots or inaccessible incident notes are never
+invented. Detailed findings, completed/proposed work and evidence remain
+expandable in **Watcher jobs**. Older pending attempts retain their saved feedback
+format so an update does not change delivery fingerprints or duplicate comments.
 Version-reviewed attempts also include a bounded **Code version comparison**
 section with the pinned target, deployed revision or explicit unknown, and evidence.
 The executor reports these separately; missing evidence remains unknown.
@@ -919,7 +932,11 @@ work-item/verified PR links. This does not start a watcher or grant permissions.
 Finished means feedback was recorded, not that tests passed. Check/scenario
 messages are agent-reported, not independent runner proof. Old attempts may
 have basic history only. Detailed history retains the latest 20 attempts,
-20 activity and 10 check updates per attempt; raw console output is not stored.
+20 activity and 10 check updates per attempt; completed/reconciled evidence
+also expires after 15 days. Journal saves and watcher polling remove expired
+details, version comparisons and retained result payloads, not the lightweight
+duplicate-prevention records, feedback receipts or recovery audit. Active,
+paused and pending-feedback evidence is preserved. Raw console output is not stored.
 Worker status is the last reported state, not a process health check.
 Work-item links show the ADO ID and a safely bounded title. New attempts retain
 their title; older missing titles are read from ADO for at most 20 recent attempts
