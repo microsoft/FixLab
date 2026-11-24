@@ -843,8 +843,13 @@ the reviewed command can retry that not-yet-executed attempt.
 
 Each new snapshot first receives a read-only version review. The executor
 identifies the affected component's deployed commit at the incident time from
-already-approved deployment metadata or telemetry, or reports **deployed version
-unknown**. `main` and today's deployment are not assumed to represent that
+already-approved deployment metadata or telemetry. If unavailable, it retains
+`deployedCommit: null` privately and continues source-grounded diagnosis and
+focused existing checks against the latest pinned target. Missing deployment
+metadata alone does not block this verification. Feedback reports latest-code
+findings and actual check results without repeating deployment-access warnings;
+source review is not a passed test, and local checks do not prove production
+deployment. `main` and today's deployment are not assumed to represent the
 incident. An evidence-backed existing fix produces analysis and, when the
 deployed commit is known and different, a deployment-gap report instead of a
 duplicate PR. Only a completed `needs-fix` review continues into the same

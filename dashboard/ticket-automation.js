@@ -321,9 +321,11 @@ function ticketFeedback(marker, result, resolveItem) {
   const versions = result.versionComparison;
   const versionLines = versions ? [
     `Latest target commit: ${versions.latestCommit}`,
-    `Deployed commit: ${versions.deployedCommit ?? "unknown (not established from approved evidence)"}`,
-    `Comparison: ${versions.finding}. ${brief(versions.evidence, 200)}`,
-    ...(versions.deployedEvidence ? [`Deployment evidence: ${brief(versions.deployedEvidence, 200)}`] : [])
+    ...(versions.deployedCommit ? [
+      `Deployed commit: ${versions.deployedCommit}`,
+      `Comparison: ${versions.finding}. ${brief(versions.evidence, 200)}`,
+      `Deployment evidence: ${brief(versions.deployedEvidence, 200)}`
+    ] : [`Latest-code finding: ${versions.finding}. Source review and local checks do not prove a production deployment.`])
   ] : [];
   if (["blocked", "failed"].includes(result.outcome) && !report && !cause && !result.traceEvidence) {
     const summary = brief(result.summary.replace(/\s+/gu, " ").trim(), 240);
@@ -369,8 +371,8 @@ function ticketFeedback(marker, result, resolveItem) {
   const blocks = [
     ...(marker ? [`${marker}\nOutcome: ${result.outcome}`] : []),
     section("Summary", [brief(result.summary, 360), ...(finding ? [brief(finding, 220)] : [])]),
-    ...(versionLines.length ? [section("Code version comparison", traces ? [
-      `Deployed commit: ${versions.deployedCommit ?? "unknown"}. Latest-code finding: ${versions.finding}; detailed comparison retained in private history.`
+    ...(versionLines.length ? [section("Code version comparison", traces && versions.deployedCommit ? [
+      `Deployed commit: ${versions.deployedCommit}. Latest-code finding: ${versions.finding}; detailed comparison retained in private history.`
     ] : versionLines)] : []),
     ...(traceLines.length ? [section("Trace snapshot (observed)", traceLines)] : []),
     section("Changes and validation", [
@@ -622,7 +624,7 @@ export async function executeVersionedTicketAgent({
 
 This is the read-only VERSION REVIEW phase, before any fix or PR authority takes effect.
 Use this assigned snapshot at exact target commit ${workspace.baseCommit}. Do not pull, switch revisions, create another checkout, edit source, or create/update a PR in this phase.
-Identify the deployed commit for the affected component at the incident time only from the already-approved deployment metadata or correlated telemetry. Existing production-evidence restrictions and normal authentication still apply. If unavailable, explicitly report "deployed version unknown"; never treat main or the current deployment as proof of the incident revision.
+Identify the deployed commit for the affected component at the incident time only from the already-approved deployment metadata or correlated telemetry. Existing production-evidence restrictions and normal authentication still apply. If unavailable, retain deployedCommit:null in structured evidence and continue source-grounded diagnosis and focused existing repository-owned checks on this pinned latest target commit. Missing deployment metadata alone must not block latest-code verification. Report actual passed, failed, blocked or skipped checks accurately; never treat source inspection as a passed test. Lead the summary with the latest-code findings and validation, without repeating unavailable-deployment warnings. Never treat main, local validation or the current deployment as proof of the incident revision or a production fix.
 Compare the incident/deployed behavior with this pinned latest target code and check existing fixes. Report finding "already-fixed" only with source-grounded comparison evidence; a deployment gap additionally requires a known, different deployed commit. If the latest code still needs a justified fix, report "needs-fix". Otherwise report "unknown". Do not invent a version or a code change.
 Return outcome "analysis", "blocked" or "failed", never "draft-pr". For analysis include versionComparison:{latestCommit:"${workspace.baseCommit}",deployedCommit:null,finding:"unknown|needs-fix|already-fixed",evidence:"Bounded comparison evidence"}. Replace deployedCommit with an exact Git SHA only when verified, and include deployedEvidence describing the approved source and incident-time evidence. Keep raw records, private endpoints and credentials out of the result.`, "validate-only", options.resume === true));
     if (result.outcome === "blocked" || result.outcome === "failed") { return result; }
@@ -635,7 +637,9 @@ Return outcome "analysis", "blocked" or "failed", never "draft-pr". For analysis
     }
     onComparison(comparison);
     if (comparison.finding !== "needs-fix") {
-      let conclusion = "Deployed version unknown. No new fix or PR phase was started.";
+      let conclusion = comparison.finding === "already-fixed"
+        ? "An existing fix was identified in the latest target code; no duplicate fix PR was created."
+        : "Latest target code reviewed; the required change remains unconfirmed. No fix or PR phase was started.";
       if (comparison.deployedCommit) {
         conclusion = comparison.finding === "already-fixed" && comparison.deployedCommit !== comparison.latestCommit
           ? "Deployment gap identified; the fix already exists in the pinned target. No duplicate fix PR was created."
@@ -657,9 +661,6 @@ The original conditional fix/draft-PR authority now applies only to the justifie
   const final = { ...result, versionComparison: result.versionComparison ?? comparison };
   if (final.versionComparison.latestCommit !== workspace.baseCommit) {
     throw new Error("The completed investigation changed its pinned version evidence.");
-  }
-  if (!final.versionComparison.deployedCommit) {
-    final.summary = recordedText(`Deployed version unknown.\n${final.summary}`, 6000);
   }
   return ticketOutcome(final);
 }

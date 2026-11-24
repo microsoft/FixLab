@@ -41,8 +41,12 @@ attempts keep the same snapshot. Legacy resumes are not silently moved.
 The CLI runs a read-only version-review phase before fix/PR authority takes
 effect. A bounded, agent-reported comparison binds latest-code findings to the
 pinned commit and identifies the affected component's incident-time deployed
-revision only from existing approved evidence. Missing deployment evidence is
-explicitly unknown, never inferred from `main`. Existing fixes terminate as
+revision only from existing approved evidence. Missing deployment evidence stays
+unknown in structured private evidence, never inferred from `main`. It does not
+block source-grounded review and focused existing checks on the latest pinned
+target. Feedback leads with latest-code findings and actual validation, not
+repeated unavailable-deployment warnings; local checks do not prove a production
+deployment. Existing fixes terminate as
 analysis; only `needs-fix` continues in the same session, retaining its comparison
 through authentication pauses. A deployment gap requires a known, different
 deployed commit. Profile/helper approval, ordinary authentication, read-only

@@ -195,7 +195,11 @@ test("new watcher tickets fetch newer target commits without changing an active 
     assert.deepEqual(history.attempts.map(entry => entry.latestCommit).sort(), [f.target, next].sort());
     assert.match(f.posted[0].text, /Deployment gap identified/u);
     assert.ok(f.posted[0].text.includes(f.startup) && f.posted[0].text.includes(f.target));
-    assert.match(f.posted[1].text, /Deployed version unknown/u);
+    assert.match(f.posted[1].text, /Latest target code reviewed/u);
+    assert.doesNotMatch(f.posted[1].text, /Deployed (?:version|commit).*unknown|No approved deployment metadata/u);
+    assert.ok(history.attempts.some(entry => entry.versionComparison?.latestCommit === next &&
+      entry.versionComparison.deployedCommit === null &&
+      entry.versionComparison.evidence === "No approved deployment metadata was available."));
     assert.ok(history.attempts.some(entry => entry.versionComparison?.deployedCommit === f.startup));
   } finally { f.cleanup(); }
 });
@@ -235,8 +239,8 @@ test("a failed ticket fetch never falls back to an old ref and remains retryable
   } finally { f.cleanup(); }
 });
 
-test("version review reports existing fixes or unknown deployments without entering the PR phase", async () => {
-  for (const finding of ["already-fixed", "unknown"]) {
+test("version review verifies latest code when deployment is unavailable without repeating deployment warnings", async () => {
+  for (const [finding, deployed] of [["already-fixed", true], ["already-fixed", false], ["unknown", false]]) {
     let calls = 0;
     const result = await executeVersionedTicketAgent({
       workspace: { baseCommit: "b".repeat(40) }, prompt: "Bounded synthetic ticket request.",
@@ -244,10 +248,13 @@ test("version review reports existing fixes or unknown deployments without enter
         calls++;
         assert.equal(options.mode, "validate-only");
         assert.match(options.prompt, /Do not pull.*create\/update a PR/u);
+        assert.match(options.prompt, /Missing deployment metadata alone must not block latest-code verification/u);
+        assert.match(options.prompt, /focused existing repository-owned checks/u);
+        assert.match(options.prompt, /never treat source inspection as a passed test/u);
         options.onSession(options.sessionId);
         return { outcome: "analysis", summary: "Compared incident evidence with the pinned source.",
           versionComparison: { latestCommit: "b".repeat(40), finding, evidence: "Reviewed source and incident behavior.",
-            ...(finding === "already-fixed" ? {
+            ...(deployed ? {
               deployedCommit: "a".repeat(40), deployedEvidence: "Approved incident-time deployment metadata."
             } : {}) } };
       }
@@ -255,7 +262,12 @@ test("version review reports existing fixes or unknown deployments without enter
     assert.equal(calls, 1);
     assert.equal(result.outcome, "analysis");
     assert.equal(result.pullRequestId, undefined);
-    assert.match(result.summary, finding === "already-fixed" ? /Deployment gap/ : /Deployed version unknown/);
+    assert.match(result.summary, deployed ? /Deployment gap/
+      : finding === "already-fixed" ? /existing fix.*latest target code/u : /Latest target code reviewed/u);
+    if (!deployed) {
+      assert.equal(result.versionComparison.deployedCommit, null);
+      assert.doesNotMatch(result.summary, /Deployed version unknown|Deployment gap/u);
+    }
   }
   await assert.rejects(executeVersionedTicketAgent({
     workspace: { baseCommit: "b".repeat(40) }, prompt: "Synthetic scope.",
@@ -374,7 +386,8 @@ test("fix execution follows the completed pinned version review and retains its 
   assert.equal(calls[1].resume, true);
   assert.equal(calls[2].resume, true);
   assert.equal(result.pullRequestId, 9);
-  assert.match(result.summary, /Deployed version unknown/u);
+  assert.equal(result.versionComparison.deployedCommit, null);
+  assert.equal(result.summary, "Focused fix verified and published as draft.");
   assert.deepEqual(result.traceEvidence, traceEvidence);
 });
 
@@ -901,7 +914,8 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     await fixture.run({ plan, execute: async ({ request }) => {
       assert.match(request, /traceEvidence/);
       assert.match(request, /incident resolution was not verified/);
-      return { outcome: "analysis", summary: "Observed a failed request; its cause remains unknown.", traceEvidence };
+      return { outcome: "analysis", summary: "Observed a failed request; its cause remains unknown.", traceEvidence,
+        versionComparison: { latestCommit: "1".repeat(40), finding: "unknown", evidence: "Deployment metadata could not be read." } };
     } });
     const text = fixture.posted[0].text;
     assert.match(text, /Trace snapshot/);
@@ -914,6 +928,10 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     assert.equal(attempt.traceEvidence.rows[3].logMessage, "Backend request failed.");
     assert.equal(attempt.traceEvidence.rows[0].operation_Id, "op-42");
     assert.doesNotMatch(text, /op-42|root-42|operation_Id=|operation_ParentId=|severityLevel=|Lookup started\./u);
+    assert.doesNotMatch(text, /Deployment metadata could not be read|Deployed commit|Deployed version unknown/u);
+    assert.match(text, /Latest target commit: 1{40}/u);
+    assert.equal(attempt.versionComparison.deployedCommit, null);
+    assert.equal(attempt.versionComparison.evidence, "Deployment metadata could not be read.");
     assert.match(text, /Underlying cause not confirmed/u);
     assert.ok(text.length < 1500);
     assert.equal(attempt.confirmedCause, null);
