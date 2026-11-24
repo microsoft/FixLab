@@ -647,7 +647,7 @@ export async function executeVersionedTicketAgent({
     }
     preparationContext = `\nHost dependency preparation: ${recordedText(preparation.message, 1000)}
 ${preparation.ready ? "Run the focused existing checks and report their actual outcomes."
-    : "Dependency preparation is blocked; do not retry unchanged restore commands or count dependent checks as passed. Continue independent source and approved evidence analysis."}
+    : "Some dependency preparation is blocked; do not retry unchanged restore commands or count blocked checks as passed. Run independent existing checks whose prerequisites are available, and continue independent source and approved evidence analysis."}
 Preparation is not test execution and grants no production application testing or business-data writes.`;
     options.onActivity?.({ timestamp: new Date().toISOString(), kind: "check", name, status: preparation.ready ? "passed" : "blocked",
       message: recordedText(preparation.message, 1000) });

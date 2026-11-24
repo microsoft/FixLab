@@ -109,7 +109,7 @@ Usage:
   fixlab onboard [repository] [--from <source-checkout> | --reuse-setup] [--yes] [--authenticate] [--start-dashboard] [--runtime <agency|copilot>] [--model <model>]
   fixlab init [repository]
   fixlab notifications [repository] [--yes]
-  fixlab prepare [repository] [--yes]
+  fixlab prepare [repository] [--application=frontend|backend|browser] [--yes]
   fixlab doctor [repository] [--runtime <agency|copilot>]
   fixlab setup-playwright [repository] [--yes]
   fixlab setup-queries [repository] --environment <name> [--yes] [--runtime <agency|copilot>] [--model <model>]
@@ -769,7 +769,7 @@ function doctor(repository, runtime) {
   return 0;
 }
 
-function prepare(repository, approved) {
+function prepare(repository, approved, selectedApplication = "") {
   const { profile, error } = loadProfile(repository);
   if (error) {
     console.error(
@@ -785,7 +785,8 @@ function prepare(repository, approved) {
     ["backend", commands.backendRestore],
     ["browser", commands.browserRestore]
   ]
-    .filter(([, command]) => typeof command === "string" && command.trim())
+    .filter(([application, command]) => (!selectedApplication || application === selectedApplication) &&
+      typeof command === "string" && command.trim())
     .map(([application, command]) => ({
       application,
       command: command.trim(),
@@ -2406,10 +2407,17 @@ async function main(args) {
   }
 
   if (command === "prepare") {
+    const applications = rest.filter(value => value.startsWith("--application="));
+    const application = applications[0]?.slice("--application=".length) ?? "";
+    if (applications.length > 1 || (applications.length && !["frontend", "backend", "browser"].includes(application)) ||
+        rest.some(value => value.startsWith("-") && value !== "--yes" && !value.startsWith("--application=")) ||
+        rest.filter(value => !value.startsWith("-")).length > 1) {
+      throw new Error("Usage: fixlab prepare [repository] [--application=frontend|backend|browser] [--yes]");
+    }
     const repositoryArgument = rest.find((value) => !value.startsWith("-"));
     return prepare(
       resolveRepository(repositoryArgument),
-      rest.includes("--yes")
+      rest.includes("--yes"), application
     );
   }
 

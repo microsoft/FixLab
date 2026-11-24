@@ -41,12 +41,17 @@ Preparation already installs the reviewed profile and declared non-sensitive
 setup files in the snapshot. Watcher phases review remaining setup locally,
 without repeating onboarding with `--from` or requesting source-clone access.
 Before a fresh read-only review, the host uses the contained worktree setup runner
-to run `fixlab prepare --yes` with that snapshot's reviewed restore commands and
+to run `fixlab prepare --application=<frontend|backend|browser> --yes` with that
+snapshot's reviewed restore commands and
 confined working directories. This is included in the watcher approval preview;
 it does not run onboarding, application/browser startup or sign-in. Setup has a
-ten-minute limit and records a separate passed/blocked prerequisite, not a passed
-test. Restore failures retain only bounded diagnostic codes in the review prompt;
-independent analysis continues. Tracked-file changes stop read-only review rather
+ten-minute restore-command budget divided between configured applications, with
+bounded owned-process termination grace. Each restore gets an independent attempt;
+one missing folder, failure or timeout does not starve other applications.
+Setup records a separate passed/blocked prerequisite, not a passed test. Restore
+failures retain only bounded diagnostic codes in the review prompt; independent
+checks with available prerequisites can still run. Tracked-file changes or changed
+reviewed profile/setup file hashes stop read-only review rather
 than silently reviewing modified source. Authentication resumes and later fix
 phases do not repeat host preparation.
 Read-only review never provisions dependencies or changes configuration; any
