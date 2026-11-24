@@ -16,6 +16,7 @@ import { setupPath } from "./repository-setup.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence, configuredProductionEvidence, productionEvidenceContext, productionEvidenceFor } from "./analysis-evidence.js";
 import { issuePlanConfiguration, issuePlanContext, normalizeTraceEvidence } from "./issue-plans.js";
 import { prepareJobWorktree } from "./job-worktree.js";
+import { renderTraceImage } from "./trace-image.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
 const ownComment = "[FixLab automation ";
@@ -233,7 +234,25 @@ function feedbackFingerprints(entries, id) {
 }
 
 function readableFeedback(entry) {
-  return ["readable", "table"].includes(entry.feedbackFormat);
+  return ["readable", "table", "trace-image"].includes(entry.feedbackFormat);
+}
+
+function tableFeedback(entry) {
+  return ["table", "trace-image"].includes(entry.feedbackFormat);
+}
+
+const imageUnavailable = {
+  unsupported: "Attachment upload is unavailable.",
+  "render-failed": "Local rendering failed.",
+  "upload-unconfirmed": "The upload was not confirmed; it will not be repeated automatically."
+};
+
+function validTraceImage(receipt) {
+  return receipt && Object.keys(receipt).every(key => ["status", "reason", "attachmentId"].includes(key)) &&
+    (receipt.status === "uploading" && receipt.reason === undefined && receipt.attachmentId === undefined ||
+      receipt.status === "uploaded" && receipt.reason === undefined &&
+        typeof receipt.attachmentId === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(receipt.attachmentId) ||
+      receipt.status === "unavailable" && Object.hasOwn(imageUnavailable, receipt.reason) && receipt.attachmentId === undefined);
 }
 
 function ownFeedback(comment, fingerprints) {
@@ -773,6 +792,7 @@ function validateJournal(state, scope) {
         (entry.runtime !== undefined && !["agency", "copilot"].includes(entry.runtime)) ||
         (entry.configuration !== undefined && !/^[a-f0-9]{64}$/u.test(entry.configuration)) ||
         (entry.feedbackFormat !== undefined && !readableFeedback(entry)) ||
+        (entry.traceImage !== undefined && (entry.feedbackFormat !== "trace-image" || !validTraceImage(entry.traceImage))) ||
         [entry.feedback, entry.resolutionFeedback].some(receipt => receipt !== undefined &&
           (!receipt || !/^[a-f0-9]{64}$/u.test(receipt.fingerprint) || typeof receipt.attempted !== "boolean" ||
             !Array.isArray(receipt.previousCommentIds) || receipt.previousCommentIds.length > 1000 ||
@@ -913,6 +933,9 @@ export function readTicketAutomationHistory(repository) {
       latestCommit: entry.snapshot?.commit ?? null,
       versionComparison: entry.versionComparison ? ticketVersionComparison(entry.versionComparison) : null,
       ...(details?.traceEvidence ? { traceEvidence: normalizeTraceEvidence(details.traceEvidence) } : {}),
+      ...(entry.traceImage ? { traceImage: { status: entry.traceImage.status,
+        ...(entry.traceImage.reason ? { reason: entry.traceImage.reason } : {}),
+        feedbackConfirmed: Boolean(entry.feedback?.commentId) } } : {}),
       report: details?.report ? ticketOutcome({
         outcome: "analysis", summary: "Recorded structured investigation.", report: details.report
       }).report : null,
@@ -1148,7 +1171,8 @@ export async function watchTickets({
   repository, plan, once = false, confirmed = false, allowAllTools = false,
   resumeWorkItemId,
   client = createAzureDevOpsTicketClient({ profile: plan.profile }),
-  execute, prepareSnapshot = prepareTicketSnapshot, signal, onEvent = message => console.log(message)
+  execute, prepareSnapshot = prepareTicketSnapshot, renderTraceResults = renderTraceImage,
+  signal, onEvent = message => console.log(message)
 }) {
   if (!confirmed || !allowAllTools || typeof execute !== "function") {
     throw new Error("Review the plan, then explicitly pass --yes --allow-all-tools for this watcher session. This permits its selected ticket jobs, not unconfigured production access, business-data writes, merges or deployments.");
@@ -1230,6 +1254,62 @@ export async function watchTickets({
     if (!policy) { throw new Error("Trace feedback does not match an approved source."); }
     result.traceEvidence = normalizeTraceEvidence(result.traceEvidence, policy);
   };
+  async function revalidateFeedback(entry) {
+    const latest = await client.load(entry.id);
+    const reviewed = entry.resolution && latest.state === "Resolved"
+      ? { ...latest, state: entry.resolution.previousState } : latest;
+    if (!eligible(reviewed, plan) || revisionFor(reviewed, entry).fingerprint !== entry.fingerprint) {
+      throw new Error("The work item changed before feedback; no further feedback write was attempted.");
+    }
+    signal?.throwIfAborted();
+    verifyScope();
+  }
+  async function traceImageFeedback(entry, evidence) {
+    if (!entry.traceImage) {
+      if (entry.feedback) {
+        throw new Error("Pending image feedback is missing its receipt; review Discussion before retrying.");
+      }
+      if (typeof client.uploadTraceImage !== "function" || typeof client.traceImageUrl !== "function") {
+        entry.traceImage = { status: "unavailable", reason: "unsupported" };
+      } else {
+        let bytes;
+        try {
+          bytes = renderTraceResults(evidence, plan.issuePlans.traces.find(source => source.id === evidence.source));
+          if (!Buffer.isBuffer(bytes) || bytes.length < 45 || bytes.length > 64 * 1024 ||
+              !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+            throw new Error("Invalid rendered PNG.");
+          }
+        } catch {
+          entry.traceImage = { status: "unavailable", reason: "render-failed" };
+        }
+        if (bytes && !entry.traceImage) {
+          await revalidateFeedback(entry);
+          entry.traceImage = { status: "uploading" };
+          save();
+          try {
+            const attachmentId = await client.uploadTraceImage(bytes);
+            const receipt = { status: "uploaded", attachmentId };
+            if (!validTraceImage(receipt)) { throw new Error("Invalid attachment identity."); }
+            entry.traceImage = receipt;
+          } catch {
+            entry.traceImage = { status: "unavailable", reason: "upload-unconfirmed" };
+          }
+        }
+      }
+      save();
+    }
+    if (entry.traceImage.status === "uploading") {
+      entry.traceImage = { status: "unavailable", reason: "upload-unconfirmed" };
+      save();
+    }
+    if (entry.traceImage.status === "uploaded") {
+      const id = entry.traceImage.attachmentId;
+      const expected = `https://dev.azure.com/${encodeURIComponent(plan.organization)}/${encodeURIComponent(plan.project)}/_apis/wit/attachments/${id}`;
+      if (client.traceImageUrl(id) !== expected) { throw new Error("Trace attachment is outside the reviewed project."); }
+      return `\n\nRendered trace results (observed evidence; attachment ${id}). Not a Portal screenshot, root-cause proof or application validation.\n\n![Rendered trace results](${expected})`;
+    }
+    return `\n\nRendered trace results: image unavailable. ${imageUnavailable[entry.traceImage.reason]} Text findings remain available.`;
+  }
   async function reconcileFeedback(entry, key) {
     const receipt = entry[key];
     if (!readableFeedback(entry) || !receipt) { return false; }
@@ -1244,7 +1324,7 @@ export async function watchTickets({
   async function submitFeedback(entry, text, key, legacyMarker) {
     const tagged = text.startsWith(legacyMarker)
       ? `${legacyMarker}\n${feedbackLabel}${text.slice(legacyMarker.length)}`
-      : `${feedbackLabel}${entry.feedbackFormat === "table" ? "\n\n" : "\n"}${text}`;
+      : `${feedbackLabel}${tableFeedback(entry) ? "\n\n" : "\n"}${text}`;
     const fingerprintFor = value =>
       azureDevOpsCommentFingerprint(sanitizeAzureDevOpsHtml(formatAzureDevOpsComment(value)));
     if (!readableFeedback(entry) || entry[key]?.fingerprint !== fingerprintFor(text)) {
@@ -1254,6 +1334,7 @@ export async function watchTickets({
       if (!await client.hasComment(entry.id, legacyMarker)) {
         signal?.throwIfAborted();
         verifyScope();
+        await revalidateFeedback(entry);
         await client.comment(entry.id, text);
       }
       return;
@@ -1271,6 +1352,7 @@ export async function watchTickets({
     }
     signal?.throwIfAborted();
     verifyScope();
+    await revalidateFeedback(entry);
     entry[key].attempted = true;
     save();
     await client.comment(entry.id, text);
@@ -1330,7 +1412,10 @@ export async function watchTickets({
     save();
     const resolveItem = plan.resolveOnCompletion && (result.outcome === "draft-pr" || Boolean(result.confirmedCause) ||
       Boolean(result.completedStory && reviewedCurrent.workItemType !== "Bug"));
-    let text = ticketFeedback(readableFeedback(entry) ? null : marker, result, resolveItem, entry.feedbackFormat === "table");
+    let text = ticketFeedback(readableFeedback(entry) ? null : marker, result, resolveItem, tableFeedback(entry));
+    if (!delivered && entry.feedbackFormat === "trace-image" && result.traceEvidence) {
+      text += await traceImageFeedback(entry, result.traceEvidence);
+    }
     if (result.authenticationRequired) {
       text += `\n\n## Sign-in required\n- ${result.authenticationRequired.reason}\n- This investigation is paused; the watcher can continue other tickets.\n- When the watcher is idle, stop it in its existing terminal, run az login with the approved account and complete sign-in/MFA. Do not paste credentials into Discussion.\n- Restart the same reviewed watcher command with --resume-ticket ${entry.id} and its normal --yes --allow-all-tools confirmations. This resumes the existing job; it does not grant missing database roles.`;
     }
@@ -1413,6 +1498,7 @@ export async function watchTickets({
       if (history.length > 20) { throw new Error("This job reached its feedback-resumption limit; review it before continuing."); }
       entry.feedbackHistory = history;
       delete entry.feedback;
+      delete entry.traceImage;
       delete entry.resolutionFeedback;
       request += "\nContinue this same paused investigation in its existing owned runtime session. The user reports completing sign-in; verify it with the smallest approved read. Inspect and preserve the existing worktree, branch, PR and recorded work rather than creating duplicate work. Do not assume authentication fixed a missing database role or that earlier blocked checks passed.";
     }
@@ -1588,7 +1674,7 @@ export async function watchTickets({
           const request = ticketRequest(item, plan, feedbackFingerprints(state.entries, id));
           const entry = { id, title: recordedText(item.title, 200), ...revision, status: "snapshot-pending",
             runtime: plan.runtime, configuration: approvedConfiguration,
-            ...(typeof client.commentIds === "function" ? { feedbackFormat: "table" } : {}),
+            ...(typeof client.commentIds === "function" ? { feedbackFormat: "trace-image" } : {}),
             startedAt: new Date().toISOString(),
             details: { summary: "", activity: [], checks: [], omittedActivity: 0 } };
           state.entries.push(entry);

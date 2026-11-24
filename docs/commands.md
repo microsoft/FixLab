@@ -879,6 +879,18 @@ relative file/line references where available. Trace evidence has a separate
 **Trace snapshot (observed)** table showing the request/downstream/log chain and
 its limits. Reported incident explanations are attributed; status codes alone
 do not establish request counts, exceeded limits or an oversized URL.
+New attempts also embed **Rendered trace results**, a PNG grid rendered locally
+from the already-returned approved rows. It shows UTC timestamps/window,
+telemetry table/type, success/status/severity, row count and truncation/omissions;
+private IDs, exception names, URLs, endpoints, payloads and log messages are
+excluded. It is observed evidence, not an Azure Portal screenshot, root-cause
+proof or application validation. Rendering needs no browser, sign-in or network
+access and never triggers another trace query. Only uploading to the reviewed
+ADO project uses the existing ADO authentication. Render/upload failure produces
+explicit **image unavailable** feedback with the text findings intact. An
+uncertain upload is not automatically repeated; an unlinked attachment may need
+provider-side review. Restart reuses confirmed uploads and preserves attempted
+comment receipts; older pending feedback is not retrofitted with an image.
 Tables do not require screenshots. Screenshot evidence must come from actual
 approved validation; missing screenshots or inaccessible incident notes are never
 invented. Detailed findings, completed/proposed work and evidence remain
