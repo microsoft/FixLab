@@ -116,6 +116,7 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     mkdirSync(join(repository, ".github", "fixlab"), { recursive: true });
     writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
       environments: ["dev"],
+      validation: { commands: { backendRestore: "node restore-fixture.cjs" } },
       pullRequests: { defaultTargetBranch: "develop", requireConfirmation: true },
       ticketAutomation: { tag: "FixLab", areaPaths: ["Example\\Application"] }
     }));
@@ -127,6 +128,11 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     assert.match(plan.stdout, /"targetBranch": "develop"/);
     assert.match(plan.stdout, /each assigned checkout's own command-evidence folder/u);
     assert.match(plan.stdout, /No work-item state changes/);
+    const preparation = JSON.parse(plan.stdout.slice(0, plan.stdout.lastIndexOf("}") + 1)).dependencyPreparation;
+    assert.deepEqual(preparation.commands, { backendRestore: "node restore-fixture.cjs" });
+    assert.match(preparation.scope, /Before a fresh owned snapshot enters read-only review/u);
+    assert.match(preparation.scope, /No application\/browser startup or sign-in/u);
+    assert.equal(existsSync(join(repository, "obj")), false);
     const copilotArgs = ["watch", repository, "--runtime", "copilot", "--model", "gpt-5.3-codex", "--environment", "dev"];
     const copilot = run(copilotArgs, repository);
     assert.equal(copilot.status, 0, copilot.stderr);

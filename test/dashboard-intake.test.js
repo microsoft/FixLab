@@ -325,6 +325,43 @@ test("owned ticket phases review setup in the assigned snapshot without requesti
   });
 });
 
+test("watcher dependency preparation precedes read-only review and is not repeated on resume", async () => {
+  for (const ready of [true, false]) {
+    const calls = [];
+    const events = [];
+    const workspace = { baseCommit: "b".repeat(40) };
+    const options = {
+      workspace, prompt: "Synthetic approved watcher request.",
+      prepareWorkspace: async assigned => {
+        assert.equal(assigned, workspace);
+        calls.push("prepare");
+        return { ready, message: ready ? "Configured restores completed." : "Backend restore failed; feed sign-in is required." };
+      },
+      onActivity: event => events.push(event),
+      execute: async native => {
+        calls.push(native.mode === "validate-only" ? "review" : "fix");
+        assert.equal(native.mode, calls.length === 2 ? "validate-only" : "fix-and-validate");
+        assert.match(native.prompt, ready ? /Configured restores completed/u : /Backend restore failed/u);
+        assert.match(native.prompt, /Read-only review must not provision dependencies/u);
+        return { outcome: "analysis", summary: "Source reviewed; only executed checks count.",
+          versionComparison: { latestCommit: workspace.baseCommit, finding: ready ? "needs-fix" : "unknown", evidence: "Pinned source inspection." } };
+      }
+    };
+    await executeVersionedTicketAgent(options);
+    assert.deepEqual(calls, ready ? ["prepare", "review", "fix"] : ["prepare", "review"]);
+    assert.equal(events.at(-1).status, ready ? "passed" : "blocked");
+    assert.ok(events.every(event => Number.isFinite(Date.parse(event.timestamp))));
+    await executeVersionedTicketAgent({ ...options, resume: true,
+      prepareWorkspace() { assert.fail("Authentication resume must not repeat dependency preparation."); },
+      execute: async native => {
+        assert.equal(native.resume, true);
+        return { outcome: "analysis", summary: "Continuing the existing review.",
+          versionComparison: { latestCommit: workspace.baseCommit, finding: "unknown", evidence: "Existing source evidence retained." } };
+      }
+    });
+  }
+});
+
 test("a fetched snapshot cannot substitute a different incident helper for the reviewed revision", async () => {
   const f = snapshotFixture();
   let executions = 0;

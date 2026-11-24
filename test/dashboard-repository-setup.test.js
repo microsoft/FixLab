@@ -3,10 +3,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { assignedJobWorktree, needsJobWorktree, prepareJobWorktree, restoreJobWorktree } from "../dashboard/job-worktree.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
+import { executeVersionedTicketAgent } from "../dashboard/ticket-automation.js";
 import { applyWorktreeSetup, browserConfigurationErrors, planWorktreeSetup, SETUP_PROFILE_PATH } from "../dashboard/repository-setup.js";
 
 function fixture() {
@@ -150,10 +152,27 @@ test("owned checkout onboarding runs declared setup and reports a failed restore
     assert.equal((await restoreJobWorktree({ workspace: recovered, packageRoot, runtime: "copilot",
       onOutput: text => output.push(text) })).ready, true);
     assert.match(output.join(""), /retaining.*verified.*configuration/);
+    writeFileSync(cli, `
+      if (process.argv[2] !== 'prepare' || !process.argv.includes('--yes') ||
+          process.argv.includes('--from') || process.argv.includes('--authenticate') ||
+          process.argv.includes('--start-dashboard')) process.exit(8);
+      const fs = require('node:fs');
+      fs.mkdirSync('obj', { recursive: true });
+      fs.writeFileSync(require('node:path').join('obj', 'project.assets.json'), 'restored');
+    `);
+    const dependencies = await restoreJobWorktree({ workspace, packageRoot, runtime: "copilot", dependenciesOnly: true });
+    assert.equal(dependencies.ready, true);
+    assert.equal(readFileSync(join(workspace.repository, "obj", "project.assets.json"), "utf8"), "restored");
     writeFileSync(cli, "process.exit(7);");
     const failed = await restoreJobWorktree({ workspace, packageRoot, runtime: "copilot" });
     assert.equal(failed.ready, false);
     assert.match(failed.message, /exited 7.*no check is claimed passed/);
+    writeFileSync(cli, "setInterval(() => {}, 1000);");
+    const timedOut = await restoreJobWorktree({
+      workspace, packageRoot, dependenciesOnly: true, timeoutMs: 1000
+    });
+    assert.equal(timedOut.ready, false);
+    assert.match(timedOut.message, /timed out.*no check is claimed passed/u);
     const cancellation = new AbortController();
     cancellation.abort();
     await assert.rejects(restoreJobWorktree({ workspace, packageRoot, runtime: "copilot",
@@ -165,6 +184,61 @@ test("owned checkout onboarding runs declared setup and reports a failed restore
     }), { name: "AbortError" });
     createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
       .acquire(workspace.jobId).release();
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("watcher preparation runs real profile restores before review without copying assets from the source", async () => {
+  const f = fixture();
+  try {
+    f.profile.applications = { backend: { workingDirectory: "." } };
+    f.profile.validation = { commands: { backendRestore:
+      `node -e "const f=require('node:fs'); f.mkdirSync('obj',{recursive:true}); f.writeFileSync(require('node:path').join('obj','project.assets.json'),'restored');"`
+    } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+    await assert.rejects(restoreJobWorktree({
+      workspace, packageRoot, dependenciesOnly: true, approvedProfile: { ...f.profile, changed: true }
+    }), /changed since watcher approval/u);
+    await executeVersionedTicketAgent({
+      workspace, prompt: "Review synthetic source after its declared restore.",
+      prepareWorkspace: assigned => restoreJobWorktree({ workspace: assigned, packageRoot, dependenciesOnly: true }),
+      execute: async options => {
+        assert.equal(options.mode, "validate-only");
+        assert.equal(readFileSync(join(workspace.repository, "obj", "project.assets.json"), "utf8"), "restored");
+        assert.equal(existsSync(join(f.source, "obj")), false);
+        assert.match(options.prompt, /configured dependency restores completed/u);
+        return { outcome: "analysis", summary: "Existing source inspected.",
+          versionComparison: { latestCommit: workspace.baseCommit, finding: "unknown", evidence: "Synthetic source only." } };
+      }
+    });
+    writeFileSync(join(workspace.repository, SETUP_PROFILE_PATH), `${JSON.stringify(f.profile)} `);
+    await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }), /reviewed profile revision/u);
+    f.profile.applications.backend.workingDirectory = "..";
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const escaped = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    await assert.rejects(restoreJobWorktree({ workspace: escaped, packageRoot, dependenciesOnly: true }), /without traversal/u);
+    f.profile.applications.backend.workingDirectory = ".";
+    f.profile.validation.commands.backendRestore =
+      `node -e "console.error('NU1301 token=synthetic-secret https://example.invalid/feed'); process.exit(7);"`;
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const failed = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    const prerequisite = await restoreJobWorktree({ workspace: failed, packageRoot, dependenciesOnly: true });
+    assert.equal(prerequisite.ready, false);
+    assert.match(prerequisite.message, /backend restore failed.*NU1301/u);
+    assert.doesNotMatch(prerequisite.message, /synthetic-secret|example\.invalid/u);
+    f.profile.validation.commands.backendRestore =
+      `node -e "require('node:fs').writeFileSync('tracked.txt','changed by restore');"`;
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const changed = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    await assert.rejects(executeVersionedTicketAgent({
+      workspace: changed, prompt: "Do not review modified source.",
+      prepareWorkspace: assigned => restoreJobWorktree({ workspace: assigned, packageRoot, dependenciesOnly: true }),
+      execute() { assert.fail("Restore-modified source must not enter read-only version review."); }
+    }), /changed tracked snapshot files/u);
+    assert.equal(readFileSync(join(changed.repository, "tracked.txt"), "utf8"), "changed by restore");
+    createExecutorLease(changed.repository, "verified-setup-successor", { worktree: true })
+      .acquire(changed.jobId).release();
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 

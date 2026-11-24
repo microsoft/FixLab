@@ -623,7 +623,8 @@ function mergeTraceEvidence(previous, value) {
 
 export async function executeVersionedTicketAgent({
   workspace, phase = "version-review", versionComparison, onPhase = () => {},
-  traceEvidence, onTraceEvidence = () => {}, onComparison = () => {}, execute = executeTicketAgent, ...options
+  traceEvidence, onTraceEvidence = () => {}, onComparison = () => {}, prepareWorkspace,
+  execute = executeTicketAgent, ...options
 }) {
   if (!workspace) { return execute(options); }
   if (!commitPattern.test(workspace.baseCommit) || !["version-review", "fix"].includes(phase)) {
@@ -633,11 +634,29 @@ export async function executeVersionedTicketAgent({
     throw new Error("Resuming the fix phase requires its existing owned runtime session.");
   }
   const sessionId = options.sessionId ?? randomUUID();
+  let preparationContext = "";
+  if (prepareWorkspace && phase === "version-review" && !options.resume) {
+    options.signal?.throwIfAborted();
+    const name = "owned snapshot dependency preparation";
+    options.onActivity?.({ timestamp: new Date().toISOString(), kind: "check", name, status: "running",
+      message: "Running only the reviewed restore commands before read-only review." });
+    const preparation = await prepareWorkspace(workspace);
+    if (typeof preparation?.ready !== "boolean" || typeof preparation.message !== "string" ||
+        !preparation.message.trim() || !safeTicketText(preparation.message, 1000)) {
+      throw new Error("Snapshot dependency preparation did not return a valid bounded outcome.");
+    }
+    preparationContext = `\nHost dependency preparation: ${recordedText(preparation.message, 1000)}
+${preparation.ready ? "Run the focused existing checks and report their actual outcomes."
+    : "Dependency preparation is blocked; do not retry unchanged restore commands or count dependent checks as passed. Continue independent source and approved evidence analysis."}
+Preparation is not test execution and grants no production application testing or business-data writes.`;
+    options.onActivity?.({ timestamp: new Date().toISOString(), kind: "check", name, status: preparation.ready ? "passed" : "blocked",
+      message: recordedText(preparation.message, 1000) });
+  }
   let retainedTrace = traceEvidence === undefined ? undefined : normalizeTraceEvidence(traceEvidence);
   if (retainedTrace) { onTraceEvidence(retainedTrace); }
   const run = async (prompt, mode, resume) => {
     const result = ticketOutcome(await execute({
-      ...options, prompt: `${prompt}
+      ...options, prompt: `${prompt}${preparationContext}
 
 This watcher-owned snapshot's reviewed profile and declared non-sensitive setup files are already prepared. Do not repeat onboarding with --from or access the source checkout to prepare this job. Stay in the assigned snapshot; review remaining setup locally with \`fixlab onboard . --runtime <selected-runtime>\` (substitute the current runtime). Read-only review must not provision dependencies or change configuration. In the fix phase, apply local setup only under the existing scoped setup approval. Never copy credentials, browser state or runtime grants. Missing dependencies, authentication or denied access blocks only dependent checks; continue independent source analysis and report the exact prerequisite. Never grant yourself folder access or retry unchanged denied commands.`, mode, sessionId, resume,
       onSession(id) {
