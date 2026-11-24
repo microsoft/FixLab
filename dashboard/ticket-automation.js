@@ -9,7 +9,7 @@ import { stripVTControlCharacters } from "node:util";
 import { configuredPostSafety } from "./dev-post.js";
 import { createExecutorLease } from "./executor-lease.js";
 import { configuredValidationEnvironments, validateTargetEnvironment } from "./validation-environments.js";
-import { sanitizeCommandOutput } from "../bin/structured-command.js";
+import { resolveEvidenceRoot, sanitizeCommandOutput } from "../bin/structured-command.js";
 import { configuredReviewTeams, PR_TEAM_REVIEW_GUIDANCE } from "./workflow-policy.js";
 import { apiSessionHelper } from "./api-authentication.js";
 import { setupPath } from "./repository-setup.js";
@@ -412,6 +412,10 @@ export async function executeTicketAgent({
       typeof resume !== "boolean") {
     throw new Error("Ticket execution requires a valid owned runtime session.");
   }
+  const evidenceRoot = resolveEvidenceRoot(repository);
+  const gitDirectory = realpathSync.native(resolve(evidenceRoot, "..", ".."));
+  const artifactDirectory = setupPath(gitDirectory, join("fixlab", "command-evidence"));
+  mkdirSync(artifactDirectory, { recursive: true, mode: 0o700 });
   const buffers = { stdout: "", stderr: "" };
   let privateKey = false;
   const lease = createExecutorLease(repository, randomUUID()).acquire(sessionId);
@@ -496,6 +500,7 @@ export async function executeTicketAgent({
   try {
     handle = executor({
       repository, prompt, sessionId, resume, runtimeDirectories,
+      artifactDirectories: [artifactDirectory],
       toolApprovalMode: "allow-all", mode,
       testMutationMode: "none", selectedTestMutationMode: "none",
       onOutput(stream, text) {

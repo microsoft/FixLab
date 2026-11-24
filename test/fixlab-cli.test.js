@@ -125,6 +125,7 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     assert.match(plan.stdout, /"requiresConfirmation": true/);
     assert.match(plan.stdout, /"assignee": "@Me"/);
     assert.match(plan.stdout, /"targetBranch": "develop"/);
+    assert.match(plan.stdout, /each assigned checkout's own command-evidence folder/u);
     assert.match(plan.stdout, /No work-item state changes/);
     const copilotArgs = ["watch", repository, "--runtime", "copilot", "--model", "gpt-5.3-codex", "--environment", "dev"];
     const copilot = run(copilotArgs, repository);

@@ -2152,6 +2152,49 @@ test("an interrupted investigation blocks every launch even after edits, reorder
   }
 });
 
+test("ticket executors receive only their own worktree command-evidence folder", async () => {
+  const f = snapshotFixture();
+  try {
+    const workspace = f.prepare({ repository: f.repository, plan: f.plan, snapshot: { jobId: randomUUID() } });
+    const gitDirectory = f.git(workspace.repository, "rev-parse", "--absolute-git-dir");
+    const evidence = join(gitDirectory, "fixlab", "command-evidence");
+    const result = await executeTicketAgent({
+      repository: workspace.repository, prompt: "Synthetic approved investigation.",
+      runtimeDirectories: ["reviewed-helper"], onOutput() {},
+      executor(options) {
+        assert.deepEqual(options.artifactDirectories, [evidence]);
+        assert.deepEqual(options.runtimeDirectories, ["reviewed-helper"]);
+        assert.ok(fs.lstatSync(evidence).isDirectory());
+        options.onOutput("stdout", 'FIXLAB_TICKET_RESULT|{"outcome":"analysis","summary":"Owned evidence is readable."}\n');
+        return { completion: Promise.resolve({ code: 0 }), hasStopped: () => true, terminate() {} };
+      }
+    });
+    assert.equal(result.outcome, "analysis");
+    assert.equal(existsSync(join(f.repository, ".git", "fixlab", "command-evidence")), false);
+  } finally { f.cleanup(); }
+});
+
+test("ticket evidence grants reject linked artifact roots before launching an executor", async () => {
+  const f = snapshotFixture();
+  try {
+    const workspace = f.prepare({ repository: f.repository, plan: f.plan, snapshot: { jobId: randomUUID() } });
+    const gitDirectory = f.git(workspace.repository, "rev-parse", "--absolute-git-dir");
+    const external = join(f.repository, "external-evidence");
+    mkdirSync(external);
+    for (const link of [join(gitDirectory, "fixlab"), join(gitDirectory, "fixlab", "command-evidence")]) {
+      mkdirSync(dirname(link), { recursive: true });
+      symlinkSync(external, link, "junction");
+      try {
+        await assert.rejects(executeTicketAgent({
+          repository: workspace.repository, prompt: "Never follow linked evidence.",
+          executor() { assert.fail("A linked artifact folder must not receive a runtime grant."); }
+        }), /symbolic links/u);
+      } finally { fs.unlinkSync(link); }
+    }
+    assert.deepEqual(fs.readdirSync(external), []);
+  } finally { f.cleanup(); }
+});
+
 test("ticket executor requires a successful exit and one bounded structured outcome", async () => {
   const fixture = ticketFixture();
   try {

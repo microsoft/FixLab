@@ -2302,7 +2302,7 @@ async function main(args) {
         ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
         : "No work-item state changes.",
       requiresConfirmation: true,
-      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. ${plan.allowProductionEvidence ? "Only the displayed ticket/correlation-bound production diagnostic readers are approved; no production application testing, business-data writes, merges or deployments." : "No business-data writes, production, merges or deployments."}`
+      permissions: `One explicitly started watcher session: tool commands and access to the installed FixLab helper and each assigned checkout's own command-evidence folder for its tagged-ticket jobs; draft PRs and feedback on those tickets${plan.resolveOnCompletion ? ", plus the displayed Resolved handoff rule" : ""} only. ${plan.allowProductionEvidence ? "Only the displayed ticket/correlation-bound production diagnostic readers are approved; no production application testing, business-data writes, merges or deployments." : "No business-data writes, production, merges or deployments."}`
     }, null, 2));
     if (!flags.has("--yes")) {
       console.log("Plan only. Review this scope, then add --yes --allow-all-tools to start. Installing or onboarding alone never starts a watcher.");

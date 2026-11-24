@@ -44,6 +44,11 @@ Read-only review never provisions dependencies or changes configuration; any
 fix-phase setup still requires its existing scoped approval. Missing prerequisites
 block dependent checks, not independent source analysis. No extra folder grants,
 credentials or browser state transfer to the runtime.
+The reviewed watcher scope includes the assigned checkout's own command-evidence
+folder, which lives under its per-worktree Git metadata for linked checkouts.
+Only that artifact folder is passed to the runtime, not the Git directory,
+source clone or sibling worktrees. Linked artifact paths are rejected before
+executor launch.
 
 The CLI runs a read-only version-review phase before fix/PR authority takes
 effect. A bounded, agent-reported comparison binds latest-code findings to the
