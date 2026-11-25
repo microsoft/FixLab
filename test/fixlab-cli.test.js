@@ -1766,7 +1766,7 @@ test("chat validates a repository before starting a missing dashboard", () => {
   assert.match(result.stderr, /repository does not exist/);
 });
 
-test("run launches the Agency-resolved FixLab agent with real DEV reads from new onboarding defaults", () => {
+test("run passes the stable Copilot FixLab agent through Agency with real DEV reads from new onboarding defaults", () => {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-"));
   const executableDirectory = join(repository, "bin");
 
@@ -1817,7 +1817,7 @@ test("run launches the Agency-resolved FixLab agent with real DEV reads from new
     assert.equal(result.status, 0);
     assert.match(
       result.stdout,
-      /ARGS:copilot --plugin-dir [^\r\n]+ --agent fixlab:fixlab/
+      /ARGS:copilot --session-id [a-f0-9-]{36} -- --plugin-dir [^\r\n]+ --agent fixlab:fixlab/
     );
     assert.doesNotMatch(result.stdout, /--interactive/);
     assert.match(result.stdout, /Use development as the user-selected validation environment/);
