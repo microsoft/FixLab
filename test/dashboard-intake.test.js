@@ -308,6 +308,8 @@ test("owned ticket phases review setup in the assigned snapshot without requesti
         assert.doesNotMatch(options.prompt, /fixlab onboard \. --runtime/u);
         assert.match(options.prompt, /Read the prepared profile and recorded host setup/u);
         assert.match(options.prompt, /Read-only review must not provision dependencies or change configuration/u);
+        assert.match(options.prompt, /pass the assigned repository root to fixlab exec and select the component with --cwd/u);
+        assert.doesNotMatch(options.prompt, /--working-directory/u);
         assert.deepEqual(options.runtimeDirectories, ["reviewed-helper"]);
         return options.mode === "validate-only"
           ? { outcome: "analysis", summary: "The pinned code needs a focused fix.",

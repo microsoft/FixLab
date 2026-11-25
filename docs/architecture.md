@@ -88,6 +88,9 @@ business-data access and normal publication gates remain unchanged.
 The fix handoff explicitly ends only the completed review phase's source/PR
 prohibitions; it does not widen runtime permissions. Agency resumes retain its
 own `--session-id` as well as the underlying Copilot `--resume` identity.
+Copilot's plugin and agent arguments follow Agency's `--` passthrough boundary,
+so Agency cannot replace the stable `fixlab:fixlab` agent with a temporary
+rendered agent name that fails to reload on resume. Prompts stay on stdin.
 Already-prepared snapshots do not repeat onboarding or scaffolding to review
 setup. Structured validation fingerprints the whole Git repository even when
 invoked from a component directory; command working-directory selection remains

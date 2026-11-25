@@ -740,7 +740,7 @@ test("repository profile template offers configurable test and UAT environments"
   assert.equal(profile.environments.includes("production"), false);
 });
 
-test("Agency executor keeps long prompts out of process arguments", () => {
+test("Agency executor passes the stable Copilot agent through and keeps long prompts out of arguments", () => {
   const prompt = `Fix this batch:\n${"x".repeat(40000)}`;
   const invocation = buildAgencyInvocation({
     packageRoot: "C:\\FixLab",
@@ -764,16 +764,16 @@ test("Agency executor keeps long prompts out of process arguments", () => {
   assert.equal(invocation.input, prompt);
   assert.equal(invocation.args.includes(prompt), false);
   assert.equal(invocation.args.includes("--interactive"), false);
-  assert.deepEqual(invocation.args.slice(0, 5), [
+  assert.deepEqual(invocation.args.slice(0, 9), [
     "copilot",
+    "--session-id",
+    "11111111-1111-4111-8111-111111111111",
+    "--",
     "--plugin-dir",
     "C:\\FixLab",
     "--agent",
-    "fixlab:fixlab"
-  ]);
-  assert.deepEqual(invocation.args.slice(-2), [
-    "--session-id",
-    "11111111-1111-4111-8111-111111111111"
+    "fixlab:fixlab",
+    "--no-ask-user"
   ]);
 
   const resumed = buildAgencyInvocation({
@@ -782,11 +782,10 @@ test("Agency executor keeps long prompts out of process arguments", () => {
     sessionId: "11111111-1111-4111-8111-111111111111",
     resume: true
   });
-  assert.deepEqual(resumed.args.slice(-3), [
-    "--session-id",
-    "11111111-1111-4111-8111-111111111111",
-    "--resume=11111111-1111-4111-8111-111111111111"
-  ]);
+  assert.deepEqual(resumed.args.slice(0, 9), invocation.args.slice(0, 9));
+  assert.equal(resumed.input, prompt);
+  assert.equal(resumed.args.includes(prompt), false);
+  assert.ok(resumed.args.indexOf("--agent") > resumed.args.indexOf("--"));
   assert.equal(
     resumed.args.at(-1),
     "--resume=11111111-1111-4111-8111-111111111111"

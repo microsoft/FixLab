@@ -2039,6 +2039,9 @@ export function buildAgencyInvocation({
   return {
     args: [
       "copilot",
+      "--session-id",
+      sessionId,
+      "--",
       "--plugin-dir",
       packageRoot,
       "--agent",
@@ -2048,8 +2051,6 @@ export function buildAgencyInvocation({
       "--no-ask-user",
       "--stream",
       "on",
-      "--session-id",
-      sessionId,
       ...(resume ? [`--resume=${sessionId}`] : [])
     ],
     input: prompt
