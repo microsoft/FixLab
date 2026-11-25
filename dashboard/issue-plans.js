@@ -10,9 +10,14 @@ import { setupPath } from "./repository-setup.js";
 import { configuredValidationEnvironments, validateTargetEnvironment } from "./validation-environments.js";
 import { spawnWindowsExecutor } from "./windows-executor.js";
 import { safeRuntimeText } from "./runtime-requests.js";
+import { claimErrorPreviewApproval, errorPreviewTimestampKey, readErrorPreviewApproval, sanitizeErrorPreview, validateErrorPreviewApproval } from "./error-preview.js";
 
 const hash = value => createHash("sha256").update(value).digest("hex");
-const compilerRevision = hash(readFileSync(fileURLToPath(import.meta.url)));
+const currentCompilerRevision = () => hash(Buffer.concat([
+  readFileSync(fileURLToPath(import.meta.url)),
+  readFileSync(fileURLToPath(new URL("./error-preview.js", import.meta.url)))
+]));
+const compilerRevision = currentCompilerRevision();
 const guid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu;
 const secret = /(?:bearer\s+\S+|(?:password|client_secret|api[_-]?key|accountkey)\s*[:=]\s*\S+)/iu;
 const metadata = {
@@ -369,6 +374,13 @@ export function compileIssuePlan(repository, profile, plan, options = {}) {
     requireValue(Object.hasOwn(metadata, plan.table), "Unsupported trace table.");
     const limit = integer(plan.limit, 1, policy.maxRows);
     const filter = compileFilter(plan.filter, { nodes: 0 });
+    if (options.errorPreviewApproval) {
+      const errorPreview = validateErrorPreviewApproval(options.errorPreviewApproval, plan, profile);
+      return { kind: "trace", table: plan.table, workItemId: plan.workItemId, planHash, policy, limit,
+        columns: ["timestamp", "severityLevel", "logMessage"], errorPreview,
+        query: `${plan.table}\n| where timestamp between (datetime(${new Date(start).toISOString()}) .. datetime(${new Date(end).toISOString()}))\n| where ${filter}\n| where timestamp == datetime(${errorPreview.timestamp}) and severityLevel >= 3\n| project timestamp, severityLevel, logMessage = message\n| take 2`,
+        timespan: `${new Date(start).toISOString()}/${new Date(end).toISOString()}` };
+    }
     const diagnostic = ["requests", "dependencies"].includes(plan.table)
       ? policy.diagnostics?.endpoints.length ? ["endpoint", "name"] : null
       : policy.diagnostics?.messages.length ? ["logMessage", plan.table === "traces" ? "message" : "outerMessage"] : null;
@@ -538,7 +550,7 @@ function traceRetryDelay(response) {
 export function verifyTracePlanApproval(repository, approvedProfile, plan, settings, compiled) {
   const currentProfile = jsonFile(repository, ".github/fixlab/repository-profile.json");
   requireValue(hash(JSON.stringify(currentProfile)) === hash(JSON.stringify(approvedProfile)) &&
-    hash(readFileSync(fileURLToPath(import.meta.url))) === compilerRevision,
+    currentCompilerRevision() === compilerRevision,
   "Trace-reader profile or compiler approval changed; review the current scope.");
   const current = compileIssuePlan(repository, currentProfile, plan, settings);
   requireValue(current.planHash === compiled.planHash && current.policy.policyRevision === compiled.policy.policyRevision &&
@@ -550,6 +562,8 @@ export async function executeTracePlan(compiled, {
   tokenProvider = azureToken, request = globalThis.fetch, wait = delay, verifyApproval
 } = {}) {
   compiled = structuredClone(compiled);
+  requireValue(!compiled.errorPreview || typeof verifyApproval === "function",
+    "Error-message preview requires live approval revalidation.");
   const verify = attempts => {
     try { verifyApproval?.(); } catch { throw traceReadFailure("approval-changed", attempts); }
   };
@@ -560,7 +574,8 @@ export async function executeTracePlan(compiled, {
   let response;
   let attempts = 0;
   let recoveryReason;
-  for (attempts = 1; attempts <= 2; attempts += 1) {
+  const maximumAttempts = compiled.errorPreview ? 1 : 2;
+  for (attempts = 1; attempts <= maximumAttempts; attempts += 1) {
     verify(attempts - 1);
     const signal = AbortSignal.timeout(20000);
     try {
@@ -571,7 +586,7 @@ export async function executeTracePlan(compiled, {
       });
     } catch (error) {
       const failure = traceTransportFailure(error, signal);
-      if (!failure.retry || attempts === 2) { throw traceReadFailure(failure.reason, attempts); }
+      if (!failure.retry || attempts === maximumAttempts) { throw traceReadFailure(failure.reason, attempts); }
       recoveryReason = failure.reason;
       await wait(250);
       continue;
@@ -585,7 +600,7 @@ export async function executeTracePlan(compiled, {
         [502, 503, 504].includes(status) ? "service" : "http";
     const milliseconds = ["throttled", "service"].includes(reason) ? traceRetryDelay(response) : null;
     try { await response.body?.cancel(); } catch { throw traceReadFailure("cleanup", attempts, status); }
-    if (milliseconds === null || attempts === 2) { throw traceReadFailure(reason, attempts, status); }
+    if (milliseconds === null || attempts === maximumAttempts) { throw traceReadFailure(reason, attempts, status); }
     recoveryReason = reason;
     await wait(milliseconds);
   }
@@ -605,6 +620,24 @@ export async function executeTracePlan(compiled, {
     Array.isArray(table.columns) && JSON.stringify(table.columns.map(column => column.name)) === JSON.stringify(compiled.columns) &&
     Array.isArray(table.rows) && table.rows.length <= compiled.limit + 1,
   "Trace response was partial, oversized or changed schema; no rows accepted.");
+  if (compiled.errorPreview) {
+    verify(attempts);
+    requireValue(Date.parse(compiled.errorPreview.expiresAt) > Date.now() && table.rows.length <= 1,
+      "Error-message preview expired or matched multiple records; no messages accepted.");
+    const previews = table.rows.map(row => {
+      requireValue(Array.isArray(row) && row.length === 3 &&
+        !traceMetadataReason("timestamp", row[0]) &&
+        errorPreviewTimestampKey(row[0]) === errorPreviewTimestampKey(compiled.errorPreview.timestamp) &&
+        Number.isInteger(row[1]) && row[1] >= 3 && row[1] <= 4,
+      "Error-message preview returned an unapproved record; no messages accepted.");
+      return sanitizeErrorPreview(row[2]);
+    });
+    return { status: "passed", columns: ["timestamp", "error"],
+      rows: previews.flatMap(preview => preview.message ? [[compiled.errorPreview.timestamp, preview.message]] : []),
+      errorPreview: { omittedMessages: previews.filter(preview => !preview.message).length,
+        omissionReasons: [...new Set(previews.filter(preview => !preview.message).map(preview => preview.reason))],
+        redacted: previews.some(preview => preview.redacted), truncated: previews.some(preview => preview.truncated) } };
+  }
   const rows = [];
   let omittedDiagnostics = 0;
   for (const row of table.rows) {
@@ -777,7 +810,7 @@ export async function runIssuePlanCommand(args) {
   const options = {};
   for (let index = 0; index < args.length; index += 1) {
     const key = args[index];
-    requireValue(["--plan", "--environment", "--execute", "--allow-production-evidence", "--allow-dev-writes"].includes(key) && !Object.hasOwn(options, key), "Unsupported or repeated issue-plan option.");
+    requireValue(["--plan", "--environment", "--execute", "--allow-production-evidence", "--allow-dev-writes", "--error-preview-approval"].includes(key) && !Object.hasOwn(options, key), "Unsupported or repeated issue-plan option.");
     options[key] = ["--execute", "--allow-production-evidence", "--allow-dev-writes"].includes(key) ? true : args[++index];
     requireValue(options[key] !== undefined, "Missing issue-plan option value.");
   }
@@ -785,8 +818,11 @@ export async function runIssuePlanCommand(args) {
   const profile = jsonFile(repository, ".github/fixlab/repository-profile.json");
   const settings = { environment: options["--environment"], allowProductionEvidence: options["--allow-production-evidence"] === true,
     allowDevWrites: options["--allow-dev-writes"] === true };
+  const previewApproval = options["--error-preview-approval"]
+    ? readErrorPreviewApproval(options["--error-preview-approval"]) : null;
+  if (previewApproval) { settings.errorPreviewApproval = previewApproval.value; }
   if (!options["--plan"]) {
-    requireValue(!options["--execute"], "Execution requires an issue plan.");
+    requireValue(!options["--execute"] && !previewApproval, "Execution or error preview requires an issue plan.");
     console.log(JSON.stringify(issuePlanDescription(issuePlanConfiguration(repository, profile, settings.environment, settings.allowProductionEvidence))));
     return 0;
   }
@@ -803,13 +839,25 @@ export async function runIssuePlanCommand(args) {
     plan = parseJson(buffer.subarray(0, size).toString("utf8"));
   } else { plan = jsonFile(repository, options["--plan"]); }
   const compiled = compileIssuePlan(repository, profile, plan, settings);
+  requireValue(!previewApproval || compiled.errorPreview, "Error preview requires a scoped trace plan.");
   if (!options["--execute"]) {
     console.log(JSON.stringify({ status: "compiled", kind: compiled.kind, workItemId: compiled.workItemId,
       planHash: compiled.planHash, ...(compiled.query ? { query: compiled.query } : { source: compiled.source, devWrites: compiled.devWrites }) }));
     return 0;
   }
+  const verifyApproval = () => {
+    if (previewApproval) {
+      requireValue(readErrorPreviewApproval(previewApproval.file).fingerprint === previewApproval.fingerprint,
+        "Error-message preview approval changed.");
+    }
+    verifyTracePlanApproval(repository, profile, plan, settings, compiled);
+  };
+  if (compiled.kind === "trace") {
+    verifyApproval();
+    if (previewApproval) { claimErrorPreviewApproval(previewApproval); }
+  }
   const result = compiled.kind === "trace" ? await executeTracePlan(compiled, {
-    verifyApproval: () => verifyTracePlanApproval(repository, profile, plan, settings, compiled)
+    verifyApproval
   }) : await executeBrowserPlan(repository, compiled);
   console.log(JSON.stringify({ ...result, kind: compiled.kind, workItemId: compiled.workItemId,
     planHash: compiled.planHash, policyRevision: plan.policyRevision, observedAt: new Date().toISOString(),

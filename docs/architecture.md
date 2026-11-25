@@ -176,6 +176,18 @@ width and wrap long cells; FixLab cannot expand ADO's outer Discussion column.
 A visible full-size attachment link and clickable, responsive image provide
 access when an inline preview is hidden or too small. Older pending feedback
 versions retain their original text and image marker for delivery reconciliation.
+An operator-only error-message preview is separate from the literal-only evidence
+contract. It requires `--error-preview-approval` with an absolute, regular local
+JSON file binding the exact plan hash, profile hash, policy revision, work item,
+source and UTC timestamp. Approval expires within 30 minutes and is atomically
+claimed with a sibling `.used` receipt before authentication; an uncertain attempt
+cannot be replayed. Only one operation-ID predicate, one severity-3/4 trace record
+and a 200-character message are permitted. The reader makes no transient retry,
+returns only timestamp/error columns (never normal `traceEvidence`), redacts
+detected URLs, identities and identifiers before truncation, and omits payload-,
+credential- or stack-shaped content. Empty/omitted output is not an error diagnosis.
+This opt-in does not modify the repository profile or authorize unattended use.
+Redaction is conservative and may remove useful context; it is not raw log export.
 Source-guided incident analysis is shared by the dashboard, headless CLI and
 watcher and mirrored in packaged/initialized agent guidance. It follows actual
 client/logging fields and distinguishes excluded projections from missing logs.

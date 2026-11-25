@@ -7,6 +7,88 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { compileIssuePlan, executeBrowserPlan, executeTracePlan, issuePlanConfiguration, issuePlanContext, normalizeTraceEvidence, SOURCE_GUIDED_ANALYSIS, verifyTracePlanApproval } from "../dashboard/issue-plans.js";
 import Reporter from "../bin/issue-plan-reporter.js";
+import { createHash } from "node:crypto";
+import { claimErrorPreviewApproval, readErrorPreviewApproval, sanitizeErrorPreview } from "../dashboard/error-preview.js";
+
+test("single-record error preview requires exact fresh approval and never exports raw diagnostics", async t => {
+  const f = fixture(t);
+  const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const plan = { ...f.trace, limit: 1, filter: { field: "operation_Id", op: "eq", value: "private-operation" } };
+  const approval = { version: 1, workItemId: 42, source: plan.source, planHash: hash(plan),
+    policyRevision: plan.policyRevision, profileHash: hash(f.profile),
+    timestamp: "2026-11-19T10:01:00.000Z", expiresAt: new Date(Date.now() + 600000).toISOString(), maxCharacters: 200 };
+  const options = { ...f.options, errorPreviewApproval: approval };
+  const compiled = compileIssuePlan(f.repository, f.profile, plan, options);
+  assert.deepEqual(compiled.columns, ["timestamp", "severityLevel", "logMessage"]);
+  assert.match(compiled.query, /timestamp == datetime\(2026-11-19T10:01:00.000Z\) and severityLevel >= 3/u);
+  assert.doesNotMatch(compiled.query.split("| project")[1], /operation_Id|Payload|customDimensions/u);
+  for (const change of [{ planHash: "0".repeat(64) }, { workItemId: 43 }, { profileHash: "0".repeat(64) },
+    { timestamp: "2026-11-19T10:16:00.000Z" }, { expiresAt: "2000-01-01T00:00:00.000Z" },
+    { maxCharacters: 201 }]) {
+    assert.throws(() => compileIssuePlan(f.repository, f.profile, plan, {
+      ...options, errorPreviewApproval: { ...approval, ...change }
+    }), /single-record approval/u);
+  }
+  assert.equal(compileIssuePlan(f.repository, f.profile, plan, f.options).errorPreview, undefined);
+  const body = rows => new Response(JSON.stringify({ tables: [{
+    columns: compiled.columns.map(name => ({ name })), rows
+  }] }));
+  const raw = "HTTP 400 Bad Request for user alice@example.test at https://private.invalid/a?secret=value";
+  const request = async () => body([[approval.timestamp, 3, raw]]);
+  await assert.rejects(executeTracePlan(compiled, { tokenProvider: () => "synthetic", request }), /revalidation/u);
+  const transport = { tokenProvider: () => "synthetic", request, verifyApproval: () => {} };
+  const result = await executeTracePlan(compiled, transport);
+  assert.deepEqual(result.columns, ["timestamp", "error"]);
+  assert.equal(result.rows.length, 1);
+  assert.match(result.rows[0][1], /HTTP 400 Bad Request/u);
+  assert.doesNotMatch(JSON.stringify(result), /alice@|private.invalid|secret=value|operation|severityLevel|traceEvidence/u);
+  assert.equal(result.errorPreview.redacted, true);
+  for (const rows of [[[approval.timestamp, 2, "Wrong severity."]],
+    [["2026-11-19T10:02:00Z", 3, "Wrong record."]],
+    [["2026-11-19T10:01:00.0000001Z", 3, "Wrong sub-millisecond record."]],
+    [[approval.timestamp, 3, "First"], [approval.timestamp, 3, "Ambiguous"]]]) {
+    await assert.rejects(executeTracePlan(compiled, { ...transport, request: async () => body(rows) }), /no messages accepted/u);
+  }
+  const preciseApproval = { ...approval, timestamp: "2026-11-19T10:01:00.0001234Z" };
+  const precise = compileIssuePlan(f.repository, f.profile, plan, { ...options, errorPreviewApproval: preciseApproval });
+  assert.ok(precise.query.includes(`datetime(${preciseApproval.timestamp})`));
+  const preciseResult = await executeTracePlan(precise, {
+    ...transport, request: async () => body([[preciseApproval.timestamp, 3, "HTTP 400 Bad Request."]])
+  });
+  assert.deepEqual(preciseResult.rows, [[preciseApproval.timestamp, "HTTP 400 Bad Request."]]);
+  let attempts = 0;
+  await assert.rejects(executeTracePlan(compiled, { ...transport, request: async () => {
+    attempts++;
+    throw Object.assign(new Error("private"), { code: "ECONNRESET" });
+  } }), /after 1 attempt/u);
+  assert.equal(attempts, 1);
+  const path = join(f.repository, "reviewed-preview.json");
+  writeFileSync(path, JSON.stringify(approval));
+  const record = readErrorPreviewApproval(path);
+  const cli = spawnSync(process.execPath, [fileURLToPath(new URL("../bin/fixlab.js", import.meta.url)),
+    "issue-plan", f.repository, "--environment", "dev", "--plan", "-", "--error-preview-approval", path], {
+    input: JSON.stringify(plan), encoding: "utf8", timeout: 30000
+  });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.equal(JSON.parse(cli.stdout).query, compiled.query);
+  claimErrorPreviewApproval(record);
+  assert.throws(() => claimErrorPreviewApproval(record), /EEXIST/u);
+});
+
+test("error preview redacts before truncating and omits payloads, credentials and stack traces", () => {
+  for (const value of ['Error: {"password":"private"}', "Error password=private", "Error\n at Private.Frame()",
+    "<xml>private</xml>", "Bearer private", "Error eyJhbGciOiJIUzI1NiJ9.private.signature"]) {
+    assert.equal(sanitizeErrorPreview(value).message, null);
+  }
+  const result = sanitizeErrorPreview("HTTP 500 failed for 'private-record' 12345678-1234-1234-1234-123456789abc " +
+    "customer abc123 file C:\\private\\secret.txt. " + "retry ".repeat(100));
+  assert.ok(result.message.length <= 200);
+  assert.equal(result.truncated, true);
+  assert.doesNotMatch(result.message, /private-record|12345678|abc123|C:\\private/u);
+  assert.equal(sanitizeErrorPreview("HTTP 400 Bad Request.").message, "HTTP 400 Bad Request.");
+  assert.equal(sanitizeErrorPreview("Can't complete the request.").message, "Can't complete the request.");
+  assert.equal(sanitizeErrorPreview("Error 'unclosed-private-value").message, null);
+});
 
 function fixture(t) {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-issue-plan-"));

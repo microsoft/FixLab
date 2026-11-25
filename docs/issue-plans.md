@@ -132,7 +132,42 @@ resource, production approval, window, row, timeout and response limits remain
 unchanged. A route name that does not match the reviewed template is omitted,
 not guessed from a URL.
 
-Nonempty reads also return `traceEvidence`: source ID, policy revision, UTC
+### Separately approved single-error preview
+
+When a fixed literal cannot describe a specific observed error, an operator may
+separately review one sanitized preview. This is not a wildcard diagnostic policy
+or an unattended watcher grant. The existing profile is unchanged. Use the same
+source and approved UTC window, `table: "traces"`, `limit: 1`, and a single
+`operation_Id` equality predicate grounded in retained evidence.
+
+Supply `--error-preview-approval C:\private\reviewed-error.json` for preview and
+execution. This explicit absolute local path is an exception to repository-relative
+plan files; it must resolve without links to a regular, unlinked file of at most
+8 KiB. Its JSON has exactly these fields: `version: 1`, `workItemId`, `source`,
+`planHash`, `policyRevision`, `profileHash`, `timestamp`, `expiresAt`, and
+`maxCharacters: 200`. The plan/profile hashes are SHA-256 of their respective
+`JSON.stringify` values. Bind the original wire UTC timestamp (up to seven
+fractional digits), not a rounded summary timestamp, and
+an expiry no more than 30 minutes ahead. Review this complete scope before
+creating the approval, never infer it from ticket text.
+
+Compilation additionally selects that exact timestamp and severity at least 3.
+Execution atomically claims a sibling `.used` receipt before authentication.
+Do not delete that receipt or retry an uncertain read: a new attempt requires
+separate review. Approval, profile and compiler are rechecked before dispatch
+and accepting output. A preview makes only one request, with no transient retry;
+multiple matching records fail closed. Only `timestamp` and sanitized `error`
+columns leave the reader, never correlation IDs or normal `traceEvidence`.
+
+The conservative sanitizer removes detected identities, URLs, paths, quoted
+values and identifiers before the 200-character cap. Payload-, credential-,
+stack-shaped, non-ASCII, malformed or oversized messages are omitted, not passed
+through as fallback text. Redaction may remove useful context and is not a
+general-purpose anonymization guarantee. Inspect the sanitized preview before
+sharing it further; `omittedMessages` and `omissionReasons` explain missing text.
+An omitted/empty result is not an error diagnosis or proof that no error occurred.
+
+Nonempty standard reads also return `traceEvidence`: source ID, policy revision, UTC
 start/end, up to ten structured metadata rows with their table, optional
 reviewed endpoint/message, `truncated`, and `omittedDiagnostics`. Empty reads
 return no row evidence. Query overflow remains a failing, partial read even

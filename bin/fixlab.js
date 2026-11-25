@@ -116,7 +116,7 @@ Usage:
   fixlab authenticate [repository] [--yes]
   fixlab linked-api-proof [repository] [--authenticate|--proof] [--yes]
   fixlab portal-api-proof [repository] [--authenticate|--proof] --yes
-  fixlab issue-plan [repository] --environment <name> [--plan <file|->] [--execute] [--allow-production-evidence] [--allow-dev-writes]
+  fixlab issue-plan [repository] --environment <name> [--plan <file|->] [--execute] [--allow-production-evidence] [--allow-dev-writes] [--error-preview-approval <file>]
   fixlab recover-sessions [repository] [--review-token <value> --confirm-quiescent --yes]
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
