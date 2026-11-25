@@ -234,11 +234,15 @@ function feedbackFingerprints(entries, id) {
 }
 
 function readableFeedback(entry) {
-  return ["readable", "table", "trace-image"].includes(entry.feedbackFormat);
+  return ["readable", "table", "trace-image", "trace-image-expanded"].includes(entry.feedbackFormat);
 }
 
 function tableFeedback(entry) {
-  return ["table", "trace-image"].includes(entry.feedbackFormat);
+  return ["table", "trace-image", "trace-image-expanded"].includes(entry.feedbackFormat);
+}
+
+function imageFeedback(entry) {
+  return ["trace-image", "trace-image-expanded"].includes(entry.feedbackFormat);
 }
 
 const imageUnavailable = {
@@ -336,7 +340,7 @@ export function ticketOutcome(value) {
   };
 }
 
-function ticketFeedback(marker, result, resolveItem, tableFormat = false) {
+function ticketFeedback(marker, result, resolveItem, tableFormat = false, timestampedTraces = false) {
   const report = result.report;
   const cause = result.confirmedCause;
   const brief = (text, maximum) => text.length <= maximum
@@ -355,9 +359,9 @@ function ticketFeedback(marker, result, resolveItem, tableFormat = false) {
     return `${marker ? `${marker}\n` : ""}Run ${result.outcome}: ${summary}\nNo fix or successful validation is confirmed.${versionLines.length ? `\n${versionLines.join("\n")}` : ""}`;
   }
   const section = (heading, lines) => `## ${heading}\n${lines.map(line => `- ${line}`).join("\n")}`;
-  const table = (heading, rows) => {
+  const table = (heading, rows, columns = ["Topic", "Findings"]) => {
     const cell = text => text.replaceAll("\\", "\\\\").replaceAll("|", "\\|");
-    return `## ${heading}\n| Topic | Findings |\n| --- | --- |\n` +
+    return `## ${heading}\n| ${columns.join(" | ")} |\n| --- | --- |\n` +
       rows.map(row => `| ${row.map(cell).join(" | ")} |`).join("\n");
   };
   const traces = result.traceEvidence;
@@ -426,6 +430,15 @@ function ticketFeedback(marker, result, resolveItem, tableFormat = false) {
     ] : versionLines)] : []),
     ...(traceRows.length ? [tableFormat ? table("Trace snapshot (observed)", traceRows)
       : section("Trace snapshot (observed)", traceRows.map(([, text]) => text))] : []),
+    ...(timestampedTraces && traces?.rows.length ? [table("Timestamped trace rows (observed)",
+      traces.rows.map((row, index) => [row.timestamp, brief([
+        `Row ${index + 1}: ${row.table}`,
+        ...(/^\d{3}$/u.test(row.resultCode ?? "") ? [`HTTP ${row.resultCode}`] : []),
+        ...(typeof row.success === "boolean" ? [`success: ${row.success}`] : []),
+        ...(Number.isInteger(row.severityLevel) ? [`severity: ${row.severityLevel}`] : []),
+        ...(row.endpoint ? [`API: ${row.endpoint}`] : []),
+        ...(row.logMessage ? [row.logMessage] : [])
+      ].join("; ").replace(/\s+/gu, " "), 360)]), ["UTC timestamp", "Observed trace"])] : []),
     ...(!tableFormat ? [section("Changes and validation", [
       ...(report?.changesMade?.length ? [brief(report.changesMade[0], 200)] : []),
       ...validation.map(line => brief(line, 180))
@@ -821,7 +834,7 @@ function validateJournal(state, scope) {
         (entry.runtime !== undefined && !["agency", "copilot"].includes(entry.runtime)) ||
         (entry.configuration !== undefined && !/^[a-f0-9]{64}$/u.test(entry.configuration)) ||
         (entry.feedbackFormat !== undefined && !readableFeedback(entry)) ||
-        (entry.traceImage !== undefined && (entry.feedbackFormat !== "trace-image" || !validTraceImage(entry.traceImage))) ||
+        (entry.traceImage !== undefined && (!imageFeedback(entry) || !validTraceImage(entry.traceImage))) ||
         [entry.feedback, entry.resolutionFeedback].some(receipt => receipt !== undefined &&
           (!receipt || !/^[a-f0-9]{64}$/u.test(receipt.fingerprint) || typeof receipt.attempted !== "boolean" ||
             !Array.isArray(receipt.previousCommentIds) || receipt.previousCommentIds.length > 1000 ||
@@ -1336,7 +1349,8 @@ export async function watchTickets({
       const id = entry.traceImage.attachmentId;
       const expected = `https://dev.azure.com/${encodeURIComponent(plan.organization)}/${encodeURIComponent(plan.project)}/_apis/wit/attachments/${id}`;
       if (client.traceImageUrl(id) !== expected) { throw new Error("Trace attachment is outside the reviewed project."); }
-      return `\n\nRendered trace results (observed evidence; attachment ${id}). Not a Portal screenshot, root-cause proof or application validation.\n\n![Rendered trace results](${expected})`;
+      const fullSize = entry.feedbackFormat === "trace-image-expanded" ? " - full size" : "";
+      return `\n\nRendered trace results (observed evidence; attachment ${id}). Not a Portal screenshot, root-cause proof or application validation.\n\n![Rendered trace results${fullSize}](${expected})`;
     }
     return `\n\nRendered trace results: image unavailable. ${imageUnavailable[entry.traceImage.reason]} Text findings remain available.`;
   }
@@ -1442,8 +1456,9 @@ export async function watchTickets({
     save();
     const resolveItem = plan.resolveOnCompletion && (result.outcome === "draft-pr" || Boolean(result.confirmedCause) ||
       Boolean(result.completedStory && reviewedCurrent.workItemType !== "Bug"));
-    let text = ticketFeedback(readableFeedback(entry) ? null : marker, result, resolveItem, tableFeedback(entry));
-    if (!delivered && entry.feedbackFormat === "trace-image" && result.traceEvidence) {
+    let text = ticketFeedback(readableFeedback(entry) ? null : marker, result, resolveItem,
+      tableFeedback(entry), entry.feedbackFormat === "trace-image-expanded");
+    if (!delivered && imageFeedback(entry) && result.traceEvidence) {
       text += await traceImageFeedback(entry, result.traceEvidence);
     }
     if (result.authenticationRequired) {
@@ -1704,7 +1719,7 @@ export async function watchTickets({
           const request = ticketRequest(item, plan, feedbackFingerprints(state.entries, id));
           const entry = { id, title: recordedText(item.title, 200), ...revision, status: "snapshot-pending",
             runtime: plan.runtime, configuration: approvedConfiguration,
-            ...(typeof client.commentIds === "function" ? { feedbackFormat: "trace-image" } : {}),
+            ...(typeof client.commentIds === "function" ? { feedbackFormat: "trace-image-expanded" } : {}),
             startedAt: new Date().toISOString(),
             details: { summary: "", activity: [], checks: [], omittedActivity: 0 } };
           state.entries.push(entry);

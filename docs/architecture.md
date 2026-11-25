@@ -169,6 +169,13 @@ the module ships in the existing `dashboard` package directory.
 The image is explicitly **Rendered trace results**, observed evidence, not a
 Portal screenshot, causal proof or application validation. It uses no uploaded
 user screenshot and causes no additional telemetry read.
+New `trace-image-expanded` attempts also include a compact text row for each
+observed UTC timestamp, telemetry type, available status/severity and approved
+diagnostic preview. Correlation IDs remain private. Tables use available comment
+width and wrap long cells; FixLab cannot expand ADO's outer Discussion column.
+A visible full-size attachment link and clickable, responsive image provide
+access when an inline preview is hidden or too small. Older pending feedback
+versions retain their original text and image marker for delivery reconciliation.
 Source-guided incident analysis is shared by the dashboard, headless CLI and
 watcher and mirrored in packaged/initialized agent guidance. It follows actual
 client/logging fields and distinguishes excluded projections from missing logs.

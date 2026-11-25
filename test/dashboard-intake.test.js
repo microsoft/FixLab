@@ -1010,7 +1010,8 @@ test("ADO tables render escaped cells without interpreting HTML or splitting esc
   ].join("\n");
   const html = formatAzureDevOpsComment(text);
   assert.match(html, /<h3>Analysis summary<\/h3><table/u);
-  assert.match(html, /<th>Topic<\/th><th>Findings<\/th>/u);
+  assert.match(html, /<table width="100%"[^>]*table-layout:fixed;overflow-wrap:anywhere;word-break:break-word/u);
+  assert.match(html, /<th width="30%">Topic<\/th><th>Findings<\/th>/u);
   assert.ok(html.includes("<td>src\\parser.cs:20 | inspected, not tested</td>"));
   assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt; &amp; "unverified"'));
   assert.doesNotMatch(html, /<img|<script/u);
@@ -1252,8 +1253,14 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     assert.match(image.description, /ROW 4 LOG: Backend request failed\./u);
     assert.match(image.description, /ROW 3 URL SHAPE outbound: LOGGED CHARACTERS 2056 - DECODED TERM MATCHES 51/u);
     assert.doesNotMatch(image.description, /op-42|root-42|Incident notes|larger than 50/u);
-    assert.match(text, /!\[Rendered trace results\]\(https:\/\/dev.azure.com\//u);
+    assert.match(text, /!\[Rendered trace results - full size\]\(https:\/\/dev.azure.com\//u);
     assert.match(formatAzureDevOpsComment(text), /<img .*alt="Rendered trace results"/u);
+    assert.match(formatAzureDevOpsComment(text), />Open full-size trace image<\/a>/u);
+    assert.match(text, /## Timestamped trace rows \(observed\)\n\| UTC timestamp \| Observed trace \|/u);
+    for (const [index, row] of traceEvidence.rows.entries()) {
+      assert.ok(text.includes(`| ${new Date(row.timestamp).toISOString()} | Row ${index + 1}: ${row.table}`));
+    }
+    assert.match(text, /severity: 1; Lookup started\./u);
     assert.match(text, /Trace snapshot/);
     for (const value of ["10:01:00", "Request: HTTP 500", "Correlated downstream call: HTTP 404",
       "GET /v1/items/lookup", "Backend request failed."]) {
@@ -1266,7 +1273,7 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     assert.match(text, /2056 logged characters, 51 decoded term matches/u);
     assert.match(text, /Not wire bytes or verified item counts; logging may truncate/u);
     assert.equal(attempt.traceEvidence.rows[0].operation_Id, "op-42");
-    assert.doesNotMatch(text, /op-42|root-42|operation_Id=|operation_ParentId=|severityLevel=|Lookup started\./u);
+    assert.doesNotMatch(text, /op-42|root-42|operation_Id=|operation_ParentId=|severityLevel=/u);
     assert.doesNotMatch(text, /Deployment metadata could not be read|Deployed commit|Deployed version unknown/u);
     assert.match(text, /Latest target commit: 1{40}/u);
     assert.equal(attempt.versionComparison.deployedCommit, null);
@@ -1276,7 +1283,7 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     assert.match(text, /request count was not captured/u);
     assert.doesNotMatch(text, /\| Confirmed cause \|/u);
     assert.match(formatAzureDevOpsComment(text), /<table/u);
-    assert.ok(text.length < 2300);
+    assert.ok(text.length < 3300);
     assert.equal(attempt.confirmedCause, null);
     assert.equal(fixture.item.state, "Active");
     await fixture.run({ plan, execute() { assert.fail("Own trace feedback must not trigger another attempt."); } });
@@ -1359,13 +1366,13 @@ test("trace feedback rechecks assignment and revision after upload without repea
       await fixture.run({ plan: fixture.plan, execute() { assert.fail("Retain the investigation."); } });
       assert.equal(uploads, 1);
       assert.equal(fixture.posted.length, 1);
-      assert.match(fixture.posted[0].text, receiptStatus !== "uploading" ? /!\[Rendered trace results\]/u : /image unavailable.*upload was not confirmed/u);
+      assert.match(fixture.posted[0].text, receiptStatus !== "uploading" ? /!\[Rendered trace results - full size\]/u : /image unavailable.*upload was not confirmed/u);
     } finally { fixture.cleanup(); }
   }
 });
 
-test("pending legacy readable and table trace feedback keep their delivery format without adding images", async () => {
-  for (const format of [undefined, "readable", "table"]) {
+test("pending legacy trace feedback keeps its delivery format without adding expanded content or uploads", async () => {
+  for (const format of [undefined, "readable", "table", "trace-image"]) {
     const fixture = traceImageFixture();
     try {
       await assert.rejects(fixture.run({ plan: fixture.plan, execute: async () => {
@@ -1376,12 +1383,18 @@ test("pending legacy readable and table trace feedback keep their delivery forma
       state.entries[0].status = "feedback-pending";
       if (format === undefined) { delete state.entries[0].feedbackFormat; }
       else { state.entries[0].feedbackFormat = format; }
+      if (format === "trace-image") {
+        state.entries[0].traceImage = { status: "uploaded", attachmentId: "12345678-1234-1234-1234-123456789abc" };
+        fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
+      }
       writeFileSync(fixture.journalPath, JSON.stringify(state));
       fixture.item.assignedToCurrentUser = true;
       fixture.client.uploadTraceImage = async () => assert.fail("Historical feedback must not upload.");
       await fixture.run({ plan: fixture.plan, execute() { assert.fail("Resume feedback only."); } });
       assert.equal(fixture.posted.length, 1);
-      assert.doesNotMatch(fixture.posted[0].text, /Rendered trace results|image unavailable/u);
+      assert.doesNotMatch(fixture.posted[0].text, /Timestamped trace rows| - full size|image unavailable/u);
+      if (format === "trace-image") { assert.match(fixture.posted[0].text, /!\[Rendered trace results\]/u); }
+      else { assert.doesNotMatch(fixture.posted[0].text, /Rendered trace results/u); }
       assert.match(fixture.posted[0].text, /Trace snapshot/u);
       await fixture.run({ plan: fixture.plan, execute() { assert.fail("Do not duplicate historical feedback."); } });
       assert.equal(fixture.posted.length, 1);
@@ -1417,9 +1430,14 @@ test("ADO trace upload sends bounded PNG bytes and embeds only canonical attachm
   assert.equal(calls[1].options.body.text, `Observed evidence only.<br><br><img src="${url}" alt="Rendered trace results">`);
   const punctuatedProject = url.replace("Example%20Project", encodeURIComponent("Example Project (reviewer's)"));
   assert.match(formatAzureDevOpsComment(`![Rendered trace results](${punctuatedProject})`), /<img/u);
+  const expanded = formatAzureDevOpsComment(`![Rendered trace results - full size](${url})`);
+  assert.equal(expanded, `<a href="${url}" target="_blank" rel="noopener noreferrer">Open full-size trace image</a><br>` +
+    `<a href="${url}" target="_blank" rel="noopener noreferrer"><img src="${url}" alt="Rendered trace results" style="max-width:100%;height:auto"></a>`);
+  assert.match(formatAzureDevOpsComment(`![Rendered trace results - full size](${punctuatedProject})`), /<a href=/u);
   for (const unsafe of ["https://example.invalid/a.png", `${url}?token=private`, `${url}" onerror="alert(1)`,
     `http:${url.slice(6)}`, `javascript:alert(1)`]) {
     assert.doesNotMatch(formatAzureDevOpsComment(`![Rendered trace results](${unsafe})`), /<img/u);
+    assert.doesNotMatch(formatAzureDevOpsComment(`![Rendered trace results - full size](${unsafe})`), /<img|<a\b/u);
   }
   assert.throws(() => client.traceImageUrl("../outside"), /exact attachment/u);
   await assert.rejects(client.uploadTraceImage(Buffer.alloc(100)), /bounded PNG/u);
