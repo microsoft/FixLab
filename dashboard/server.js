@@ -1341,7 +1341,6 @@ Repository requirements:
 - Read .github/fixlab/repository-profile.json and all applicable repository instructions; preserve safety, authentication, environment and process ownership.
 ${COPILOT_EXECUTION_GUIDANCE}
 ${RUNTIME_RECOVERY_GUIDANCE}
-${SOURCE_GUIDED_ANALYSIS}
 ${browserDataGuidance}
 ${apiOnly ? API_ONLY_PLAYWRIGHT_GUIDANCE : EXISTING_APPLICATION_GUIDANCE}
 ${apiOnly && useDeployedBackend ? "useDeployedBackend=true: use the configured deployed API; never start local .NET/Key Vault." : ""}
@@ -4305,12 +4304,15 @@ export function createDashboardServer({
       throw new Error("Saved job runtime does not match this dashboard; reconnect using its originating runtime.");
     }
     const currentProfile = loadRepositoryProfile(resolvedRepository);
-    const evidenceContext = analysisEvidenceContext(
-      configuredAnalysisEvidence(resolvedRepository, currentProfile, job.targetEnvironment)
-    );
+    const analysisSources = configuredAnalysisEvidence(resolvedRepository, currentProfile, job.targetEnvironment);
+    const evidenceContext = analysisEvidenceContext(analysisSources);
     if (evidenceContext) { prompt += `\n\n${evidenceContext}`; }
-    const issuePlans = issuePlanContext(issuePlanConfiguration(resolvedRepository, currentProfile, job.targetEnvironment));
+    const issueConfiguration = issuePlanConfiguration(resolvedRepository, currentProfile, job.targetEnvironment);
+    const issuePlans = issuePlanContext(issueConfiguration);
     if (issuePlans) { prompt += `\n\n${issuePlans}`; }
+    if (job.mode !== "playwright-only" && (analysisSources.length || issueConfiguration.traces.length)) {
+      prompt += `\n\n${SOURCE_GUIDED_ANALYSIS}`;
+    }
     if ((job.testEvidence.unitTestsOnly === true) !==
         (currentProfile.validation?.liveTestsRequired === false)) {
       throw new Error("The repository live-test policy changed; start a newly reviewed job.");

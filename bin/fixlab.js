@@ -1154,7 +1154,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   const guidance = [
     ...(analysisEvidence.length ? [analysisEvidenceContext(analysisEvidence)] : []),
     issuePlanContext(issuePlans),
-    SOURCE_GUIDED_ANALYSIS,
+    ...(analysisEvidence.length || issuePlans.traces.length ? [SOURCE_GUIDED_ANALYSIS] : []),
     COPILOT_EXECUTION_GUIDANCE,
     ...(request ? [RUNTIME_RECOVERY_GUIDANCE] : []),
     // Interactive sessions use packaged guidance; request prompts go through stdin.

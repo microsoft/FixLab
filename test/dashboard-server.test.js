@@ -5265,6 +5265,40 @@ test("job prompts omit irrelevant publication guidance and keep one output contr
   }
 });
 
+test("source-guided incident analysis reaches configured diagnostic jobs without expanding browser-only prompts", async () => {
+  for (const [mode, traces, expected] of [
+    ["validate-only", true, true], ["playwright-only", true, false], ["validate-only", false, false]
+  ]) {
+    const repository = createRepository();
+    const profile = validProfile({
+      analysis: { traceQueries: traces ? [{
+        id: "app-traces", environment: "dev",
+        subscriptionId: "12345678-1234-1234-1234-123456789abc",
+        applicationId: "23456789-1234-1234-1234-123456789abc",
+        maxWindowMinutes: 30, maxRows: 10
+      }] : [] }
+    });
+    writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    let captured = "";
+    const { dashboard, url } = await startDashboard(repository, ({ prompt }) => {
+      captured = prompt;
+      return { completion: new Promise(() => {}), terminate() {} };
+    }, undefined, { preflight: () => [] });
+    try {
+      const result = await jsonRequest(url, "/api/jobs", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request: "Investigate the reported failure.", mode, targetEnvironment: "dev" })
+      });
+      assert.equal(result.response.status, 202, JSON.stringify(result.body));
+      assert.ok(captured, JSON.stringify(result.body));
+      assert.equal(captured.includes("Source-guided incident analysis:"), expected);
+    } finally {
+      await dashboard.close();
+      rmSync(repository, { recursive: true, force: true });
+    }
+  }
+});
+
 test("dashboard fails a passed live test without required scenario evidence", async () => {
   const repository = createRepository();
   const executor = ({ onOutput }) => {

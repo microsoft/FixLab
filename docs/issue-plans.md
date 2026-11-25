@@ -165,6 +165,10 @@ or bypassing sign-in, permissions, TLS or diagnostic-literal approval.
 
 ### Source-guided URL-shape diagnostics
 
+CLI and dashboard jobs receive additional incident-analysis guidance only when
+analysis evidence or trace sources are configured. Dashboard browser-only jobs
+retain their bounded validation instructions.
+
 Follow the failing controller/service/outbound client and its telemetry helper
 before querying. Check actual logged property names and serialization. A missing
 field in the reader's projection is **not requested**, not evidence that it was
