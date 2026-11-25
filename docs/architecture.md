@@ -40,6 +40,11 @@ attempts keep the same snapshot. Legacy resumes are not silently moved.
 Preparation already installs the reviewed profile and declared non-sensitive
 setup files in the snapshot. Watcher phases review remaining setup locally,
 without repeating onboarding with `--from` or requesting source-clone access.
+The agent uses the prepared profile and the host preparation summary supplied
+in its prompt or retained session. It does not discover private setup receipts
+by reading `.git` pointers or scanning parent Git/worktree metadata. Approved
+`fixlab issue-plan` and `fixlab exec` commands perform their own internal setup
+checks; this handoff grants no additional folder access.
 Before a fresh read-only review, the host uses the contained worktree setup runner
 to run `fixlab prepare --application=<frontend|backend|browser> --yes` with that
 snapshot's reviewed restore commands and

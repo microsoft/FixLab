@@ -306,7 +306,11 @@ test("owned ticket phases review setup in the assigned snapshot without requesti
         assert.match(options.prompt, /reviewed profile and declared non-sensitive setup files are already prepared/u);
         assert.match(options.prompt, /Do not repeat onboarding with --from or access the source checkout/u);
         assert.doesNotMatch(options.prompt, /fixlab onboard \. --runtime/u);
-        assert.match(options.prompt, /Read the prepared profile and recorded host setup/u);
+        assert.match(options.prompt, /Read the prepared profile in the assigned snapshot/u);
+        assert.match(options.prompt, /use the host dependency preparation summary supplied in this prompt or retained session/u);
+        assert.match(options.prompt, /Do not read or discover Git-private setup records, inspect the \.git pointer, or scan parent Git\/worktree metadata directories/u);
+        assert.match(options.prompt, /use fixlab issue-plan for validated evidence plans and fixlab exec for command evidence without inspecting their private host records/u);
+        assert.doesNotMatch(options.prompt, /Read the prepared profile and recorded host setup/u);
         assert.match(options.prompt, /Read-only review must not provision dependencies or change configuration/u);
         assert.match(options.prompt, /pass the assigned repository root to fixlab exec and select the component with --cwd/u);
         assert.doesNotMatch(options.prompt, /--working-directory/u);
