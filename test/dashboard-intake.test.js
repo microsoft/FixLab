@@ -305,7 +305,8 @@ test("owned ticket phases review setup in the assigned snapshot without requesti
         calls.push(options);
         assert.match(options.prompt, /reviewed profile and declared non-sensitive setup files are already prepared/u);
         assert.match(options.prompt, /Do not repeat onboarding with --from or access the source checkout/u);
-        assert.match(options.prompt, /fixlab onboard \. --runtime <selected-runtime>/u);
+        assert.doesNotMatch(options.prompt, /fixlab onboard \. --runtime/u);
+        assert.match(options.prompt, /Read the prepared profile and recorded host setup/u);
         assert.match(options.prompt, /Read-only review must not provision dependencies or change configuration/u);
         assert.deepEqual(options.runtimeDirectories, ["reviewed-helper"]);
         return options.mode === "validate-only"
@@ -522,6 +523,11 @@ test("fix execution follows the completed pinned version review and retains its 
     traceEvidence: retainedTrace, resume: true });
   assert.equal(calls.length, 3);
   assert.deepEqual(calls.map(call => call.mode), ["validate-only", "fix-and-validate", "fix-and-validate"]);
+  for (const call of calls.slice(1)) {
+    assert.match(call.prompt, /ACTIVE PHASE: FIX_AND_VALIDATE/u);
+    assert.match(call.prompt, /earlier version-review source-edit and PR prohibitions no longer apply/u);
+    assert.doesNotMatch(call.prompt, /This is the read-only VERSION REVIEW phase/u);
+  }
   assert.ok(calls.every(call => call.sessionId === sessionId));
   assert.equal(calls[1].resume, true);
   assert.equal(calls[2].resume, true);
@@ -732,6 +738,9 @@ test("watcher production approval re-evaluates only its bound ticket once withou
         assert.match(request, /read-production-evidence.mjs/);
         assert.match(request, /No production application testing or business-data writes/);
         assert.match(request, /continue.*other.*reader/i);
+        assert.match(request, /reader own its single bounded transient retry/);
+        assert.match(request, /precisely which root-cause evidence remains missing/);
+        assert.match(request, /passing unit tests as root-cause proof/);
         return { outcome: "analysis", summary: "Bounded incident reads completed; interaction remains unconfirmed." };
       } });
       assert.equal(history().length, 2);

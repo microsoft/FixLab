@@ -2048,7 +2048,9 @@ export function buildAgencyInvocation({
       "--no-ask-user",
       "--stream",
       "on",
-      ...(resume ? [`--resume=${sessionId}`] : ["--session-id", sessionId])
+      "--session-id",
+      sessionId,
+      ...(resume ? [`--resume=${sessionId}`] : [])
     ],
     input: prompt
   };

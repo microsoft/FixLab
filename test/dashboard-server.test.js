@@ -782,7 +782,11 @@ test("Agency executor keeps long prompts out of process arguments", () => {
     sessionId: "11111111-1111-4111-8111-111111111111",
     resume: true
   });
-  assert.equal(resumed.args.includes("--session-id"), false);
+  assert.deepEqual(resumed.args.slice(-3), [
+    "--session-id",
+    "11111111-1111-4111-8111-111111111111",
+    "--resume=11111111-1111-4111-8111-111111111111"
+  ]);
   assert.equal(
     resumed.args.at(-1),
     "--resume=11111111-1111-4111-8111-111111111111"

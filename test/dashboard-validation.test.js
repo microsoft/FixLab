@@ -590,6 +590,28 @@ test("a nonzero gate exit with changed inputs is stale and preserves the origina
   }
 });
 
+test("component validation fingerprints the whole repository from its Git root", () => {
+  const { repository } = fixture();
+  try {
+    const component = join(repository, "backend component");
+    mkdirSync(component);
+    writeFileSync(join(component, "service.cs"), "initial backend");
+    git(repository, ["add", "."]);
+    git(repository, ["-c", "user.name=FixLab Test", "-c", "user.email=fixlab@example.test",
+      "commit", "--quiet", "-m", "component"]);
+    const initial = repositoryState(repository);
+    assert.deepEqual(repositoryState(component), initial);
+    writeFileSync(join(repository, "source.txt"), "changed outside component");
+    const changed = repositoryState(component);
+    assert.deepEqual(changed, repositoryState(repository));
+    assert.notEqual(changed.worktreeHash, initial.worktreeHash);
+    writeFileSync(join(repository, "AGENTS.md"), "New whole-repository instructions");
+    assert.notEqual(repositoryState(component).instructionHash, changed.instructionHash);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test("gates fingerprint unstaged deletions and renames including instructions", async () => {
   for (const operation of ["delete", "rename"]) {
     const { repository, profile } = fixture();

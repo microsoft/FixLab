@@ -63,9 +63,22 @@ and standard telemetry fields in actual logging. `payload.*` reads the reviewed
 
 The compiler always adds timestamp bounds, reviewed projection, timestamp
 ordering and a `limit + 1` overflow probe. Policies are capped at 60 minutes and
-200 rows. One request per invocation uses the developer's Azure CLI token for
-the exact subscription/application, a 20-second timeout, no redirects or retries,
-and a 256 KiB response limit. Partial/schema-changed responses are rejected;
+200 rows. Each request uses the developer's Azure CLI token for
+the exact subscription/application, a 20-second timeout, no redirects,
+and a 256 KiB response limit. The reader may make one retry for a recognized
+timeout, connection reset, temporary DNS failure, or HTTP 429/502/503/504.
+Both attempts use the same query, UTC window, row limit, source and in-memory
+token; the CLI rechecks the reviewed profile and compiler before dispatch.
+Backoff is 250 ms unless a valid `Retry-After` requests up to two seconds.
+Longer or invalid retry timing stops rather than retrying early.
+Authentication/authorization failures, TLS failures, redirects, unknown
+transport failures and response-validation failures are not retried. Failed
+HTTP responses are released before retry; cleanup failure stops recovery.
+Successful recovery returns `recovery` with its attempt count and sanitized
+reason. Exhaustion returns a sanitized reason and actual attempt count, never
+raw network errors or response text. This allowance applies only to the
+compiled read-only query POST, not uploads, feedback, application writes or
+agent-managed retry loops. Partial/schema-changed responses are rejected;
 overflow returns `partial` and a failing exit code. This is not a persistent
 cross-invocation query budget. Empty results mean lookup succeeded, not that the
 issue is absent. A lookup's `passed` status never proves a root cause.
@@ -141,6 +154,14 @@ after 15 days or when outside the latest 20 attempts. Duplicate-prevention
 records remain; active, paused and pending-feedback evidence is not expired.
 Evidence is agent-reported correlation, not proof
 of a cause, deployment identity, successful validation or a source fix.
+
+When diagnostic retrieval still fails, watcher feedback must name the sanitized
+failure and the specific missing proof, such as request item count, approved
+request-shape metadata, downstream rejection reason or authenticated incident
+resolution. Preserve observed status codes and independent checks, but do not
+infer a request limit violation or oversized URL from HTTP 404/500 or passing
+unit tests. State the next authorized recovery action without widening scope
+or bypassing sign-in, permissions, TLS or diagnostic-literal approval.
 
 ## Reviewed browser adapter
 

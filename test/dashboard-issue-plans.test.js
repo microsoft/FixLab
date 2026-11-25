@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { compileIssuePlan, executeBrowserPlan, executeTracePlan, issuePlanConfiguration, issuePlanContext } from "../dashboard/issue-plans.js";
+import { compileIssuePlan, executeBrowserPlan, executeTracePlan, issuePlanConfiguration, issuePlanContext, verifyTracePlanApproval } from "../dashboard/issue-plans.js";
 import Reporter from "../bin/issue-plan-reporter.js";
 
 function fixture(t) {
@@ -119,6 +119,105 @@ test("trace transport sends bounded compiled KQL once and preserves only metadat
       error => !/sensitive|raw denial/u.test(error.message));
     assert.equal(attempted, 1);
   }
+});
+
+test("trace read recovery retries only transient failures with the same approved request", async t => {
+  for (const failure of ["ECONNRESET", "UND_ERR_CONNECT_TIMEOUT", "EAI_AGAIN", 503, 429]) {
+    const f = fixture(t);
+    const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+    const original = structuredClone(compiled);
+    const attempts = [];
+    const delays = [];
+    let tokens = 0;
+    const result = await executeTracePlan(compiled, {
+      tokenProvider: async () => { tokens += 1; return "unit-test-placeholder"; },
+      wait: async milliseconds => { delays.push(milliseconds); },
+      request: async (url, options) => {
+        attempts.push({ url, method: options.method, redirect: options.redirect,
+          headers: options.headers, body: options.body });
+        if (attempts.length === 1) {
+          compiled.query = "unapproved query";
+          compiled.policy.applicationId = "unapproved-application";
+          if (typeof failure === "number") {
+            return new Response("private denial body", { status: failure, headers: { "retry-after": "0" } });
+          }
+          throw new TypeError("private transport details", { cause: { code: failure } });
+        }
+        return new Response(JSON.stringify({ tables: [
+          { columns: original.columns.map(name => ({ name })),
+            rows: [["2026-11-19T10:01:00Z", "op-42", null, 3]] }
+        ] }));
+      }
+    });
+    assert.equal(result.status, "passed");
+    assert.equal(result.recovery.attempts, 2);
+    assert.equal(tokens, 1);
+    assert.equal(delays.length, 1);
+    assert.ok(delays[0] >= 0 && delays[0] <= 2000);
+    assert.deepEqual(attempts[1], attempts[0]);
+    assert.equal(JSON.parse(attempts[1].body).query, original.query);
+    assert.ok(attempts[1].url.endsWith(`/${original.policy.applicationId}/query`));
+    assert.doesNotMatch(JSON.stringify(result), /private|unapproved/u);
+  }
+});
+
+test("trace read recovery stops at two attempts and reports sanitized missing evidence", async t => {
+  const f = fixture(t);
+  const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+  let calls = 0;
+  await assert.rejects(executeTracePlan(compiled, {
+    tokenProvider: async () => "unit-test-placeholder", wait: async () => {},
+    request: async () => {
+      calls += 1;
+      throw new TypeError("Bearer private-token https://private.example.test", { cause: { code: "ECONNRESET" } });
+    }
+  }), error => error.code === "TRACE_READ_CONNECTION_RESET" && error.attempts === 2 &&
+    /2 attempts.*no rows accepted.*diagnostic evidence is still missing/u.test(error.message) &&
+    !/private|Bearer|https:/u.test(error.message));
+  assert.equal(calls, 2);
+});
+
+test("trace read recovery does not bypass denial, redirects, TLS, throttling or changed approval", async t => {
+  const f = fixture(t);
+  const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+  for (const failure of [
+    async () => new Response("private denial", { status: 401 }),
+    async () => new Response("private denial", { status: 403 }),
+    async () => new Response("private redirect", { status: 302 }),
+    async () => new Response("private throttling", { status: 429, headers: { "retry-after": "120" } }),
+    async () => new Response("private throttling", { status: 503, headers: { "retry-after": "invalid" } }),
+    async () => new Response("private throttling", { status: 503, headers: { "retry-after": "-1" } }),
+    async () => { throw new TypeError("private details", { cause: { message: "unexpected redirect" } }); },
+    async () => { throw new TypeError("private details", { cause: { code: "CERT_HAS_EXPIRED" } }); },
+    async () => { throw Object.assign(new Error("private details", { cause: { code: "CERT_HAS_EXPIRED" } }),
+      { name: "TimeoutError" }); },
+    async () => ({ status: 503, headers: new Headers(), body: {
+      cancel: async () => { throw new Error("private cleanup failure"); }
+    } }),
+    async () => { throw new Error("private unknown failure"); }
+  ]) {
+    let calls = 0;
+    let waits = 0;
+    await assert.rejects(executeTracePlan(compiled, {
+      tokenProvider: async () => "unit-test-placeholder",
+      wait: async () => { waits += 1; },
+      request: async () => { calls += 1; return failure(); }
+    }), error => !/private/u.test(error.message));
+    assert.equal(calls, 1);
+    assert.equal(waits, 0);
+  }
+  let calls = 0;
+  await assert.rejects(executeTracePlan(compiled, {
+    tokenProvider: async () => "unit-test-placeholder",
+    verifyApproval: () => verifyTracePlanApproval(f.repository, f.profile, f.trace, f.options, compiled),
+    wait: async () => {
+      const changed = structuredClone(f.profile);
+      changed.analysis.traceQueries[0].maxRows = 9;
+      writeFileSync(join(f.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(changed));
+    },
+    request: async () => { calls += 1; return new Response("", { status: 503 }); }
+  }), error => error.code === "TRACE_READ_APPROVAL_CHANGED" && error.attempts === 1);
+  assert.equal(calls, 1);
 });
 
 test("trace request and dependency success accepts canonical wire booleans without truthy coercion", async t => {

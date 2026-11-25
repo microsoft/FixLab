@@ -85,11 +85,27 @@ analysis; only `needs-fix` continues in the same session, retaining its comparis
 through authentication pauses. A deployment gap requires a known, different
 deployed commit. Profile/helper approval, ordinary authentication, read-only
 business-data access and normal publication gates remain unchanged.
+The fix handoff explicitly ends only the completed review phase's source/PR
+prohibitions; it does not widen runtime permissions. Agency resumes retain its
+own `--session-id` as well as the underlying Copilot `--resume` identity.
+Already-prepared snapshots do not repeat onboarding or scaffolding to review
+setup. Structured validation fingerprints the whole Git repository even when
+invoked from a component directory; command working-directory selection remains
+separate, preserving source/profile/instruction invalidation across components.
 Validated trace evidence is checkpointed before entering fix work and restored
 on authentication resume. Phase results merge only one source/revision within
 the approved bounded window, deduplicate observed rows, retain at most ten and
 disclose truncation and omitted diagnostics. Incompatible evidence blocks rather
 than replacing the earlier observations.
+
+Compiled read-only trace queries allow one host-owned retry for recognized
+transient transport failures or HTTP 429/502/503/504, with bounded backoff and
+unchanged source, query, window, row limit and token. The CLI revalidates profile
+and compiler approval before each dispatch. Redirects, TLS failures, denied
+access, invalid evidence and failed response cleanup remain hard stops.
+Recovery reports actual attempts; exhausted diagnostics name the missing
+root-cause proof and the next authorized action instead of implying that
+correlated status codes or passing unit tests establish the cause.
 
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
 journal through `GET /api/ticket-automation`; reading never starts or changes
