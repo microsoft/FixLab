@@ -1098,7 +1098,7 @@ function decodeTracePng(bytes) {
     offset += length + 12;
     assert.ok(offset <= bytes.length);
   }
-  assert.deepEqual(chunks.map(chunk => chunk.type), ["IHDR", "tEXt", "IDAT", "IEND"]);
+  assert.deepEqual(chunks.map(chunk => chunk.type), ["IHDR", "iTXt", "IDAT", "IEND"]);
   const header = chunks[0].data;
   const width = header.readUInt32BE();
   const height = header.readUInt32BE(4);
@@ -1106,54 +1106,76 @@ function decodeTracePng(bytes) {
   const pixels = inflateSync(chunks[2].data);
   assert.equal(pixels.length, (width * 3 + 1) * height);
   for (let y = 0; y < height; y++) { assert.equal(pixels[y * (width * 3 + 1)], 0); }
-  return { width, height, pixels, description: chunks[1].data.toString("utf8").split("\0")[1] };
+  assert.equal(chunks[1].data.subarray(0, 16).toString("utf8"), "Description\0\0\0\0\0");
+  return { width, height, pixels, description: chunks[1].data.subarray(16).toString("utf8") };
 }
 
-test("rendered trace PNG draws only approved safe metadata with no network or private-field leakage", t => {
+test("rendered trace PNG draws approved row-linked diagnostics without network or private-field leakage", t => {
   t.mock.method(globalThis, "fetch", () => assert.fail("Rendering must not fetch resources."));
   t.mock.method(https, "request", () => assert.fail("Rendering must not make HTTP requests."));
   const policy = { id: "app-traces", policyRevision: "1".repeat(64), maxWindowMinutes: 30,
-    diagnostics: { endpoints: ["GET /private-route"], messages: ["<script>alert(1)</script>"] } };
+    diagnostics: { endpoints: ["GET /v1/items/{id}"],
+      messages: ["Backend request failed (not retried): OData.", "Service returned caf\u00e9."] } };
   const evidence = { source: policy.id, policyRevision: policy.policyRevision,
     start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z", truncated: true, omittedDiagnostics: 3,
     rows: [
       { table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "private-id", operation_ParentId: null,
-        success: false, resultCode: "500", endpoint: "GET /private-route" },
+        success: false, resultCode: "500", endpoint: "GET /v1/items/{id}" },
       { table: "dependencies", timestamp: "2026-11-19T10:01:01Z", operation_Id: "private-id", operation_ParentId: "parent",
         success: true, resultCode: "private-code" },
       { table: "traces", timestamp: "2026-11-19T10:01:02Z", operation_Id: "private-id", operation_ParentId: null,
-        severityLevel: 3, logMessage: "<script>alert(1)</script>" },
+        severityLevel: 3, logMessage: "Backend request failed (not retried): OData." },
       { table: "exceptions", timestamp: "2026-11-19T10:01:03Z", operation_Id: null, operation_ParentId: null,
         severityLevel: null, type: "Private.CustomerException" }
     ] };
   const bytes = renderTraceImage(evidence, policy);
   const decoded = decodeTracePng(bytes);
   assert.equal(decoded.width, 1100);
-  assert.equal(decoded.height, 404);
+  assert.equal(decoded.height, 484);
   assert.match(decoded.description, /UTC WINDOW: 2026-11-19T10:00:00.000Z TO 2026-11-19T10:15:00.000Z/u);
   assert.match(decoded.description, /OBSERVED ROWS: 4 \/ 10 MAX - TRUNCATED: YES\nOMITTED DIAGNOSTICS: 3/u);
   assert.match(decoded.description, /REQUESTS \| FALSE \| 500 \| N\/A/u);
   assert.match(decoded.description, /DEPENDENCIES \| TRUE \| N\/A \| N\/A/u);
   assert.match(decoded.description, /TRACES \| N\/A \| N\/A \| 3 ERROR/u);
   assert.match(decoded.description, /EXCEPTIONS \| N\/A \| N\/A \| N\/A/u);
-  assert.match(decoded.description, /NOT AN AZURE PORTAL SCREENSHOT/u);
-  assert.doesNotMatch(decoded.description, /private|parent|CustomerException|script|alert/iu);
+  assert.match(decoded.description, /NOT A PORTAL SCREENSHOT OR ROOT-CAUSE PROOF/u);
+  assert.match(decoded.description, /ROW 1 API: GET \/v1\/items\/\{id\}/u);
+  assert.match(decoded.description, /ROW 2 API: ROUTE NOT CAPTURED/u);
+  assert.match(decoded.description, /ROW 3 LOG: Backend request failed \(not retried\): OData\./u);
+  assert.doesNotMatch(decoded.description, /private-id|parent|CustomerException|private-code/iu);
   const changedPrivate = structuredClone(evidence);
   for (const row of changedPrivate.rows) { row.operation_Id = "other-id"; row.operation_ParentId = null; }
-  changedPrivate.rows[0].endpoint = null;
-  changedPrivate.rows[2].logMessage = null;
   changedPrivate.rows[3].type = "Other.PrivateException";
   assert.deepEqual(renderTraceImage(changedPrivate, policy), bytes);
-  // The R in the visible title and 2 in the first timestamp have dark foreground pixels.
+  const changedDiagnostic = structuredClone(evidence);
+  changedDiagnostic.rows[2].logMessage = "Service returned caf\u00e9.";
+  const changed = decodeTracePng(renderTraceImage(changedDiagnostic, policy));
+  assert.match(changed.description, /ROW 3 LOG: Service returned caf\u00e9\./u);
+  assert.notDeepEqual(changed.pixels, decoded.pixels, "approved diagnostic changes must be visible, not metadata-only");
+  changedDiagnostic.rows[2].logMessage = "Unapproved error text.";
+  assert.throws(() => renderTraceImage(changedDiagnostic, policy), /not an approved literal/u);
+  // The title and first row number have dark foreground pixels.
   const pixel = (x, y) => [...decoded.pixels.subarray(y * (1100 * 3 + 1) + 1 + x * 3, y * (1100 * 3 + 1) + 4 + x * 3)];
   assert.deepEqual(pixel(20, 18), [24, 35, 50]);
-  assert.deepEqual(pixel(22, 165), [24, 35, 50]);
+  assert.deepEqual(pixel(24, 165), [24, 35, 50]);
+  assert.deepEqual(pixel(20, 376), [24, 35, 50], "the approved row 3 log must be drawn below the metadata table");
   assert.throws(() => renderTraceImage(evidence), /approved policy/u);
   assert.throws(() => renderTraceImage({ ...evidence, policyRevision: "2".repeat(64) }, policy), /approved source/u);
   assert.throws(() => renderTraceImage({ ...evidence, rows: [{ ...evidence.rows[0], message: "private" }] }, policy), /Unsupported/u);
   const maximum = renderTraceImage({ ...evidence, rows: Array(10).fill(evidence.rows[0]) }, policy);
   assert.ok(maximum.length < 64 * 1024);
-  assert.equal(decodeTracePng(maximum).height, 620);
+  assert.equal(decodeTracePng(maximum).height, 854);
+  const longMessage = "Backend failed: ".repeat(12);
+  const wrapped = decodeTracePng(renderTraceImage({ ...evidence, rows: [
+    { ...evidence.rows[2], logMessage: longMessage }
+  ] }, { ...policy, diagnostics: { messages: [longMessage] } }));
+  assert.ok(wrapped.height > 354, "long approved text must wrap to additional visible lines");
+  assert.ok(wrapped.description.includes(longMessage), "the exact approved message must remain complete");
+  const metadataOnly = structuredClone(evidence);
+  metadataOnly.rows = [{ ...metadataOnly.rows[2] }];
+  delete metadataOnly.rows[0].logMessage;
+  assert.match(decodeTracePng(renderTraceImage(metadataOnly, policy)).description,
+    /NO APPROVED ENDPOINTS OR MESSAGES CAPTURED/u);
   const unspecifiedLimits = { ...evidence };
   delete unspecifiedLimits.truncated;
   delete unspecifiedLimits.omittedDiagnostics;
@@ -1203,6 +1225,10 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     const text = fixture.posted[0].text;
     assert.equal(uploads.length, 1, "approved trace results must produce one PNG attachment");
     assert.deepEqual(uploads[0].subarray(0, 8), png);
+    const image = decodeTracePng(uploads[0]);
+    assert.match(image.description, /ROW 1 API: GET \/v1\/items\/lookup/u);
+    assert.match(image.description, /ROW 4 LOG: Backend request failed\./u);
+    assert.doesNotMatch(image.description, /op-42|root-42|Incident notes|larger than 50/u);
     assert.match(text, /!\[Rendered trace results\]\(https:\/\/dev.azure.com\//u);
     assert.match(formatAzureDevOpsComment(text), /<img .*alt="Rendered trace results"/u);
     assert.match(text, /Trace snapshot/);

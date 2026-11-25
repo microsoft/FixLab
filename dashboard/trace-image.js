@@ -5,6 +5,13 @@ import { normalizeTraceEvidence } from "./issue-plans.js";
 const glyphs = {
   " ": "00000000000000", "-": "0000001f000000", ".": "00000000000c0c",
   ",": "000000000c0c08", ":": "000c0c000c0c00", "/": "01010204081010",
+  "!": "04040404040004", "\"": "0a0a0a00000000", "#": "0a0a1f0a1f0a0a",
+  "$": "040f140e051e04", "%": "19190204081313", "&": "0c12140a15120d",
+  "'": "04040400000000", "(": "02040808080402", ")": "08040202020408",
+  "*": "00150e1f0e1500", "+": "0004041f040400", ";": "000c0c000c0c08",
+  "<": "01020408040201", ">": "10080402040810", "_": "0000000000001f",
+  "{": "02040408040402", "}": "08040402040408", "|": "04040404040404",
+  "~": "00000916000000", "`": "08040200000000",
   "0": "0e11131519110e", "1": "040c040404040e", "2": "0e11010204081f",
   "3": "1e01010601011e", "4": "02060a121f0202", "5": "1f10101e01011e",
   "6": "0e10101e11110e", "7": "1f010204080808", "8": "0e11110e11110e", "9": "0e11110f01010e",
@@ -37,28 +44,41 @@ function chunk(type, data) {
 export function renderTraceImage(value, policy) {
   if (!policy) { throw new Error("Trace rendering requires an approved policy."); }
   const evidence = normalizeTraceEvidence(value, policy);
-  // Do not pass diagnostics, identifiers, exception names or arbitrary result codes to the renderer.
-  const rows = evidence.rows.map(row => [
-    row.timestamp, row.table.toUpperCase(),
+  // Only normalized, exact policy-approved diagnostics may accompany the metadata.
+  const rows = evidence.rows.map((row, index) => [
+    `${index + 1} ${row.timestamp}`, row.table.toUpperCase(),
     row.success === true ? "TRUE" : row.success === false ? "FALSE" : "N/A",
     /^\d{3}$/u.test(row.resultCode ?? "") ? row.resultCode : "N/A",
     Number.isInteger(row.severityLevel) ? `${row.severityLevel} ${["VERBOSE", "INFO", "WARNING", "ERROR", "CRITICAL"][row.severityLevel]}` : "N/A"
   ]);
-  const headings = ["UTC TIMESTAMP", "TABLE / TYPE", "SUCCESS", "STATUS CODE", "SEVERITY"];
+  const headings = ["ROW / UTC TIMESTAMP", "TABLE / TYPE", "SUCCESS", "STATUS CODE", "SEVERITY"];
   const top = [
     "RENDERED TRACE RESULTS",
     `UTC WINDOW: ${evidence.start} TO ${evidence.end}`,
     `OBSERVED ROWS: ${rows.length} / 10 MAX - TRUNCATED: ${evidence.truncated === undefined ? "UNKNOWN" : evidence.truncated ? "YES" : "NO"}`,
     `OMITTED DIAGNOSTICS: ${evidence.omittedDiagnostics ?? "N/A"}`
   ];
+  const diagnostics = ["APPROVED DIAGNOSTICS - ROW NUMBERS MATCH THE TABLE"];
+  evidence.rows.forEach((row, index) => {
+    if (row.table === "requests" || row.table === "dependencies") {
+      diagnostics.push(`ROW ${index + 1} API: ${row.endpoint ?? "ROUTE NOT CAPTURED"}`);
+    } else if (row.logMessage) {
+      diagnostics.push(`ROW ${index + 1} LOG: ${row.logMessage}`);
+    }
+  });
+  if (diagnostics.length === 1) { diagnostics.push("NO APPROVED ENDPOINTS OR MESSAGES CAPTURED."); }
+  const diagnosticLines = diagnostics.flatMap(line => {
+    const visible = [...line.toUpperCase()].map(character => Object.hasOwn(glyphs, character)
+      ? character : `U+${character.codePointAt(0).toString(16).toUpperCase()}`).join("");
+    return visible.match(/.{1,88}/gu) ?? [];
+  });
   const footer = [
-    "OBSERVED EVIDENCE ONLY - NOT AN AZURE PORTAL SCREENSHOT.",
-    "NOT ROOT-CAUSE PROOF OR APPLICATION VALIDATION.",
-    "IDS, URLS, ENDPOINTS, MESSAGES AND PAYLOADS EXCLUDED.",
-    "N/A: UNAVAILABLE OR EXCLUDED. TABLE / TYPE: TELEMETRY TABLE."
+    "OBSERVED EVIDENCE - NOT A PORTAL SCREENSHOT OR ROOT-CAUSE PROOF.",
+    "PRIVATE IDS, URLS AND PAYLOADS EXCLUDED. N/A: NOT AVAILABLE.",
+    "TEXT UPPERCASED. OTHER GLYPHS: U+HEX. NOT APPLICATION VALIDATION."
   ];
   const width = 1100;
-  const height = 260 + rows.length * 36;
+  const height = 252 + rows.length * 36 + diagnosticLines.length * 22;
   const pixels = Buffer.alloc(width * height * 3, 255);
   const rectangle = (x, y, w, h, color) => {
     for (let dy = y; dy < y + h; dy++) {
@@ -84,7 +104,7 @@ export function renderTraceImage(value, policy) {
     }
   };
   top.forEach((line, index) => text(line, 20, 18 + index * 26));
-  const columns = [20, 340, 570, 700, 860];
+  const columns = [20, 360, 590, 720, 880];
   rectangle(10, 122, 1080, 32, [31, 65, 98]);
   headings.forEach((line, index) => text(line, columns[index], 131, [255, 255, 255]));
   rows.forEach((row, index) => {
@@ -92,7 +112,9 @@ export function renderTraceImage(value, policy) {
     rectangle(10, y, 1080, 35, index % 2 ? [238, 244, 250] : [248, 250, 252]);
     row.forEach((cell, column) => text(cell, columns[column], y + 11));
   });
-  footer.forEach((line, index) => text(line, 20, 166 + rows.length * 36 + index * 22));
+  const diagnosticsY = 166 + rows.length * 36;
+  diagnosticLines.forEach((line, index) => text(line, 20, diagnosticsY + index * 22));
+  footer.forEach((line, index) => text(line, 20, diagnosticsY + (diagnosticLines.length + 1 + index) * 22));
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width);
   header.writeUInt32BE(height, 4);
@@ -104,7 +126,7 @@ export function renderTraceImage(value, policy) {
   }
   return Buffer.concat([
     signature, chunk("IHDR", header),
-    chunk("tEXt", Buffer.from(`Description\0${[...top, headings.join(" | "), ...rows.map(row => row.join(" | ")), ...footer].join("\n")}`)),
+    chunk("iTXt", Buffer.from(`Description\0\0\0\0\0${[...top, headings.join(" | "), ...rows.map(row => row.join(" | ")), ...diagnostics, ...footer].join("\n")}`)),
     chunk("IDAT", deflateSync(scanlines)), chunk("IEND", Buffer.alloc(0))
   ]);
 }

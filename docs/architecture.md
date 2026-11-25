@@ -148,12 +148,17 @@ is now stale, the attempt is marked reconciled with an explicit review notice;
 no stale result is reposted and no new resolution is attempted. Unconfirmed or
 unsent stale feedback remains blocked for review.
 New attempts use a separate `trace-image` feedback version. After policy
-validation, an in-memory PNG grid renders only returned UTC timestamps, telemetry
+validation, an in-memory PNG grid renders returned UTC timestamps, telemetry
 table/type, boolean success, three-digit status codes and numeric severity with
 fixed level labels. It shows the bounded UTC window, retained row count,
-truncation and omitted-diagnostic count. Source/operation/correlation IDs,
-exception names, endpoints, URLs, payloads and log messages are never drawn or
-embedded in the PNG. The original bitmap font, rasterizer, PNG chunks and Node
+truncation and omitted-diagnostic count. Exact policy-approved endpoint templates
+and log messages are drawn below the grid and linked by row number; missing
+request/dependency routes are explicitly marked not captured. Approval is rechecked
+before rendering, and an absent route is never inferred from a method or message.
+Diagnostic text wraps within the image, is uppercased for the bitmap font, and
+unsupported characters display as `U+HEX`; the PNG description retains the exact
+approved literals. Source/operation/correlation IDs, exception names, URLs and
+payloads are never drawn or embedded. The original bitmap font, rasterizer, PNG chunks and Node
 zlib compression require no browser, fonts, external requests or new dependency;
 the module ships in the existing `dashboard` package directory.
 The image is explicitly **Rendered trace results**, observed evidence, not a
