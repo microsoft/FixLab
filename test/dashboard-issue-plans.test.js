@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { compileIssuePlan, executeBrowserPlan, executeTracePlan, issuePlanConfiguration, issuePlanContext, verifyTracePlanApproval } from "../dashboard/issue-plans.js";
+import { compileIssuePlan, executeBrowserPlan, executeTracePlan, issuePlanConfiguration, issuePlanContext, normalizeTraceEvidence, SOURCE_GUIDED_ANALYSIS, verifyTracePlanApproval } from "../dashboard/issue-plans.js";
 import Reporter from "../bin/issue-plan-reporter.js";
 
 function fixture(t) {
@@ -357,6 +357,106 @@ test("trace diagnostics expose only reviewed route and message literals and disc
     f.profile.analysis.traceQueries[0].diagnostics.messages = [message];
     assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"), /credential/u);
   }
+});
+
+test("URL-shape plans select reviewed source fields without widening default or production projections", t => {
+  const f = fixture(t);
+  const shape = { id: "outbound-lookup", table: "traces", field: "customDimensions.RequestUri", term: "ItemNumber eq '" };
+  f.policy.diagnostics = { urlShapes: [shape] };
+  const configuration = issuePlanConfiguration(f.repository, f.profile, "dev");
+  const plan = { ...f.trace, policyRevision: configuration.traces[0].policyRevision };
+  const ordinary = compileIssuePlan(f.repository, f.profile, plan, f.options);
+  assert.doesNotMatch(ordinary.query, /RequestUri|observedUrl/u);
+  const compiled = compileIssuePlan(f.repository, f.profile, { ...plan, urlShape: shape.id }, f.options);
+  assert.match(compiled.query, /observedUrlLength = iff\(isempty\(tostring\(customDimensions\["RequestUri"\]\)\), long\(null\), strlen/u);
+  assert.match(compiled.query, /observedUrlTermCount = iff\(isempty\(url_decode/u);
+  assert.ok(compiled.query.includes(`countof(url_decode(tostring(customDimensions["RequestUri"])), ${JSON.stringify(shape.term)}, "normal")`));
+  assert.deepEqual(compiled.columns.slice(-2), ["observedUrlLength", "observedUrlTermCount"]);
+  assert.ok(!compiled.columns.includes("RequestUri"));
+  for (const change of [{ urlShape: "unreviewed" }, { urlShape: { field: "url" } },
+    { urlShape: shape.id, table: "dependencies" }, { projection: ["url"] }]) {
+    assert.throws(() => compileIssuePlan(f.repository, f.profile, { ...plan, ...change }, f.options));
+  }
+  for (const invalid of [{ ...shape, field: 'customDimensions.X"] | take 99' },
+    { ...shape, field: "message" }, { ...shape, table: "requests", field: "data" },
+    { ...shape, term: "Authorization=Bearer synthetic-secret" },
+    { ...shape, term: 'Item" | take 99' }, { ...shape, unknown: true }]) {
+    f.policy.diagnostics.urlShapes = [invalid];
+    assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"));
+  }
+  f.policy.diagnostics.urlShapes = [shape, shape];
+  assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"), /unique/u);
+  for (const [table, field] of [["requests", "url"], ["dependencies", "data"], ["exceptions", "payload.RequestUri"]]) {
+    f.policy.diagnostics.urlShapes = [{ id: shape.id, table, field }];
+    const policy = issuePlanConfiguration(f.repository, f.profile, "dev").traces[0];
+    const result = compileIssuePlan(f.repository, f.profile, {
+      ...plan, table, policyRevision: policy.policyRevision, urlShape: shape.id
+    }, f.options);
+    assert.equal(result.columns.at(-1), "observedUrlLength");
+    assert.doesNotMatch(result.query, /observedUrlTermCount/u);
+  }
+  f.policy.environment = "production";
+  f.policy.diagnostics.urlShapes = [shape];
+  const production = issuePlanConfiguration(f.repository, f.profile, "dev", true).traces[0];
+  assert.throws(() => compileIssuePlan(f.repository, f.profile, {
+    ...plan, environment: "production", policyRevision: production.policyRevision, urlShape: shape.id
+  }, f.options), /unavailable/u);
+  assert.match(SOURCE_GUIDED_ANALYSIS, /excluded projection does not prove a value was not logged/u);
+  assert.match(SOURCE_GUIDED_ANALYSIS, /same approved UTC window/u);
+  assert.match(SOURCE_GUIDED_ANALYSIS, /outbound client\/configuration proves/u);
+  assert.match(issuePlanContext(configuration), /Null means not captured\/decodable, not zero/u);
+});
+
+test("URL-shape transport preserves numeric evidence and unknowns but rejects raw or forged diagnostics", async t => {
+  const f = fixture(t);
+  const shape = { id: "outbound-lookup", table: "traces", field: "customDimensions.RequestUri", term: "ItemNumber eq '" };
+  f.policy.diagnostics = { urlShapes: [shape] };
+  const policy = issuePlanConfiguration(f.repository, f.profile, "dev").traces[0];
+  const compiled = compileIssuePlan(f.repository, f.profile, {
+    ...f.trace, policyRevision: policy.policyRevision, urlShape: shape.id
+  }, f.options);
+  const base = ["2026-11-19T10:01:00Z", "op-42", null, 1];
+  const execute = measurements => executeTracePlan(compiled, {
+    tokenProvider: async () => "unit-test-placeholder",
+    request: async () => new Response(JSON.stringify({ tables: [
+      { columns: compiled.columns.map(name => ({ name })), rows: measurements.map(values => [...base, ...values]) }
+    ] }))
+  });
+  const result = await execute([[2056, 51], [null, null], [42, 0], [42, null]]);
+  assert.deepEqual(result.traceEvidence.rows.map(row => row.urlShape), [
+    { id: shape.id, characterCount: 2056, termCount: 51 },
+    { id: shape.id, characterCount: null, termCount: null },
+    { id: shape.id, characterCount: 42, termCount: 0 },
+    { id: shape.id, characterCount: 42, termCount: null }
+  ]);
+  assert.doesNotMatch(JSON.stringify(result), /RequestUri|https?:|ItemNumber|itemCount/u);
+  for (const invalid of [["https://private.example.test?token=private", 1], ["2056", 51],
+    [NaN, 1], [-1, 0], [16777217, 0], [1.5, 0], [null, 1], [1, 2]]) {
+    await assert.rejects(execute([invalid]), error => /URL-shape/u.test(error.message) && !/private/u.test(error.message));
+  }
+  const evidence = result.traceEvidence;
+  for (const invalid of [{ id: "unreviewed", characterCount: 42 }, { id: shape.id, characterCount: 42 },
+    { id: shape.id, characterCount: 42, termCount: 1, url: "private" }]) {
+    assert.throws(() => normalizeTraceEvidence({ ...evidence, rows: [
+      { ...evidence.rows[0], urlShape: invalid }
+    ] }, policy));
+  }
+  assert.throws(() => normalizeTraceEvidence(evidence, { ...policy, diagnostics: { urlShapes: [] } }), /approved measurement/u);
+});
+
+test("changing a reviewed URL-shape source invalidates the plan before authentication", async t => {
+  const f = fixture(t);
+  f.policy.diagnostics = { urlShapes: [{ id: "outbound", table: "traces", field: "customDimensions.RequestUri" }] };
+  const policy = issuePlanConfiguration(f.repository, f.profile, "dev").traces[0];
+  const plan = { ...f.trace, policyRevision: policy.policyRevision, urlShape: "outbound" };
+  const compiled = compileIssuePlan(f.repository, f.profile, plan, f.options);
+  f.policy.diagnostics.urlShapes[0].field = "customDimensions.OtherUri";
+  writeFileSync(join(f.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(f.profile));
+  await assert.rejects(executeTracePlan(compiled, {
+    verifyApproval: () => verifyTracePlanApproval(f.repository, f.profile, plan, f.options, compiled),
+    tokenProvider: () => assert.fail("Changed measurement must stop before authentication."),
+    request: () => assert.fail("Changed measurement must stop before dispatch.")
+  }), error => error.code === "TRACE_READ_APPROVAL_CHANGED" && error.attempts === 0);
 });
 
 test("browser plans generate runnable grounded actions and non-leaking assertions, not arbitrary scripts", t => {

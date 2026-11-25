@@ -65,6 +65,11 @@ export function renderTraceImage(value, policy) {
     } else if (row.logMessage) {
       diagnostics.push(`ROW ${index + 1} LOG: ${row.logMessage}`);
     }
+    if (row.urlShape) {
+      const shape = row.urlShape;
+      diagnostics.push(`ROW ${index + 1} URL SHAPE ${shape.id}: LOGGED CHARACTERS ${shape.characterCount ?? "NOT CAPTURED"}` +
+        (shape.termCount !== undefined ? ` - DECODED TERM MATCHES ${shape.termCount ?? "NOT CAPTURED"}` : ""));
+    }
   });
   if (diagnostics.length === 1) { diagnostics.push("NO APPROVED ENDPOINTS OR MESSAGES CAPTURED."); }
   const diagnosticLines = diagnostics.flatMap(line => {

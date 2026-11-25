@@ -1176,6 +1176,20 @@ test("rendered trace PNG draws approved row-linked diagnostics without network o
   delete metadataOnly.rows[0].logMessage;
   assert.match(decodeTracePng(renderTraceImage(metadataOnly, policy)).description,
     /NO APPROVED ENDPOINTS OR MESSAGES CAPTURED/u);
+  const shapePolicy = { ...policy, diagnostics: { ...policy.diagnostics, urlShapes: [
+    { id: "outbound", table: "traces", field: "customDimensions.RequestUri", term: "ItemNumber eq '" }
+  ] } };
+  const shapeEvidence = { ...evidence, rows: [{ ...evidence.rows[2],
+    urlShape: { id: "outbound", characterCount: 2056, termCount: 51 }
+  }] };
+  const shapeImage = decodeTracePng(renderTraceImage(shapeEvidence, shapePolicy));
+  assert.match(shapeImage.description, /ROW 1 URL SHAPE outbound: LOGGED CHARACTERS 2056 - DECODED TERM MATCHES 51/u);
+  assert.doesNotMatch(shapeImage.description, /RequestUri|ItemNumber|https?:|item count: 51/iu);
+  shapeEvidence.rows[0].urlShape.characterCount = null;
+  shapeEvidence.rows[0].urlShape.termCount = null;
+  assert.match(decodeTracePng(renderTraceImage(shapeEvidence, shapePolicy)).description,
+    /LOGGED CHARACTERS NOT CAPTURED - DECODED TERM MATCHES NOT CAPTURED/u);
+  assert.throws(() => renderTraceImage(shapeEvidence, policy), /not an approved measurement/u);
   const unspecifiedLimits = { ...evidence };
   delete unspecifiedLimits.truncated;
   delete unspecifiedLimits.omittedDiagnostics;
@@ -1195,7 +1209,8 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
       subscriptionId: "12345678-1234-1234-1234-123456789abc",
       applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10,
-      diagnostics: { endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed.", "Lookup started."] }
+      diagnostics: { endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed.", "Lookup started."],
+        urlShapes: [{ id: "outbound", table: "traces", field: "customDimensions.RequestUri", term: "ItemNumber eq '" }] }
     }] };
     writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
     const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
@@ -1207,7 +1222,8 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
         { table: "dependencies", timestamp: "2026-11-19T10:01:00.500Z", operation_Id: "op-42",
           operation_ParentId: "|root-42.span.", success: false, resultCode: "404", endpoint: null },
         { table: "traces", timestamp: "2026-11-19T10:01:00.750Z", operation_Id: "op-42",
-          operation_ParentId: null, severityLevel: 1, logMessage: "Lookup started." },
+          operation_ParentId: null, severityLevel: 1, logMessage: "Lookup started.",
+          urlShape: { id: "outbound", characterCount: 2056, termCount: 51 } },
         { table: "traces", timestamp: "2026-11-19T10:01:01Z", operation_Id: "op-42",
           operation_ParentId: null, severityLevel: 3, logMessage: "Backend request failed." }
       ] };
@@ -1215,6 +1231,8 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
       assert.match(request, /traceEvidence/);
       assert.match(request, /incident resolution was not verified/);
       assert.match(request, /Do not infer request size.*HTTP 404\/500 alone/u);
+      assert.match(request, /excluded projection does not prove a value was not logged/u);
+      assert.match(request, /outbound client\/configuration proves that call traverses it/u);
       return { outcome: "analysis", summary: "Observed a failed request; its cause remains unknown.", traceEvidence,
         report: {
           rootCause: "Incident notes attribute this to a batch larger than 50; the request count was not captured in these traces.",
@@ -1228,6 +1246,7 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     const image = decodeTracePng(uploads[0]);
     assert.match(image.description, /ROW 1 API: GET \/v1\/items\/lookup/u);
     assert.match(image.description, /ROW 4 LOG: Backend request failed\./u);
+    assert.match(image.description, /ROW 3 URL SHAPE outbound: LOGGED CHARACTERS 2056 - DECODED TERM MATCHES 51/u);
     assert.doesNotMatch(image.description, /op-42|root-42|Incident notes|larger than 50/u);
     assert.match(text, /!\[Rendered trace results\]\(https:\/\/dev.azure.com\//u);
     assert.match(formatAzureDevOpsComment(text), /<img .*alt="Rendered trace results"/u);
@@ -1239,6 +1258,9 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     const attempt = readTicketAutomationHistory(fixture.repository).attempts[0];
     assert.equal(attempt.traceEvidence.rows[0].endpoint, "GET /v1/items/lookup");
     assert.equal(attempt.traceEvidence.rows[3].logMessage, "Backend request failed.");
+    assert.deepEqual(attempt.traceEvidence.rows[2].urlShape, { id: "outbound", characterCount: 2056, termCount: 51 });
+    assert.match(text, /2056 logged characters, 51 decoded term matches/u);
+    assert.match(text, /Not wire bytes or verified item counts; logging may truncate/u);
     assert.equal(attempt.traceEvidence.rows[0].operation_Id, "op-42");
     assert.doesNotMatch(text, /op-42|root-42|operation_Id=|operation_ParentId=|severityLevel=|Lookup started\./u);
     assert.doesNotMatch(text, /Deployment metadata could not be read|Deployed commit|Deployed version unknown/u);

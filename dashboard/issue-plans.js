@@ -21,6 +21,7 @@ const metadata = {
   dependencies: ["timestamp", "operation_Id", "operation_ParentId", "success", "resultCode"],
   exceptions: ["timestamp", "operation_Id", "operation_ParentId", "severityLevel", "type"]
 };
+export const SOURCE_GUIDED_ANALYSIS = "Source-guided incident analysis: follow the controller, service, outbound client, exception mapping and telemetry helper before selecting follow-up evidence. Inspect exactly which fields the code logs and how they become telemetry properties. Distinguish not requested, not returned, absent, truncated and access denied; an excluded projection does not prove a value was not logged. Use observed operation IDs and the same approved UTC window for the smallest next read. Select a reviewed URL-shape measurement when source logs a request URI; never return its raw URL/query. Logged character length is not wire bytes, and decoded term matches are not verified item counts; telemetry truncation can undercount both. Compare actual request-shape evidence with source/documented limits and downstream rejection details, testing competing explanations before confirming cause. Check APIM/gateway evidence only when the outbound client/configuration proves that call traverses it, not merely because the incoming API uses a gateway. Continue independent approved sources; if the next field/source is not approved, report the exact source-grounded gap and required review without changing the profile or broadening access.";
 
 function requireValue(condition, message) {
   if (!condition) { throw new Error(message); }
@@ -70,15 +71,62 @@ function diagnosticLiteral(value, endpoint = false) {
 
 function reviewedDiagnostics(value) {
   if (value === undefined) { return undefined; }
-  record(value, ["endpoints", "messages"]);
+  record(value, ["endpoints", "messages", "urlShapes"]);
   const result = {};
   for (const key of ["endpoints", "messages"]) {
     const values = value[key] ?? [];
     requireValue(Array.isArray(values) && values.length <= 50, "Diagnostic literal lists require at most 50 reviewed values.");
     result[key] = [...new Set(values.map(item => diagnosticLiteral(item, key === "endpoints")))];
   }
-  requireValue(result.endpoints.length + result.messages.length > 0, "Diagnostic output requires reviewed literals.");
+  if (value.urlShapes !== undefined) {
+    requireValue(Array.isArray(value.urlShapes) && value.urlShapes.length <= 5,
+      "URL-shape diagnostics require at most five reviewed measurements.");
+    const ids = new Set();
+    result.urlShapes = value.urlShapes.map(shape => {
+      record(shape, ["id", "table", "field", "term"]);
+      requireValue(typeof shape.id === "string" && /^[a-z][a-z0-9-]{0,39}$/u.test(shape.id) &&
+        !ids.has(shape.id) && Object.hasOwn(metadata, shape.table), "URL-shape measurements require unique IDs and a supported table.");
+      ids.add(shape.id);
+      urlShapeExpression(shape);
+      if (shape.term !== undefined) {
+        text(shape.term, 80);
+        requireValue(credentialFreeTraceText(shape.term, 80) && /^[A-Za-z_][A-Za-z0-9_ .:'()/=-]*$/u.test(shape.term),
+          "URL-shape terms require a reviewed, credential-free fixed predicate.");
+      }
+      return { ...shape };
+    });
+  }
+  requireValue(result.endpoints.length + result.messages.length + (result.urlShapes?.length ?? 0) > 0,
+    "Diagnostic output requires reviewed literals or URL-shape measurements.");
   return result;
+}
+
+function urlShapeExpression(shape) {
+  requireValue(typeof shape.field === "string" && (
+    shape.table === "requests" && shape.field === "url" ||
+    shape.table === "dependencies" && shape.field === "data" ||
+    /^(?:customDimensions|payload)\./u.test(shape.field)
+  ), "URL-shape fields require a source-grounded URL property for the selected table.");
+  return ["url", "data"].includes(shape.field) ? shape.field : fieldExpression(shape.field);
+}
+
+function normalizeUrlShape(value, table, policy) {
+  record(value, ["id", "characterCount", "termCount"]);
+  requireValue(typeof value.id === "string" && /^[a-z][a-z0-9-]{0,39}$/u.test(value.id) &&
+    Object.hasOwn(value, "characterCount"), "URL-shape evidence requires its reviewed measurement and character count.");
+  const definition = policy?.diagnostics?.urlShapes?.find(shape => shape.id === value.id && shape.table === table);
+  requireValue(!policy || definition && (definition.term !== undefined) === Object.hasOwn(value, "termCount"),
+    "URL-shape evidence is not an approved measurement.");
+  for (const key of ["characterCount", "termCount"]) {
+    if (Object.hasOwn(value, key)) {
+      requireValue(value[key] === null || Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= 16777216,
+        "URL-shape evidence requires bounded numeric measurements or null for unavailable values.");
+    }
+  }
+  requireValue(value.termCount === undefined || value.termCount === null ||
+    value.characterCount !== null && value.termCount <= value.characterCount,
+  "URL-shape term matches cannot exceed the observed character count.");
+  return { ...value };
 }
 
 function traceWindow(from, to, maximumMinutes) {
@@ -110,7 +158,7 @@ export function normalizeTraceEvidence(value, policy) {
       "Trace evidence requires a supported table.");
     const columns = metadata[row.table];
     const diagnostic = ["requests", "dependencies"].includes(row.table) ? "endpoint" : "logMessage";
-    record(row, ["table", ...columns, diagnostic]);
+    record(row, ["table", ...columns, diagnostic, "urlShape"]);
     requireValue(columns.every(column => Object.hasOwn(row, column)), "Trace evidence is missing projected metadata.");
     const result = { table: row.table };
     for (const column of columns) {
@@ -131,6 +179,9 @@ export function normalizeTraceEvidence(value, policy) {
           "Trace diagnostic detail is not an approved literal.");
       }
       result[diagnostic] = detail;
+    }
+    if (Object.hasOwn(row, "urlShape")) {
+      result.urlShape = normalizeUrlShape(row.urlShape, row.table, policy);
     }
     return result;
   });
@@ -246,6 +297,7 @@ export function issuePlanContext(configuration) {
     "Use fixlab issue-plan REPOSITORY --environment ENV --plan FILE to preview, then --execute only when normal job/tool/data permissions permit live access. Generate version:1, kind:trace|playwright, workItemId and the exact policyRevision below. Production trace execution additionally requires separately authorized --allow-production-evidence; it never changes the application environment. Unit-only/deferred-live policies remain authoritative.",
     "Trace plans specify source, environment, start/end UTC timestamps, table (traces/requests/dependencies/exceptions), filter ({all:[...]}, {any:[...]} or {field,op,value}) and limit. Operators: eq/ne/has/contains/in/gt/ge/lt/le. Ground payload.* and customDimensions.* fields in source. Discover operation_Id first, then refine within approved limits; empty/truncated/denied evidence does not establish a cause. No raw KQL, arbitrary projections, agent-managed retries or cross-resource queries. The reader owns at most one bounded transient-read retry of the unchanged approved plan. Report its recovery or sanitized final failure; never bypass a redirect, TLS failure, sign-in requirement or missing role.",
     "Readers return bounded traceEvidence for feedback. Diagnostic output is opt-in: only exact reviewed endpoint/message literals are emitted, and unmatched details are explicitly omitted. Never copy raw logs, URLs, query strings or customDimensions into results.",
+    "An optional trace-plan urlShape selects one reviewed diagnostics.urlShapes ID for that table. The service projects only its logged URL character count and optional fixed-term count after one URL decode, never the URL value. Null means not captured/decodable, not zero. Report term matches, not a proven item count, and account for telemetry truncation; these metrics alone do not prove a gateway limit or rejection cause.",
     "Playwright plans specify environment, title and steps. Actions: goto(path), fill/selectOption/assertValue/assertText(value), click/check/uncheck/press(key), assertVisible/assertHidden/assertEnabled/assertDisabled/assertCount(value). Targets are {by:role,role,name}, {by:label,value} or {by:testId,value}, optionally index. Require real assertions and reviewed fixtures/authentication unchanged. Run the same plan before/after a fix and report actual failure/pass; compiled is not executed. Generated tests are transient and never become permanent coverage without explicit approval. When the reviewed fixture supports it, --allow-dev-writes permits any DEV record for this invocation only, after explicit DEV-write approval for this job; never infer permission from a plan, profile or ticket.",
     JSON.stringify(issuePlanDescription(configuration))
   ].join("\n");
@@ -300,7 +352,7 @@ function compileFilter(filter, state, depth = 0) {
 
 export function compileIssuePlan(repository, profile, plan, options = {}) {
   const keys = ["version", "kind", "workItemId", "environment", "policyRevision",
-    ...(plan?.kind === "trace" ? ["source", "start", "end", "table", "filter", "limit"] : ["title", "steps"])];
+    ...(plan?.kind === "trace" ? ["source", "start", "end", "table", "filter", "limit", "urlShape"] : ["title", "steps"])];
   record(plan, keys);
   requireValue(plan.version === 1 && ["trace", "playwright"].includes(plan.kind), "Unsupported issue-plan version or kind.");
   integer(plan.workItemId, 1, Number.MAX_SAFE_INTEGER);
@@ -322,8 +374,23 @@ export function compileIssuePlan(repository, profile, plan, options = {}) {
       : policy.diagnostics?.messages.length ? ["logMessage", plan.table === "traces" ? "message" : "outerMessage"] : null;
     const columns = [...metadata[plan.table], ...(diagnostic ? [diagnostic[0]] : [])];
     const projection = [...metadata[plan.table], ...(diagnostic ? [`${diagnostic[0]} = ${diagnostic[1]}`] : [])];
+    let urlShape;
+    if (plan.urlShape !== undefined) {
+      urlShape = policy.diagnostics?.urlShapes?.find(shape => shape.id === plan.urlShape && shape.table === plan.table);
+      requireValue(typeof plan.urlShape === "string" && urlShape,
+        "The URL-shape measurement is not approved for this source and table.");
+      const source = `tostring(${urlShapeExpression(urlShape)})`;
+      columns.push("observedUrlLength");
+      projection.push(`observedUrlLength = iff(isempty(${source}), long(null), strlen(${source}))`);
+      if (urlShape.term !== undefined) {
+        const decoded = `url_decode(${source})`;
+        columns.push("observedUrlTermCount");
+        projection.push(`observedUrlTermCount = iff(isempty(${decoded}), long(null), countof(${decoded}, ${JSON.stringify(urlShape.term)}, "normal"))`);
+      }
+    }
     const query = `${plan.table}\n| where timestamp between (datetime(${new Date(start).toISOString()}) .. datetime(${new Date(end).toISOString()}))\n| where ${filter}\n| project ${projection.join(", ")}\n| order by timestamp asc\n| take ${limit + 1}`;
     return { kind: "trace", table: plan.table, workItemId: plan.workItemId, planHash, policy, limit, columns, query,
+      ...(urlShape ? { urlShape } : {}),
       timespan: `${new Date(start).toISOString()}/${new Date(end).toISOString()}` };
   }
   const browser = configuration.browser;
@@ -546,6 +613,11 @@ export async function executeTracePlan(compiled, {
     const sanitized = [...row];
     for (const [index, value] of row.entries()) {
       const column = compiled.columns[index];
+      if (["observedUrlLength", "observedUrlTermCount"].includes(column)) {
+        requireValue(value === null || Number.isSafeInteger(value) && value >= 0 && value <= 16777216,
+          "Trace response contained invalid numeric URL-shape evidence; no rows accepted.");
+        continue;
+      }
       if (["endpoint", "logMessage"].includes(column)) {
         requireValue(value === null || typeof value === "string",
           "Trace response contained invalid bounded diagnostic text; no rows accepted.");
@@ -558,6 +630,13 @@ export async function executeTracePlan(compiled, {
       const safeColumn = Object.values(metadata).some(columns => columns.includes(column)) ? column : "unknown column";
       requireValue(!reason, `Trace response contained unsupported metadata in ${safeColumn}: ${reason}; no rows accepted.`);
     }
+    if (compiled.urlShape) {
+      normalizeUrlShape({ id: compiled.urlShape.id,
+        characterCount: sanitized[compiled.columns.indexOf("observedUrlLength")],
+        ...(compiled.urlShape.term !== undefined
+          ? { termCount: sanitized[compiled.columns.indexOf("observedUrlTermCount")] } : {})
+      }, compiled.table, compiled.policy);
+    }
     rows.push(sanitized.map((value, index) => compiled.columns[index] === "success" && typeof value === "string"
       ? value.toLowerCase() === "true" : value));
   }
@@ -566,7 +645,14 @@ export async function executeTracePlan(compiled, {
   const traceEvidence = accepted.length ? normalizeTraceEvidence({
     source: compiled.policy.id, policyRevision: compiled.policy.policyRevision, start, end,
     rows: accepted.slice(0, 10).map(row => ({ table: compiled.table,
-      ...Object.fromEntries(compiled.columns.map((column, index) => [column, row[index]])) })),
+      ...Object.fromEntries(compiled.columns.flatMap((column, index) =>
+        ["observedUrlLength", "observedUrlTermCount"].includes(column) ? [] : [[column, row[index]]])),
+      ...(compiled.urlShape ? { urlShape: { id: compiled.urlShape.id,
+        characterCount: row[compiled.columns.indexOf("observedUrlLength")],
+        ...(compiled.urlShape.term !== undefined
+          ? { termCount: row[compiled.columns.indexOf("observedUrlTermCount")] } : {})
+      } } : {})
+    })),
     truncated: rows.length > Math.min(10, compiled.limit), omittedDiagnostics
   }, compiled.policy) : undefined;
   return { status: table.rows.length > compiled.limit ? "partial" : "passed",

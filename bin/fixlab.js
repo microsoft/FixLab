@@ -63,7 +63,7 @@ import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
 import { ticketAutomationPlan, watchTickets, executeVersionedTicketAgent, reviewInterruptedTicket, reconcileInterruptedTicket } from "../dashboard/ticket-automation.js";
 import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, PERSISTENT_DEV_API_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, SCENARIO_VALIDATION_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
-import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand } from "../dashboard/issue-plans.js";
+import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand, SOURCE_GUIDED_ANALYSIS } from "../dashboard/issue-plans.js";
 import { runSessionRecoveryCommand } from "../dashboard/session-recovery.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { restoreJobWorktree } from "../dashboard/job-worktree.js";
@@ -1154,6 +1154,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   const guidance = [
     ...(analysisEvidence.length ? [analysisEvidenceContext(analysisEvidence)] : []),
     issuePlanContext(issuePlans),
+    SOURCE_GUIDED_ANALYSIS,
     COPILOT_EXECUTION_GUIDANCE,
     ...(request ? [RUNTIME_RECOVERY_GUIDANCE] : []),
     // Interactive sessions use packaged guidance; request prompts go through stdin.

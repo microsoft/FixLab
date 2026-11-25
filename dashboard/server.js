@@ -46,7 +46,7 @@ import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDe
 import { componentRetrievalGuidance } from "./affected-surface.js";
 import { apiAuthenticationConfiguration } from "./api-authentication.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "./analysis-evidence.js";
-import { issuePlanConfiguration, issuePlanContext } from "./issue-plans.js";
+import { issuePlanConfiguration, issuePlanContext, SOURCE_GUIDED_ANALYSIS } from "./issue-plans.js";
 import { createDevWriteApproval, createPpeWriteApproval, createPostBaseApproval, createPostWriteApproval, inspectPostBaseConfiguration, inspectDevApiConfiguration, inspectPpeWriteConfiguration, isOriginWriteApproval, persistentDevApiConfiguration } from "./dev-post.js";
 import { browserConfigurationErrors } from "./repository-setup.js";
 import { applyRepositorySettings, inspectRepositorySettings, localRepository, planRepositorySettings } from "./repository-settings.js";
@@ -1341,6 +1341,7 @@ Repository requirements:
 - Read .github/fixlab/repository-profile.json and all applicable repository instructions; preserve safety, authentication, environment and process ownership.
 ${COPILOT_EXECUTION_GUIDANCE}
 ${RUNTIME_RECOVERY_GUIDANCE}
+${SOURCE_GUIDED_ANALYSIS}
 ${browserDataGuidance}
 ${apiOnly ? API_ONLY_PLAYWRIGHT_GUIDANCE : EXISTING_APPLICATION_GUIDANCE}
 ${apiOnly && useDeployedBackend ? "useDeployedBackend=true: use the configured deployed API; never start local .NET/Key Vault." : ""}

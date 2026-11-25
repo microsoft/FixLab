@@ -80,6 +80,10 @@ not an Azure Portal screenshot or validation proof. Diagnostic lines refer to th
 timestamped table rows; missing routes are marked not captured. Private identifiers,
 URLs and payloads stay excluded; unavailable images are explicitly reported without
 blocking text findings.
+Incident analysis follows the failing source path and logged telemetry properties
+before choosing a correlated follow-up. Reviewed URL-shape diagnostics can return
+logged lengths and filter-term counts without exposing raw URLs; missing fields,
+truncation and gateway involvement remain explicit evidence questions, not guesses.
 Optional [incident evidence helpers](docs/commands.md#incident-evidence-helpers)
 make approved, environment-bound Cosmos/trace tooling discoverable without
 automatically connecting, copying credentials or granting production access.

@@ -163,6 +163,58 @@ infer a request limit violation or oversized URL from HTTP 404/500 or passing
 unit tests. State the next authorized recovery action without widening scope
 or bypassing sign-in, permissions, TLS or diagnostic-literal approval.
 
+### Source-guided URL-shape diagnostics
+
+Follow the failing controller/service/outbound client and its telemetry helper
+before querying. Check actual logged property names and serialization. A missing
+field in the reader's projection is **not requested**, not evidence that it was
+never logged. Use an observed operation ID in the same approved UTC window.
+Inspect APIM only if outbound client/configuration shows that call traverses it;
+the incoming API gateway can be a different hop.
+
+An optional reviewed diagnostic definition exposes only computed numeric metadata:
+
+```json
+{
+  "diagnostics": {
+    "urlShapes": [
+      {
+        "id": "outbound-lookup",
+        "table": "traces",
+        "field": "customDimensions.RequestUri",
+        "term": "ItemNumber eq '"
+      }
+    ]
+  }
+}
+```
+
+These are illustrative source-grounded names, not a grant or an incident finding.
+There may be up to five uniquely named definitions. A definition binds one table
+and URL property: `url` for requests, `data` for dependencies, or a grounded
+`customDimensions.*`/`payload.*` property. The optional fixed predicate is at most
+80 credential-free characters. No arbitrary KQL, regular expression, value
+projection or raw URL is accepted. A trace plan selects one definition with
+`"urlShape": "outbound-lookup"` and the freshly reviewed policy revision; omitting
+it preserves metadata-only behavior. Changing the definition invalidates approval.
+
+The service computes `observedUrlLength` and, when configured,
+`observedUrlTermCount` after one URL decode. Missing/empty URL properties or
+unavailable decoding produce `null`, never a zero-shaped success. Returned
+measurements must be null or integers from 0 to 16,777,216; term matches cannot
+exceed observed characters. Raw URLs/query values stay at the telemetry service.
+Bounded evidence retains `urlShape: {id, characterCount, termCount?}` on the
+timestamped row. Feedback and PNGs show these approved numeric observations.
+
+Length means **logged characters**, not encoded wire bytes. A term count means
+observed decoded matches, not a verified number of distinct input items.
+Logging/ingestion truncation can undercount both, even when no result rows were
+truncated. Compare actual request construction, documented limits and correlated
+downstream rejection details; neither a long logged URL nor HTTP 404/500 alone
+proves why a service rejected the request. Distinguish not requested, not returned,
+truncated, absent and access denied. Unapproved fields/sources require review,
+not profile edits by the investigating agent or silently widened access.
+
 ## Reviewed browser adapter
 
 Enable `browserAutomation.testSynthesis.enabled`, configure a repository-local

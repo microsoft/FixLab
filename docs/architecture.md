@@ -164,6 +164,16 @@ the module ships in the existing `dashboard` package directory.
 The image is explicitly **Rendered trace results**, observed evidence, not a
 Portal screenshot, causal proof or application validation. It uses no uploaded
 user screenshot and causes no additional telemetry read.
+Source-guided incident analysis is shared by the dashboard, headless CLI and
+watcher and mirrored in packaged/initialized agent guidance. It follows actual
+client/logging fields and distinguishes excluded projections from missing logs.
+Opt-in URL-shape plans compute numeric diagnostics inside the reviewed telemetry
+query; raw URL/query values never enter returned evidence. Policy, source/table,
+numeric bounds and optional term definitions are rechecked before storage,
+feedback and image rendering. Logged character lengths and decoded fixed-term
+matches are neither wire-byte sizes nor verified item counts; telemetry truncation
+can undercount them. APIM is a follow-up source only when outbound configuration
+establishes that path. No new reader/source approval is inferred from this guidance.
 
 The configured ADO project receives at most one bounded 64 KiB PNG upload per
 feedback phase. A private `uploading` receipt is saved before the request;
