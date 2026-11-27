@@ -348,6 +348,13 @@ function commentTableCells(line) {
 export function formatAzureDevOpsComment(text) {
   const escaped = text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   return escaped.split("\n\n").map(block => {
+    const image = block.match(/^!\[Rendered trace results( - full size)?\]\((https:\/\/dev\.azure\.com\/(?:[A-Za-z0-9_.~!'()*-]|%[A-Fa-f0-9]{2})+\/(?:[A-Za-z0-9_.~!'()*-]|%[A-Fa-f0-9]{2})+\/_apis\/wit\/attachments\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\)$/u);
+    if (image) {
+      if (!image[1]) { return `<img src="${image[2]}" alt="Rendered trace results">`; }
+      const link = `<a href="${image[2]}" target="_blank" rel="noopener noreferrer">`;
+      return `${link}Open full-size trace image</a><br>${link}` +
+        `<img src="${image[2]}" alt="Rendered trace results" style="max-width:100%;height:auto"></a>`;
+    }
     const [heading, ...lines] = block.split("\n");
     const hasHeading = heading.startsWith("## ");
     const [header = [], separator = [], ...rows] =
@@ -356,7 +363,7 @@ export function formatAzureDevOpsComment(text) {
         separator.every(cell => /^:?-{3,}:?$/u.test(cell)) && rows.length &&
         rows.every(row => row.length === header.length)) {
       return `${hasHeading ? `<h3>${heading.slice(3)}</h3>` : ""}` +
-        `<table border="1" cellpadding="6" cellspacing="0"><thead><tr>${header.map(cell => `<th>${cell}</th>`).join("")}</tr></thead>` +
+        `<table width="100%" border="1" cellpadding="6" cellspacing="0" style="table-layout:fixed;overflow-wrap:anywhere;word-break:break-word"><thead><tr>${header.map((cell, index) => `<th${header.length === 2 && index === 0 ? ' width="30%"' : ""}>${cell}</th>`).join("")}</tr></thead>` +
         `<tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${cell}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
     }
     if (heading.startsWith("## ") && lines.length && lines.every(line => line.startsWith("- "))) {
@@ -400,7 +407,8 @@ function defaultTokenProvider() {
 
 function defaultRequestJson(url, token, { method = "GET", body, contentType = "application/json" } = {}) {
   return new Promise((resolveRequest, reject) => {
-    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const payload = body === undefined ? undefined :
+      Buffer.isBuffer(body) && contentType === "application/octet-stream" ? body : JSON.stringify(body);
     if (payload && Buffer.byteLength(payload) > 64 * 1024) {
       reject(new Error("Azure DevOps request exceeded 64 KiB"));
       return;
@@ -835,6 +843,25 @@ export function createAzureDevOpsTicketClient({
     throw new Error("Existing feedback could not be fully checked; no duplicate comment was posted.");
   }
   return {
+    traceImageUrl(id) {
+      if (typeof id !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(id)) {
+        throw new Error("Trace images require an exact attachment identity.");
+      }
+      return `${base}/wit/attachments/${id}`;
+    },
+    async uploadTraceImage(bytes) {
+      if (!Buffer.isBuffer(bytes) || bytes.length < 45 || bytes.length > 64 * 1024 ||
+          !hasValidSignature(bytes, "image/png")) {
+        throw new Error("Trace images require a bounded PNG.");
+      }
+      const result = await request("wit/attachments?fileName=rendered-trace-results.png&api-version=7.1", {
+        method: "POST", contentType: "application/octet-stream", body: bytes
+      });
+      if (typeof result?.id !== "string" || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(result.id)) {
+        throw new Error("Azure DevOps did not confirm the trace attachment identity.");
+      }
+      return result.id;
+    },
     async findTagged(tag, areaPaths) {
       if (typeof tag !== "string" || !tag.trim() || tag.length > 100 || /[\r\n;]/u.test(tag)) {
         throw new Error("Automation requires one bounded work-item tag.");

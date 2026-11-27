@@ -740,7 +740,7 @@ test("repository profile template offers configurable test and UAT environments"
   assert.equal(profile.environments.includes("production"), false);
 });
 
-test("Agency executor keeps long prompts out of process arguments", () => {
+test("Agency executor passes the stable Copilot agent through and keeps long prompts out of arguments", () => {
   const prompt = `Fix this batch:\n${"x".repeat(40000)}`;
   const invocation = buildAgencyInvocation({
     packageRoot: "C:\\FixLab",
@@ -764,16 +764,16 @@ test("Agency executor keeps long prompts out of process arguments", () => {
   assert.equal(invocation.input, prompt);
   assert.equal(invocation.args.includes(prompt), false);
   assert.equal(invocation.args.includes("--interactive"), false);
-  assert.deepEqual(invocation.args.slice(0, 5), [
+  assert.deepEqual(invocation.args.slice(0, 9), [
     "copilot",
+    "--session-id",
+    "11111111-1111-4111-8111-111111111111",
+    "--",
     "--plugin-dir",
     "C:\\FixLab",
     "--agent",
-    "fixlab:fixlab"
-  ]);
-  assert.deepEqual(invocation.args.slice(-2), [
-    "--session-id",
-    "11111111-1111-4111-8111-111111111111"
+    "fixlab:fixlab",
+    "--no-ask-user"
   ]);
 
   const resumed = buildAgencyInvocation({
@@ -782,7 +782,10 @@ test("Agency executor keeps long prompts out of process arguments", () => {
     sessionId: "11111111-1111-4111-8111-111111111111",
     resume: true
   });
-  assert.equal(resumed.args.includes("--session-id"), false);
+  assert.deepEqual(resumed.args.slice(0, 9), invocation.args.slice(0, 9));
+  assert.equal(resumed.input, prompt);
+  assert.equal(resumed.args.includes(prompt), false);
+  assert.ok(resumed.args.indexOf("--agent") > resumed.args.indexOf("--"));
   assert.equal(
     resumed.args.at(-1),
     "--resume=11111111-1111-4111-8111-111111111111"
@@ -2861,8 +2864,8 @@ test("POST checkbox write consent is origin-bound, job-scoped and never recovere
   }
 });
 
-for (const environment of ["dev", "ppe"]) {
-test(`${environment.toUpperCase()} write checkbox requires fresh native loopback consent and loses broad approval on hold/recovery`, async () => {
+for (const [environment, pathScoped] of [["dev", false], ["ppe", false], ["dev", true]]) {
+test(`${environment.toUpperCase()} ${pathScoped ? "path-scoped " : ""}write checkbox requires fresh native loopback consent and loses broad approval on hold/recovery`, async () => {
   const repository = createGitRepository();
   const writeField = environment === "dev" ? "allowDevWrites" : "allowPpeWrites";
   const confirmField = environment === "dev" ? "devWriteApprovalConfirmed" : "ppeWriteApprovalConfirmed";
@@ -2874,7 +2877,9 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
   }
   profile.browserAutomation.dataSafety[`${environment}Write`] = {
     scope: "api://example-service/access", sessionHelper: "dev-session.mjs",
-    origins: [`https://api.${environment}.example.test`]
+    ...(pathScoped
+      ? { baseUrls: [`https://api.shared.example.test/api/${environment}/v1/families`] }
+      : { origins: [`https://api.${environment}.example.test`] })
   };
   writeFileSync(join(repository, "dev-session.mjs"),
     'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
@@ -2912,10 +2917,13 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
     assert.equal(created.body.job[approvedField], true);
     assert.equal(created.body.job[environment === "dev" ? "ppeWriteApproved" : "devWriteApproved"], false);
     assert.equal(created.body.job.postWriteApproved, false);
-    assert.equal(launches[0].postWriteApproval.mode, `${environment}-origin`);
+    assert.equal(launches[0].postWriteApproval.mode, `${environment}-${pathScoped ? "base" : "origin"}`);
     assert.equal(launches[0].postWriteApproval.jobId, created.body.job.id);
     assert.equal(launches[0].allowPostRequests, true);
     assert.match(launches[0].prompt, new RegExp(`fixlab_${environment}_write.*POST, PUT, PATCH and DELETE`, "u"));
+    if (pathScoped) {
+      assert.match(launches[0].prompt, /dataSafety\.devWrite\.baseUrls HTTPS API bases/u);
+    }
     if (environment === "ppe") {
       assert.equal(created.body.job.runAllUiScenarios, true);
       assert.match(launches[0].prompt, /run every repository-defined Playwright\/UI scenario/);
@@ -2936,7 +2944,7 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
     });
     assert.equal(held.body.held[0][approvedField], false);
     const snapshot = readFileSync(join(dirname(createCacheContext(repository).cachePath), "dashboard-jobs.json"), "utf8");
-    assert.doesNotMatch(snapshot, /"postWriteApproval":|"(dev|ppe)-origin"|"(dev|ppe)WriteApproved":true/u);
+    assert.doesNotMatch(snapshot, /"postWriteApproval":|"(dev|ppe)-(origin|base)"|"(dev|ppe)WriteApproved":true/u);
     await running.dashboard.close();
     running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
     assert.equal((await jsonRequest(running.url, "/api/status")).body.job[approvedField], false);
@@ -5258,6 +5266,40 @@ test("job prompts omit irrelevant publication guidance and keep one output contr
       assert.doesNotMatch(prompt, /Prefix FixLab-created pull-request titles|commit\/push the authorized checkpoint|Reusable PR learning/u);
       assert.match(prompt, /full regression is explicitly deferred, not passed/u);
       assert.match(prompt, /Runtime permissions and human authentication remain separate approvals/u);
+    }
+  }
+});
+
+test("source-guided incident analysis reaches configured diagnostic jobs without expanding browser-only prompts", async () => {
+  for (const [mode, traces, expected] of [
+    ["validate-only", true, true], ["playwright-only", true, false], ["validate-only", false, false]
+  ]) {
+    const repository = createRepository();
+    const profile = validProfile({
+      analysis: { traceQueries: traces ? [{
+        id: "app-traces", environment: "dev",
+        subscriptionId: "12345678-1234-1234-1234-123456789abc",
+        applicationId: "23456789-1234-1234-1234-123456789abc",
+        maxWindowMinutes: 30, maxRows: 10
+      }] : [] }
+    });
+    writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(profile));
+    let captured = "";
+    const { dashboard, url } = await startDashboard(repository, ({ prompt }) => {
+      captured = prompt;
+      return { completion: new Promise(() => {}), terminate() {} };
+    }, undefined, { preflight: () => [] });
+    try {
+      const result = await jsonRequest(url, "/api/jobs", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request: "Investigate the reported failure.", mode, targetEnvironment: "dev" })
+      });
+      assert.equal(result.response.status, 202, JSON.stringify(result.body));
+      assert.ok(captured, JSON.stringify(result.body));
+      assert.equal(captured.includes("Source-guided incident analysis:"), expected);
+    } finally {
+      await dashboard.close();
+      rmSync(repository, { recursive: true, force: true });
     }
   }
 });

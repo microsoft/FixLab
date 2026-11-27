@@ -5,8 +5,90 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { compileIssuePlan, executeBrowserPlan, executeTracePlan, issuePlanConfiguration, issuePlanContext } from "../dashboard/issue-plans.js";
+import { compileIssuePlan, executeBrowserPlan, executeTracePlan, issuePlanConfiguration, issuePlanContext, normalizeTraceEvidence, SOURCE_GUIDED_ANALYSIS, verifyTracePlanApproval } from "../dashboard/issue-plans.js";
 import Reporter from "../bin/issue-plan-reporter.js";
+import { createHash } from "node:crypto";
+import { claimErrorPreviewApproval, readErrorPreviewApproval, sanitizeErrorPreview } from "../dashboard/error-preview.js";
+
+test("single-record error preview requires exact fresh approval and never exports raw diagnostics", async t => {
+  const f = fixture(t);
+  const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const plan = { ...f.trace, limit: 1, filter: { field: "operation_Id", op: "eq", value: "private-operation" } };
+  const approval = { version: 1, workItemId: 42, source: plan.source, planHash: hash(plan),
+    policyRevision: plan.policyRevision, profileHash: hash(f.profile),
+    timestamp: "2026-11-19T10:01:00.000Z", expiresAt: new Date(Date.now() + 600000).toISOString(), maxCharacters: 200 };
+  const options = { ...f.options, errorPreviewApproval: approval };
+  const compiled = compileIssuePlan(f.repository, f.profile, plan, options);
+  assert.deepEqual(compiled.columns, ["timestamp", "severityLevel", "logMessage"]);
+  assert.match(compiled.query, /timestamp == datetime\(2026-11-19T10:01:00.000Z\) and severityLevel >= 3/u);
+  assert.doesNotMatch(compiled.query.split("| project")[1], /operation_Id|Payload|customDimensions/u);
+  for (const change of [{ planHash: "0".repeat(64) }, { workItemId: 43 }, { profileHash: "0".repeat(64) },
+    { timestamp: "2026-11-19T10:16:00.000Z" }, { expiresAt: "2000-01-01T00:00:00.000Z" },
+    { maxCharacters: 201 }]) {
+    assert.throws(() => compileIssuePlan(f.repository, f.profile, plan, {
+      ...options, errorPreviewApproval: { ...approval, ...change }
+    }), /single-record approval/u);
+  }
+  assert.equal(compileIssuePlan(f.repository, f.profile, plan, f.options).errorPreview, undefined);
+  const body = rows => new Response(JSON.stringify({ tables: [{
+    columns: compiled.columns.map(name => ({ name })), rows
+  }] }));
+  const raw = "HTTP 400 Bad Request for user alice@example.test at https://private.invalid/a?secret=value";
+  const request = async () => body([[approval.timestamp, 3, raw]]);
+  await assert.rejects(executeTracePlan(compiled, { tokenProvider: () => "synthetic", request }), /revalidation/u);
+  const transport = { tokenProvider: () => "synthetic", request, verifyApproval: () => {} };
+  const result = await executeTracePlan(compiled, transport);
+  assert.deepEqual(result.columns, ["timestamp", "error"]);
+  assert.equal(result.rows.length, 1);
+  assert.match(result.rows[0][1], /HTTP 400 Bad Request/u);
+  assert.doesNotMatch(JSON.stringify(result), /alice@|private.invalid|secret=value|operation|severityLevel|traceEvidence/u);
+  assert.equal(result.errorPreview.redacted, true);
+  for (const rows of [[[approval.timestamp, 2, "Wrong severity."]],
+    [["2026-11-19T10:02:00Z", 3, "Wrong record."]],
+    [["2026-11-19T10:01:00.0000001Z", 3, "Wrong sub-millisecond record."]],
+    [[approval.timestamp, 3, "First"], [approval.timestamp, 3, "Ambiguous"]]]) {
+    await assert.rejects(executeTracePlan(compiled, { ...transport, request: async () => body(rows) }), /no messages accepted/u);
+  }
+  const preciseApproval = { ...approval, timestamp: "2026-11-19T10:01:00.0001234Z" };
+  const precise = compileIssuePlan(f.repository, f.profile, plan, { ...options, errorPreviewApproval: preciseApproval });
+  assert.ok(precise.query.includes(`datetime(${preciseApproval.timestamp})`));
+  const preciseResult = await executeTracePlan(precise, {
+    ...transport, request: async () => body([[preciseApproval.timestamp, 3, "HTTP 400 Bad Request."]])
+  });
+  assert.deepEqual(preciseResult.rows, [[preciseApproval.timestamp, "HTTP 400 Bad Request."]]);
+  let attempts = 0;
+  await assert.rejects(executeTracePlan(compiled, { ...transport, request: async () => {
+    attempts++;
+    throw Object.assign(new Error("private"), { code: "ECONNRESET" });
+  } }), /after 1 attempt/u);
+  assert.equal(attempts, 1);
+  const path = join(f.repository, "reviewed-preview.json");
+  writeFileSync(path, JSON.stringify(approval));
+  const record = readErrorPreviewApproval(path);
+  const cli = spawnSync(process.execPath, [fileURLToPath(new URL("../bin/fixlab.js", import.meta.url)),
+    "issue-plan", f.repository, "--environment", "dev", "--plan", "-", "--error-preview-approval", path], {
+    input: JSON.stringify(plan), encoding: "utf8", timeout: 30000
+  });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.equal(JSON.parse(cli.stdout).query, compiled.query);
+  claimErrorPreviewApproval(record);
+  assert.throws(() => claimErrorPreviewApproval(record), /EEXIST/u);
+});
+
+test("error preview redacts before truncating and omits payloads, credentials and stack traces", () => {
+  for (const value of ['Error: {"password":"private"}', "Error password=private", "Error\n at Private.Frame()",
+    "<xml>private</xml>", "Bearer private", "Error eyJhbGciOiJIUzI1NiJ9.private.signature"]) {
+    assert.equal(sanitizeErrorPreview(value).message, null);
+  }
+  const result = sanitizeErrorPreview("HTTP 500 failed for 'private-record' 12345678-1234-1234-1234-123456789abc " +
+    "customer abc123 file C:\\private\\secret.txt. " + "retry ".repeat(100));
+  assert.ok(result.message.length <= 200);
+  assert.equal(result.truncated, true);
+  assert.doesNotMatch(result.message, /private-record|12345678|abc123|C:\\private/u);
+  assert.equal(sanitizeErrorPreview("HTTP 400 Bad Request.").message, "HTTP 400 Bad Request.");
+  assert.equal(sanitizeErrorPreview("Can't complete the request.").message, "Can't complete the request.");
+  assert.equal(sanitizeErrorPreview("Error 'unclosed-private-value").message, null);
+});
 
 function fixture(t) {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-issue-plan-"));
@@ -119,6 +201,105 @@ test("trace transport sends bounded compiled KQL once and preserves only metadat
       error => !/sensitive|raw denial/u.test(error.message));
     assert.equal(attempted, 1);
   }
+});
+
+test("trace read recovery retries only transient failures with the same approved request", async t => {
+  for (const failure of ["ECONNRESET", "UND_ERR_CONNECT_TIMEOUT", "EAI_AGAIN", 503, 429]) {
+    const f = fixture(t);
+    const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+    const original = structuredClone(compiled);
+    const attempts = [];
+    const delays = [];
+    let tokens = 0;
+    const result = await executeTracePlan(compiled, {
+      tokenProvider: async () => { tokens += 1; return "unit-test-placeholder"; },
+      wait: async milliseconds => { delays.push(milliseconds); },
+      request: async (url, options) => {
+        attempts.push({ url, method: options.method, redirect: options.redirect,
+          headers: options.headers, body: options.body });
+        if (attempts.length === 1) {
+          compiled.query = "unapproved query";
+          compiled.policy.applicationId = "unapproved-application";
+          if (typeof failure === "number") {
+            return new Response("private denial body", { status: failure, headers: { "retry-after": "0" } });
+          }
+          throw new TypeError("private transport details", { cause: { code: failure } });
+        }
+        return new Response(JSON.stringify({ tables: [
+          { columns: original.columns.map(name => ({ name })),
+            rows: [["2026-11-19T10:01:00Z", "op-42", null, 3]] }
+        ] }));
+      }
+    });
+    assert.equal(result.status, "passed");
+    assert.equal(result.recovery.attempts, 2);
+    assert.equal(tokens, 1);
+    assert.equal(delays.length, 1);
+    assert.ok(delays[0] >= 0 && delays[0] <= 2000);
+    assert.deepEqual(attempts[1], attempts[0]);
+    assert.equal(JSON.parse(attempts[1].body).query, original.query);
+    assert.ok(attempts[1].url.endsWith(`/${original.policy.applicationId}/query`));
+    assert.doesNotMatch(JSON.stringify(result), /private|unapproved/u);
+  }
+});
+
+test("trace read recovery stops at two attempts and reports sanitized missing evidence", async t => {
+  const f = fixture(t);
+  const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+  let calls = 0;
+  await assert.rejects(executeTracePlan(compiled, {
+    tokenProvider: async () => "unit-test-placeholder", wait: async () => {},
+    request: async () => {
+      calls += 1;
+      throw new TypeError("Bearer private-token https://private.example.test", { cause: { code: "ECONNRESET" } });
+    }
+  }), error => error.code === "TRACE_READ_CONNECTION_RESET" && error.attempts === 2 &&
+    /2 attempts.*no rows accepted.*diagnostic evidence is still missing/u.test(error.message) &&
+    !/private|Bearer|https:/u.test(error.message));
+  assert.equal(calls, 2);
+});
+
+test("trace read recovery does not bypass denial, redirects, TLS, throttling or changed approval", async t => {
+  const f = fixture(t);
+  const compiled = compileIssuePlan(f.repository, f.profile, f.trace, f.options);
+  for (const failure of [
+    async () => new Response("private denial", { status: 401 }),
+    async () => new Response("private denial", { status: 403 }),
+    async () => new Response("private redirect", { status: 302 }),
+    async () => new Response("private throttling", { status: 429, headers: { "retry-after": "120" } }),
+    async () => new Response("private throttling", { status: 503, headers: { "retry-after": "invalid" } }),
+    async () => new Response("private throttling", { status: 503, headers: { "retry-after": "-1" } }),
+    async () => { throw new TypeError("private details", { cause: { message: "unexpected redirect" } }); },
+    async () => { throw new TypeError("private details", { cause: { code: "CERT_HAS_EXPIRED" } }); },
+    async () => { throw Object.assign(new Error("private details", { cause: { code: "CERT_HAS_EXPIRED" } }),
+      { name: "TimeoutError" }); },
+    async () => ({ status: 503, headers: new Headers(), body: {
+      cancel: async () => { throw new Error("private cleanup failure"); }
+    } }),
+    async () => { throw new Error("private unknown failure"); }
+  ]) {
+    let calls = 0;
+    let waits = 0;
+    await assert.rejects(executeTracePlan(compiled, {
+      tokenProvider: async () => "unit-test-placeholder",
+      wait: async () => { waits += 1; },
+      request: async () => { calls += 1; return failure(); }
+    }), error => !/private/u.test(error.message));
+    assert.equal(calls, 1);
+    assert.equal(waits, 0);
+  }
+  let calls = 0;
+  await assert.rejects(executeTracePlan(compiled, {
+    tokenProvider: async () => "unit-test-placeholder",
+    verifyApproval: () => verifyTracePlanApproval(f.repository, f.profile, f.trace, f.options, compiled),
+    wait: async () => {
+      const changed = structuredClone(f.profile);
+      changed.analysis.traceQueries[0].maxRows = 9;
+      writeFileSync(join(f.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(changed));
+    },
+    request: async () => { calls += 1; return new Response("", { status: 503 }); }
+  }), error => error.code === "TRACE_READ_APPROVAL_CHANGED" && error.attempts === 1);
+  assert.equal(calls, 1);
 });
 
 test("trace request and dependency success accepts canonical wire booleans without truthy coercion", async t => {
@@ -258,6 +439,106 @@ test("trace diagnostics expose only reviewed route and message literals and disc
     f.profile.analysis.traceQueries[0].diagnostics.messages = [message];
     assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"), /credential/u);
   }
+});
+
+test("URL-shape plans select reviewed source fields without widening default or production projections", t => {
+  const f = fixture(t);
+  const shape = { id: "outbound-lookup", table: "traces", field: "customDimensions.RequestUri", term: "ItemNumber eq '" };
+  f.policy.diagnostics = { urlShapes: [shape] };
+  const configuration = issuePlanConfiguration(f.repository, f.profile, "dev");
+  const plan = { ...f.trace, policyRevision: configuration.traces[0].policyRevision };
+  const ordinary = compileIssuePlan(f.repository, f.profile, plan, f.options);
+  assert.doesNotMatch(ordinary.query, /RequestUri|observedUrl/u);
+  const compiled = compileIssuePlan(f.repository, f.profile, { ...plan, urlShape: shape.id }, f.options);
+  assert.match(compiled.query, /observedUrlLength = iff\(isempty\(tostring\(customDimensions\["RequestUri"\]\)\), long\(null\), strlen/u);
+  assert.match(compiled.query, /observedUrlTermCount = iff\(isempty\(url_decode/u);
+  assert.ok(compiled.query.includes(`countof(url_decode(tostring(customDimensions["RequestUri"])), ${JSON.stringify(shape.term)}, "normal")`));
+  assert.deepEqual(compiled.columns.slice(-2), ["observedUrlLength", "observedUrlTermCount"]);
+  assert.ok(!compiled.columns.includes("RequestUri"));
+  for (const change of [{ urlShape: "unreviewed" }, { urlShape: { field: "url" } },
+    { urlShape: shape.id, table: "dependencies" }, { projection: ["url"] }]) {
+    assert.throws(() => compileIssuePlan(f.repository, f.profile, { ...plan, ...change }, f.options));
+  }
+  for (const invalid of [{ ...shape, field: 'customDimensions.X"] | take 99' },
+    { ...shape, field: "message" }, { ...shape, table: "requests", field: "data" },
+    { ...shape, term: "Authorization=Bearer synthetic-secret" },
+    { ...shape, term: 'Item" | take 99' }, { ...shape, unknown: true }]) {
+    f.policy.diagnostics.urlShapes = [invalid];
+    assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"));
+  }
+  f.policy.diagnostics.urlShapes = [shape, shape];
+  assert.throws(() => issuePlanConfiguration(f.repository, f.profile, "dev"), /unique/u);
+  for (const [table, field] of [["requests", "url"], ["dependencies", "data"], ["exceptions", "payload.RequestUri"]]) {
+    f.policy.diagnostics.urlShapes = [{ id: shape.id, table, field }];
+    const policy = issuePlanConfiguration(f.repository, f.profile, "dev").traces[0];
+    const result = compileIssuePlan(f.repository, f.profile, {
+      ...plan, table, policyRevision: policy.policyRevision, urlShape: shape.id
+    }, f.options);
+    assert.equal(result.columns.at(-1), "observedUrlLength");
+    assert.doesNotMatch(result.query, /observedUrlTermCount/u);
+  }
+  f.policy.environment = "production";
+  f.policy.diagnostics.urlShapes = [shape];
+  const production = issuePlanConfiguration(f.repository, f.profile, "dev", true).traces[0];
+  assert.throws(() => compileIssuePlan(f.repository, f.profile, {
+    ...plan, environment: "production", policyRevision: production.policyRevision, urlShape: shape.id
+  }, f.options), /unavailable/u);
+  assert.match(SOURCE_GUIDED_ANALYSIS, /excluded projection does not prove a value was not logged/u);
+  assert.match(SOURCE_GUIDED_ANALYSIS, /same approved UTC window/u);
+  assert.match(SOURCE_GUIDED_ANALYSIS, /outbound client\/configuration proves/u);
+  assert.match(issuePlanContext(configuration), /Null means not captured\/decodable, not zero/u);
+});
+
+test("URL-shape transport preserves numeric evidence and unknowns but rejects raw or forged diagnostics", async t => {
+  const f = fixture(t);
+  const shape = { id: "outbound-lookup", table: "traces", field: "customDimensions.RequestUri", term: "ItemNumber eq '" };
+  f.policy.diagnostics = { urlShapes: [shape] };
+  const policy = issuePlanConfiguration(f.repository, f.profile, "dev").traces[0];
+  const compiled = compileIssuePlan(f.repository, f.profile, {
+    ...f.trace, policyRevision: policy.policyRevision, urlShape: shape.id
+  }, f.options);
+  const base = ["2026-11-19T10:01:00Z", "op-42", null, 1];
+  const execute = measurements => executeTracePlan(compiled, {
+    tokenProvider: async () => "unit-test-placeholder",
+    request: async () => new Response(JSON.stringify({ tables: [
+      { columns: compiled.columns.map(name => ({ name })), rows: measurements.map(values => [...base, ...values]) }
+    ] }))
+  });
+  const result = await execute([[2056, 51], [null, null], [42, 0], [42, null]]);
+  assert.deepEqual(result.traceEvidence.rows.map(row => row.urlShape), [
+    { id: shape.id, characterCount: 2056, termCount: 51 },
+    { id: shape.id, characterCount: null, termCount: null },
+    { id: shape.id, characterCount: 42, termCount: 0 },
+    { id: shape.id, characterCount: 42, termCount: null }
+  ]);
+  assert.doesNotMatch(JSON.stringify(result), /RequestUri|https?:|ItemNumber|itemCount/u);
+  for (const invalid of [["https://private.example.test?token=private", 1], ["2056", 51],
+    [NaN, 1], [-1, 0], [16777217, 0], [1.5, 0], [null, 1], [1, 2]]) {
+    await assert.rejects(execute([invalid]), error => /URL-shape/u.test(error.message) && !/private/u.test(error.message));
+  }
+  const evidence = result.traceEvidence;
+  for (const invalid of [{ id: "unreviewed", characterCount: 42 }, { id: shape.id, characterCount: 42 },
+    { id: shape.id, characterCount: 42, termCount: 1, url: "private" }]) {
+    assert.throws(() => normalizeTraceEvidence({ ...evidence, rows: [
+      { ...evidence.rows[0], urlShape: invalid }
+    ] }, policy));
+  }
+  assert.throws(() => normalizeTraceEvidence(evidence, { ...policy, diagnostics: { urlShapes: [] } }), /approved measurement/u);
+});
+
+test("changing a reviewed URL-shape source invalidates the plan before authentication", async t => {
+  const f = fixture(t);
+  f.policy.diagnostics = { urlShapes: [{ id: "outbound", table: "traces", field: "customDimensions.RequestUri" }] };
+  const policy = issuePlanConfiguration(f.repository, f.profile, "dev").traces[0];
+  const plan = { ...f.trace, policyRevision: policy.policyRevision, urlShape: "outbound" };
+  const compiled = compileIssuePlan(f.repository, f.profile, plan, f.options);
+  f.policy.diagnostics.urlShapes[0].field = "customDimensions.OtherUri";
+  writeFileSync(join(f.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(f.profile));
+  await assert.rejects(executeTracePlan(compiled, {
+    verifyApproval: () => verifyTracePlanApproval(f.repository, f.profile, plan, f.options, compiled),
+    tokenProvider: () => assert.fail("Changed measurement must stop before authentication."),
+    request: () => assert.fail("Changed measurement must stop before dispatch.")
+  }), error => error.code === "TRACE_READ_APPROVAL_CHANGED" && error.attempts === 0);
 });
 
 test("browser plans generate runnable grounded actions and non-leaking assertions, not arbitrary scripts", t => {

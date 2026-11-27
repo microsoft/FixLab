@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { canonicalExecutionRepository, createExecutorLease } from "./executor-lease.js";
 import { spawnWindowsExecutor } from "./windows-executor.js";
 import { applyWorktreeSetup, planWorktreeSetup, setupPath, SETUP_PROFILE_PATH } from "./repository-setup.js";
+import { resolveEvidenceRoot, runStructuredCommand } from "../bin/structured-command.js";
 
 function git(repository, args) {
   const result = spawnSync("git", args, {
@@ -18,11 +19,11 @@ function git(repository, args) {
   return result.stdout.trim();
 }
 
-function checkoutProfile(repository) {
-  const path = setupPath(repository, SETUP_PROFILE_PATH);
+function checkoutProfile(repository, name = SETUP_PROFILE_PATH) {
+  const path = setupPath(repository, name);
   const info = lstatSync(path);
   if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
-    throw new Error("Checkout recovery requires a bounded regular repository profile.");
+    throw new Error("Checkout recovery requires a bounded regular repository profile or setup file.");
   }
   return readFileSync(path);
 }
@@ -156,8 +157,157 @@ export function assignedJobWorktree({ repository, jobId, branchPrefix = "fixlab"
   return prepareJobWorktree({ repository: receipt.source, jobId, branchPrefix });
 }
 
-export async function restoreJobWorktree({ workspace, packageRoot, runtime, onOutput, signal }) {
+function protectedSnapshotRevision(repository, steps) {
+  const roots = steps.map(step => ({ ...step, directory: setupPath(repository, step.workingDirectory) }));
+  const dependencyOutput = (path, name) => roots.some(root => {
+    const suffix = relative(root.directory, path);
+    return suffix && !isAbsolute(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep}`) &&
+      (name === "node_modules" || (name === "obj" && root.application === "backend"));
+  });
+  const revision = createHash("sha256");
+  const buffer = Buffer.alloc(64 * 1024);
+  let entries = 0;
+  let bytes = 0;
+  const visit = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+      if (directory === repository && entry.name === ".git") { continue; }
+      const path = join(directory, entry.name);
+      if (entry.isDirectory() && dependencyOutput(path, entry.name)) { continue; }
+      if (++entries > 100000) { throw new Error("Dependency preparation exceeded the protected snapshot inventory limit."); }
+      if (entry.isDirectory()) { visit(path); continue; }
+      if (entry.isSymbolicLink()) {
+        revision.update(JSON.stringify([relative(repository, path), "link", readlinkSync(path)]));
+        continue;
+      }
+      if (!entry.isFile()) { throw new Error("Dependency preparation requires regular protected snapshot files or links."); }
+      const info = lstatSync(path);
+      if (!info.isFile()) { throw new Error("A protected snapshot file changed during dependency preparation inventory."); }
+      if ((bytes += info.size) > 512 * 1024 * 1024) {
+        throw new Error("Dependency preparation exceeded the protected snapshot content limit.");
+      }
+      revision.update(JSON.stringify([relative(repository, path), "file", info.size]));
+      const file = openSync(path, "r");
+      try {
+        const opened = fstatSync(file);
+        if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) {
+          throw new Error("A protected snapshot file changed during dependency preparation inventory.");
+        }
+        let length;
+        while ((length = readSync(file, buffer, 0, buffer.length, null)) > 0) {
+          revision.update(buffer.subarray(0, length));
+        }
+      } finally { closeSync(file); }
+    }
+  };
+  visit(repository);
+  return revision.digest("hex");
+}
+
+async function restoreDependencies({ workspace, packageRoot, signal, approvedProfile, timeoutMs }) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2147483000) {
+    throw new Error("Dependency preparation requires a positive bounded timeout.");
+  }
+  const content = checkoutProfile(workspace.repository);
+  if (createHash("sha256").update(content).digest("hex") !== workspace.profileRevision) {
+    throw new Error("Dependency preparation requires this checkout's reviewed profile revision.");
+  }
+  const profile = JSON.parse(content);
+  if (approvedProfile !== undefined && !isDeepStrictEqual(profile, approvedProfile)) {
+    throw new Error("The dependency preparation profile changed since watcher approval; review it and restart the watcher.");
+  }
+  const commands = profile.validation?.commands ?? {};
+  const steps = [];
+  for (const application of ["frontend", "backend", "browser"]) {
+    if (typeof commands[`${application}Restore`] !== "string" || !commands[`${application}Restore`].trim()) { continue; }
+    const workingDirectory = application === "browser"
+      ? profile.browserAutomation?.workingDirectory ?? profile.applications?.frontend?.workingDirectory ?? "."
+      : profile.applications?.[application]?.workingDirectory ?? ".";
+    setupPath(workspace.repository, workingDirectory);
+    steps.push({ application, workingDirectory });
+  }
+  if (!steps.length) {
+    return { ready: false, message: "No dependency restore commands are configured; dependent checks require reviewed setup. Continue independent source analysis; no test is claimed passed." };
+  }
+  const revisions = new Map((profile.worktreeSetup?.files ?? [])
+    .map(name => [name, createHash("sha256").update(checkoutProfile(workspace.repository, name)).digest("hex")]));
+  const originalDiff = git(workspace.repository, ["diff", "HEAD", "--"]);
+  const originalHead = git(workspace.repository, ["rev-parse", "HEAD"]);
+  const originalSource = protectedSnapshotRevision(workspace.repository, steps);
+  const lease = createExecutorLease(workspace.repository, `setup-${workspace.jobId}`, { worktree: true }).acquire(workspace.jobId);
+  const outcomes = [];
+  const diagnostics = new Set();
+  const commandTimeoutSeconds = Math.ceil(timeoutMs / steps.length / 1000);
+  let quiescent = true;
+  try {
+    for (const step of steps) {
+      signal?.throwIfAborted();
+      const directory = setupPath(workspace.repository, step.workingDirectory);
+      let info;
+      try { info = lstatSync(directory); }
+      catch (error) {
+        if (error.code !== "ENOENT") { throw error; }
+        outcomes.push({ ready: false, message: `${step.application} restore directory is missing inside the owned checkout` });
+        continue;
+      }
+      if (!info.isDirectory()) {
+        outcomes.push({ ready: false, message: `${step.application} restore directory is not a directory` });
+        continue;
+      }
+      const evidenceRoot = resolveEvidenceRoot(workspace.repository);
+      const gitDirectory = realpathSync.native(resolve(evidenceRoot, "..", ".."));
+      setupPath(gitDirectory, join("fixlab", "command-evidence"));
+      let result;
+      const code = await runStructuredCommand([
+        "--stage", `watcher-${step.application}-restore`, "--timeout-seconds", String(commandTimeoutSeconds),
+        "--", process.execPath, join(packageRoot, "bin", "fixlab.js"), "prepare", workspace.repository,
+        "--yes", `--application=${step.application}`
+      ], workspace.repository, {
+        signal, stdout: { write() {} }, stderr: { write() {} },
+        onSpawn() { quiescent = false; },
+        onResult(value) { result = value; quiescent = value.terminationVerified; }
+      });
+      if (!quiescent) {
+        throw new Error("Dependency preparation termination is unverified; its setup ownership was retained.");
+      }
+      signal?.throwIfAborted();
+      if (createHash("sha256").update(checkoutProfile(workspace.repository)).digest("hex") !== workspace.profileRevision ||
+          [...revisions].some(([name, revision]) =>
+            createHash("sha256").update(checkoutProfile(workspace.repository, name)).digest("hex") !== revision)) {
+        throw new Error("Dependency preparation changed the reviewed profile or reviewed setup files; changes were preserved and read-only review was not started.");
+      }
+      if (originalHead !== git(workspace.repository, ["rev-parse", "HEAD"]) ||
+          originalDiff !== git(workspace.repository, ["diff", "HEAD", "--"])) {
+        throw new Error("Dependency preparation changed tracked snapshot files; changes were preserved and read-only review was not started.");
+      }
+      if (originalSource !== protectedSnapshotRevision(workspace.repository, steps)) {
+        throw new Error("Dependency preparation changed protected snapshot files outside permitted dependency outputs; changes were preserved and read-only review was not started.");
+      }
+      const output = [...result.stdout.tail, ...result.stderr.tail].join("\n");
+      for (const diagnostic of output.match(/\b(?:NETSDK\d{4}|NU\d{4}|MSB\d{4}|E401|E403|ENOTFOUND|ECONNREFUSED|ETIMEDOUT)\b/gu) ?? []) {
+        if (diagnostics.size < 5) { diagnostics.add(diagnostic); }
+      }
+      outcomes.push({ ready: code === 0, message: `${step.application} restore ${
+        code === 0 ? "completed" : code === 124 ? "timed out" : `failed (exited ${code})`}` });
+    }
+  } catch (error) {
+    if (error.ownedExecutorRunning) { quiescent = false; }
+    if (!quiescent) { error.ownedExecutorRunning = true; }
+    throw error;
+  } finally {
+    if (quiescent) { lease.release(); }
+  }
+  const ready = outcomes.every(outcome => outcome.ready);
+  return { ready, message: ready
+    ? "Owned checkout configured dependency restores completed; no application, browser or authentication was started. Tests have not yet run."
+    : `${outcomes.map(outcome => outcome.message).join("; ")}.${diagnostics.size ? ` Diagnostic codes: ${[...diagnostics].join(", ")}.` : ""} Continue independent code work and run only checks whose prerequisites are available; no check is claimed passed.` };
+}
+
+export async function restoreJobWorktree({
+  workspace, packageRoot, runtime, onOutput, signal, dependenciesOnly = false, approvedProfile, timeoutMs = 10 * 60 * 1000
+}) {
   signal?.throwIfAborted();
+  if (dependenciesOnly) { return restoreDependencies({ workspace, packageRoot, signal, approvedProfile, timeoutMs }); }
   const useSavedProfile = workspace.profileSource === "saved-checkout";
   if (useSavedProfile) {
     onOutput?.("Source profile formatting or watcher-only diagnostics changed; retaining this job's verified saved configuration. No new diagnostic access was granted.\n");

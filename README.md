@@ -74,6 +74,16 @@ ticket and related PRs, confirm the scope, then prepare and submit a normal
 local job. Existing work is preserved; tool/data grants do not transfer.
 Ticket comments use a moderate high-level summary with changes, actual checks
 and a next action; expandable reports retain the technical detail.
+New watcher trace feedback also attaches **Rendered trace results**, a local PNG
+grid of telemetry metadata and exact profile-approved API routes or log messages,
+not an Azure Portal screenshot or validation proof. Diagnostic lines refer to the
+timestamped table rows; missing routes are marked not captured. Private identifiers,
+URLs and payloads stay excluded; unavailable images are explicitly reported without
+blocking text findings.
+Incident analysis follows the failing source path and logged telemetry properties
+before choosing a correlated follow-up. Reviewed URL-shape diagnostics can return
+logged lengths and filter-term counts without exposing raw URLs; missing fields,
+truncation and gateway involvement remain explicit evidence questions, not guesses.
 Optional [incident evidence helpers](docs/commands.md#incident-evidence-helpers)
 make approved, environment-bound Cosmos/trace tooling discoverable without
 automatically connecting, copying credentials or granting production access.

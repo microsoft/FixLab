@@ -63,9 +63,10 @@ import { runPortalApiProof } from "../dashboard/portal-api-proof.js";
 import { ticketAutomationPlan, watchTickets, executeVersionedTicketAgent, reviewInterruptedTicket, reconcileInterruptedTicket } from "../dashboard/ticket-automation.js";
 import { configuredWorkflow, efficientWorkflowGuidance, allowsDraftIntegrationDeferral, allowsPostPrLiveReview, workItemValidationEvidenceGuidance, USER_FRIENDLY_UPDATE_GUIDANCE, UNVERIFIED_DRAFT_GUIDANCE, OPTIONAL_INTEGRATION_GUIDANCE, AUTONOMOUS_RECOVERY_GUIDANCE, DRAFT_INTEGRATION_GUIDANCE, COPILOT_EXECUTION_GUIDANCE, RUNTIME_RECOVERY_GUIDANCE, PERSISTENT_DEV_API_GUIDANCE, READ_ONLY_POST_GUIDANCE, API_ONLY_PLAYWRIGHT_GUIDANCE, UNIT_TEST_ONLY_GUIDANCE, TRANSIENT_PLAYWRIGHT_GUIDANCE, SCENARIO_VALIDATION_GUIDANCE, PORTAL_SCREENSHOT_GUIDANCE, CONCISE_PR_GUIDANCE, PR_LEARNING_GUIDANCE, PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
-import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand } from "../dashboard/issue-plans.js";
+import { issuePlanConfiguration, issuePlanContext, runIssuePlanCommand, SOURCE_GUIDED_ANALYSIS } from "../dashboard/issue-plans.js";
 import { runSessionRecoveryCommand } from "../dashboard/session-recovery.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
+import { restoreJobWorktree } from "../dashboard/job-worktree.js";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const profileRelativePath = join(
@@ -108,14 +109,14 @@ Usage:
   fixlab onboard [repository] [--from <source-checkout> | --reuse-setup] [--yes] [--authenticate] [--start-dashboard] [--runtime <agency|copilot>] [--model <model>]
   fixlab init [repository]
   fixlab notifications [repository] [--yes]
-  fixlab prepare [repository] [--yes]
+  fixlab prepare [repository] [--application=frontend|backend|browser] [--yes]
   fixlab doctor [repository] [--runtime <agency|copilot>]
   fixlab setup-playwright [repository] [--yes]
   fixlab setup-queries [repository] --environment <name> [--yes] [--runtime <agency|copilot>] [--model <model>]
   fixlab authenticate [repository] [--yes]
   fixlab linked-api-proof [repository] [--authenticate|--proof] [--yes]
   fixlab portal-api-proof [repository] [--authenticate|--proof] --yes
-  fixlab issue-plan [repository] --environment <name> [--plan <file|->] [--execute] [--allow-production-evidence] [--allow-dev-writes]
+  fixlab issue-plan [repository] --environment <name> [--plan <file|->] [--execute] [--allow-production-evidence] [--allow-dev-writes] [--error-preview-approval <file>]
   fixlab recover-sessions [repository] [--review-token <value> --confirm-quiescent --yes]
   fixlab exec [repository] [--cwd <path>] [--stage <name>] [--reuse] [--timeout-seconds <seconds>] -- <command> [args...]
   fixlab gate --port <port> --job <id> --gate <id> --repository <worktree>
@@ -768,7 +769,7 @@ function doctor(repository, runtime) {
   return 0;
 }
 
-function prepare(repository, approved) {
+function prepare(repository, approved, selectedApplication = "") {
   const { profile, error } = loadProfile(repository);
   if (error) {
     console.error(
@@ -784,7 +785,8 @@ function prepare(repository, approved) {
     ["backend", commands.backendRestore],
     ["browser", commands.browserRestore]
   ]
-    .filter(([, command]) => typeof command === "string" && command.trim())
+    .filter(([application, command]) => (!selectedApplication || application === selectedApplication) &&
+      typeof command === "string" && command.trim())
     .map(([application, command]) => ({
       application,
       command: command.trim(),
@@ -1152,6 +1154,7 @@ function launch(repository, request, runtime, targetEnvironment = "", model = ""
   const guidance = [
     ...(analysisEvidence.length ? [analysisEvidenceContext(analysisEvidence)] : []),
     issuePlanContext(issuePlans),
+    ...(analysisEvidence.length || issuePlans.traces.length ? [SOURCE_GUIDED_ANALYSIS] : []),
     COPILOT_EXECUTION_GUIDANCE,
     ...(request ? [RUNTIME_RECOVERY_GUIDANCE] : []),
     // Interactive sessions use packaged guidance; request prompts go through stdin.
@@ -2298,6 +2301,12 @@ async function main(args) {
       pollSeconds: plan.pollSeconds, outcome: plan.outcome, helperDirectory: packageRoot,
       codeBaseline: "Fetch origin's configured target for each new ticket into a private ticket ref; investigate in an owned, commit-pinned snapshot. Resume keeps the same snapshot, never pulls into active work.",
       versionReview: "Read-only deployed-versus-latest comparison before fix/PR work. Approved incident-time metadata only; otherwise deployed version unknown. Already-fixed findings produce analysis rather than duplicate fix PRs.",
+      dependencyPreparation: {
+        scope: "Before a fresh owned snapshot enters read-only review, run only its reviewed frontendRestore, backendRestore and browserRestore commands. No application/browser startup or sign-in; failed setup does not pass dependent tests.",
+        commands: Object.fromEntries(["frontendRestore", "backendRestore", "browserRestore"]
+          .filter(name => typeof profile.validation?.commands?.[name] === "string")
+          .map(name => [name, profile.validation.commands[name]]))
+      },
       resolution: plan.resolveOnCompletion
         ? "Resolved after a verified draft PR or a confirmed cause with evidence and next steps; investigation handoff only, not merged/deployed/live-tested."
         : "No work-item state changes.",
@@ -2327,6 +2336,10 @@ async function main(args) {
               repository: checkout, prompt,
               ...(sessionId ? { sessionId } : {}), resume: resume === true, onSession,
               runtimeDirectories: [packageRoot], signal: controller.signal,
+              prepareWorkspace: assigned => restoreJobWorktree({
+                workspace: assigned, packageRoot, runtime: parsed.runtime,
+                dependenciesOnly: true, approvedProfile: profile, signal: controller.signal
+              }),
               onActivity,
               idleTimeoutMs: (profile.validation?.agentIdleTimeoutMinutes ?? 20) * 60000
             })
@@ -2395,10 +2408,17 @@ async function main(args) {
   }
 
   if (command === "prepare") {
+    const applications = rest.filter(value => value.startsWith("--application="));
+    const application = applications[0]?.slice("--application=".length) ?? "";
+    if (applications.length > 1 || (applications.length && !["frontend", "backend", "browser"].includes(application)) ||
+        rest.some(value => value.startsWith("-") && value !== "--yes" && !value.startsWith("--application=")) ||
+        rest.filter(value => !value.startsWith("-")).length > 1) {
+      throw new Error("Usage: fixlab prepare [repository] [--application=frontend|backend|browser] [--yes]");
+    }
     const repositoryArgument = rest.find((value) => !value.startsWith("-"));
     return prepare(
       resolveRepository(repositoryArgument),
-      rest.includes("--yes")
+      rest.includes("--yes"), application
     );
   }
 

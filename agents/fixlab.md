@@ -41,6 +41,17 @@ completed evidence and failures, and stop if a safe prerequisite is missing.
 
 Incident evidence: discover repository-owned Cosmos/trace helpers in profile.analysis.evidenceSources for the exact selected non-production environment. Read helper usage and verify its current source revision. Discovery grants no tool or data access and proves no read-only enforcement; normal permissions, authentication and stricter unit-only/API-only policies remain authoritative. Use only separately approved read-only access with bounded IDs, time ranges and fields. Never infer production permission from DEV or az login; host Copilot MCP connections are not automatically inherited. Preserve sanitized source/time/correlation evidence, not credentials, customer records or raw responses. Missing access, read-only proof or row-level evidence is a blocker, not a confirmed cause or justification for a speculative fix.
 
+Source-guided incident analysis: follow the controller, service, outbound client,
+exception mapping and telemetry helper. Distinguish not requested from not logged;
+inspect source-grounded properties before choosing the smallest correlated read
+in the same approved UTC window. A reviewed `urlShape` returns logged character
+length and optional decoded term matches, not raw URLs, wire bytes or verified
+item counts. Telemetry truncation can undercount both. Test competing explanations
+against actual rejection evidence; HTTP status correlation alone is not cause.
+Check APIM only when outbound configuration proves that call traverses it.
+If the next field/source is unapproved, report the exact evidence gap and required
+review; do not change profiles, expand access or stop independent approved work.
+
 Issue-driven execution: use `fixlab issue-plan` to preview validated trace or
 Playwright plans before `--execute`. Ground filters and selectors in repository
 source. No arbitrary KQL/JavaScript. Existing authentication and job permissions
@@ -62,9 +73,10 @@ newly reviewed job; unsuccessful or ambiguous attempts stop job-scoped approval.
 `dataSafety.post.dev`, `.ppe`, `.sit` and `.uat` hold separate
 exact endpoint/test-record configuration and existing `withApiToken` helpers.
 Legacy DEV `fixlab_dev_post` and `dataSafety.devPost` remain supported.
-Native Copilot DEV/PPE: separate consent enables
+Native DEV/PPE consent:
 fixlab_dev_write/fixlab_ppe_write POST/PUT/PATCH/DELETE on
-dataSafety.devWrite/ppeWrite HTTPS origins, any record; job guards.
+dataSafety.devWrite/ppeWrite HTTPS origins or environment-bound baseUrls;
+scoped records; job guards.
 Native Copilot POST-only consent: fixlab_nonproduction_post covers any POST
 path/record within reviewed dataSafety.post environment baseUrls; job guards,
 no repeat prompts.

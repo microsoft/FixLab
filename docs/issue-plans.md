@@ -63,9 +63,22 @@ and standard telemetry fields in actual logging. `payload.*` reads the reviewed
 
 The compiler always adds timestamp bounds, reviewed projection, timestamp
 ordering and a `limit + 1` overflow probe. Policies are capped at 60 minutes and
-200 rows. One request per invocation uses the developer's Azure CLI token for
-the exact subscription/application, a 20-second timeout, no redirects or retries,
-and a 256 KiB response limit. Partial/schema-changed responses are rejected;
+200 rows. Each request uses the developer's Azure CLI token for
+the exact subscription/application, a 20-second timeout, no redirects,
+and a 256 KiB response limit. The reader may make one retry for a recognized
+timeout, connection reset, temporary DNS failure, or HTTP 429/502/503/504.
+Both attempts use the same query, UTC window, row limit, source and in-memory
+token; the CLI rechecks the reviewed profile and compiler before dispatch.
+Backoff is 250 ms unless a valid `Retry-After` requests up to two seconds.
+Longer or invalid retry timing stops rather than retrying early.
+Authentication/authorization failures, TLS failures, redirects, unknown
+transport failures and response-validation failures are not retried. Failed
+HTTP responses are released before retry; cleanup failure stops recovery.
+Successful recovery returns `recovery` with its attempt count and sanitized
+reason. Exhaustion returns a sanitized reason and actual attempt count, never
+raw network errors or response text. This allowance applies only to the
+compiled read-only query POST, not uploads, feedback, application writes or
+agent-managed retry loops. Partial/schema-changed responses are rejected;
 overflow returns `partial` and a failing exit code. This is not a persistent
 cross-invocation query budget. Empty results mean lookup succeeded, not that the
 issue is absent. A lookup's `passed` status never proves a root cause.
@@ -119,7 +132,42 @@ resource, production approval, window, row, timeout and response limits remain
 unchanged. A route name that does not match the reviewed template is omitted,
 not guessed from a URL.
 
-Nonempty reads also return `traceEvidence`: source ID, policy revision, UTC
+### Separately approved single-error preview
+
+When a fixed literal cannot describe a specific observed error, an operator may
+separately review one sanitized preview. This is not a wildcard diagnostic policy
+or an unattended watcher grant. The existing profile is unchanged. Use the same
+source and approved UTC window, `table: "traces"`, `limit: 1`, and a single
+`operation_Id` equality predicate grounded in retained evidence.
+
+Supply `--error-preview-approval C:\private\reviewed-error.json` for preview and
+execution. This explicit absolute local path is an exception to repository-relative
+plan files; it must resolve without links to a regular, unlinked file of at most
+8 KiB. Its JSON has exactly these fields: `version: 1`, `workItemId`, `source`,
+`planHash`, `policyRevision`, `profileHash`, `timestamp`, `expiresAt`, and
+`maxCharacters: 200`. The plan/profile hashes are SHA-256 of their respective
+`JSON.stringify` values. Bind the original wire UTC timestamp (up to seven
+fractional digits), not a rounded summary timestamp, and
+an expiry no more than 30 minutes ahead. Review this complete scope before
+creating the approval, never infer it from ticket text.
+
+Compilation additionally selects that exact timestamp and severity at least 3.
+Execution atomically claims a sibling `.used` receipt before authentication.
+Do not delete that receipt or retry an uncertain read: a new attempt requires
+separate review. Approval, profile and compiler are rechecked before dispatch
+and accepting output. A preview makes only one request, with no transient retry;
+multiple matching records fail closed. Only `timestamp` and sanitized `error`
+columns leave the reader, never correlation IDs or normal `traceEvidence`.
+
+The conservative sanitizer removes detected identities, URLs, paths, quoted
+values and identifiers before the 200-character cap. Payload-, credential-,
+stack-shaped, non-ASCII, malformed or oversized messages are omitted, not passed
+through as fallback text. Redaction may remove useful context and is not a
+general-purpose anonymization guarantee. Inspect the sanitized preview before
+sharing it further; `omittedMessages` and `omissionReasons` explain missing text.
+An omitted/empty result is not an error diagnosis or proof that no error occurred.
+
+Nonempty standard reads also return `traceEvidence`: source ID, policy revision, UTC
 start/end, up to ten structured metadata rows with their table, optional
 reviewed endpoint/message, `truncated`, and `omittedDiagnostics`. Empty reads
 return no row evidence. Query overflow remains a failing, partial read even
@@ -141,6 +189,70 @@ after 15 days or when outside the latest 20 attempts. Duplicate-prevention
 records remain; active, paused and pending-feedback evidence is not expired.
 Evidence is agent-reported correlation, not proof
 of a cause, deployment identity, successful validation or a source fix.
+
+When diagnostic retrieval still fails, watcher feedback must name the sanitized
+failure and the specific missing proof, such as request item count, approved
+request-shape metadata, downstream rejection reason or authenticated incident
+resolution. Preserve observed status codes and independent checks, but do not
+infer a request limit violation or oversized URL from HTTP 404/500 or passing
+unit tests. State the next authorized recovery action without widening scope
+or bypassing sign-in, permissions, TLS or diagnostic-literal approval.
+
+### Source-guided URL-shape diagnostics
+
+CLI and dashboard jobs receive additional incident-analysis guidance only when
+analysis evidence or trace sources are configured. Dashboard browser-only jobs
+retain their bounded validation instructions.
+
+Follow the failing controller/service/outbound client and its telemetry helper
+before querying. Check actual logged property names and serialization. A missing
+field in the reader's projection is **not requested**, not evidence that it was
+never logged. Use an observed operation ID in the same approved UTC window.
+Inspect APIM only if outbound client/configuration shows that call traverses it;
+the incoming API gateway can be a different hop.
+
+An optional reviewed diagnostic definition exposes only computed numeric metadata:
+
+```json
+{
+  "diagnostics": {
+    "urlShapes": [
+      {
+        "id": "outbound-lookup",
+        "table": "traces",
+        "field": "customDimensions.RequestUri",
+        "term": "ItemNumber eq '"
+      }
+    ]
+  }
+}
+```
+
+These are illustrative source-grounded names, not a grant or an incident finding.
+There may be up to five uniquely named definitions. A definition binds one table
+and URL property: `url` for requests, `data` for dependencies, or a grounded
+`customDimensions.*`/`payload.*` property. The optional fixed predicate is at most
+80 credential-free characters. No arbitrary KQL, regular expression, value
+projection or raw URL is accepted. A trace plan selects one definition with
+`"urlShape": "outbound-lookup"` and the freshly reviewed policy revision; omitting
+it preserves metadata-only behavior. Changing the definition invalidates approval.
+
+The service computes `observedUrlLength` and, when configured,
+`observedUrlTermCount` after one URL decode. Missing/empty URL properties or
+unavailable decoding produce `null`, never a zero-shaped success. Returned
+measurements must be null or integers from 0 to 16,777,216; term matches cannot
+exceed observed characters. Raw URLs/query values stay at the telemetry service.
+Bounded evidence retains `urlShape: {id, characterCount, termCount?}` on the
+timestamped row. Feedback and PNGs show these approved numeric observations.
+
+Length means **logged characters**, not encoded wire bytes. A term count means
+observed decoded matches, not a verified number of distinct input items.
+Logging/ingestion truncation can undercount both, even when no result rows were
+truncated. Compare actual request construction, documented limits and correlated
+downstream rejection details; neither a long logged URL nor HTTP 404/500 alone
+proves why a service rejected the request. Distinguish not requested, not returned,
+truncated, absent and access denied. Unapproved fields/sources require review,
+not profile edits by the investigating agent or silently widened access.
 
 ## Reviewed browser adapter
 

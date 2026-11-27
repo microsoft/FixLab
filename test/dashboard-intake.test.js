@@ -16,6 +16,9 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test, { mock } from "node:test";
+import { inflateSync } from "node:zlib";
+import https from "node:https";
+import { EventEmitter } from "node:events";
 import {
   createAzureDevOpsLoader,
   createAzureDevOpsTicketClient,
@@ -34,6 +37,7 @@ import { createExecutorLease } from "../dashboard/executor-lease.js";
 import { PR_TEAM_REVIEW_GUIDANCE } from "../dashboard/workflow-policy.js";
 import { ANALYSIS_EVIDENCE_GUIDANCE, analysisEvidenceContext, configuredAnalysisEvidence } from "../dashboard/analysis-evidence.js";
 import { issuePlanConfiguration } from "../dashboard/issue-plans.js";
+import { renderTraceImage } from "../dashboard/trace-image.js";
 
 const png = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
@@ -301,8 +305,15 @@ test("owned ticket phases review setup in the assigned snapshot without requesti
         calls.push(options);
         assert.match(options.prompt, /reviewed profile and declared non-sensitive setup files are already prepared/u);
         assert.match(options.prompt, /Do not repeat onboarding with --from or access the source checkout/u);
-        assert.match(options.prompt, /fixlab onboard \. --runtime <selected-runtime>/u);
+        assert.doesNotMatch(options.prompt, /fixlab onboard \. --runtime/u);
+        assert.match(options.prompt, /Read the prepared profile in the assigned snapshot/u);
+        assert.match(options.prompt, /use the host dependency preparation summary supplied in this prompt or retained session/u);
+        assert.match(options.prompt, /Do not read or discover Git-private setup records, inspect the \.git pointer, or scan parent Git\/worktree metadata directories/u);
+        assert.match(options.prompt, /use fixlab issue-plan for validated evidence plans and fixlab exec for command evidence without inspecting their private host records/u);
+        assert.doesNotMatch(options.prompt, /Read the prepared profile and recorded host setup/u);
         assert.match(options.prompt, /Read-only review must not provision dependencies or change configuration/u);
+        assert.match(options.prompt, /pass the assigned repository root to fixlab exec and select the component with --cwd/u);
+        assert.doesNotMatch(options.prompt, /--working-directory/u);
         assert.deepEqual(options.runtimeDirectories, ["reviewed-helper"]);
         return options.mode === "validate-only"
           ? { outcome: "analysis", summary: "The pinned code needs a focused fix.",
@@ -323,6 +334,43 @@ test("owned ticket phases review setup in the assigned snapshot without requesti
       return { outcome: "analysis", summary: "No snapshot setup assertion." };
     }
   });
+});
+
+test("watcher dependency preparation precedes read-only review and is not repeated on resume", async () => {
+  for (const ready of [true, false]) {
+    const calls = [];
+    const events = [];
+    const workspace = { baseCommit: "b".repeat(40) };
+    const options = {
+      workspace, prompt: "Synthetic approved watcher request.",
+      prepareWorkspace: async assigned => {
+        assert.equal(assigned, workspace);
+        calls.push("prepare");
+        return { ready, message: ready ? "Configured restores completed." : "Backend restore failed; feed sign-in is required." };
+      },
+      onActivity: event => events.push(event),
+      execute: async native => {
+        calls.push(native.mode === "validate-only" ? "review" : "fix");
+        assert.equal(native.mode, calls.length === 2 ? "validate-only" : "fix-and-validate");
+        assert.match(native.prompt, ready ? /Configured restores completed/u : /Backend restore failed/u);
+        assert.match(native.prompt, /Read-only review must not provision dependencies/u);
+        return { outcome: "analysis", summary: "Source reviewed; only executed checks count.",
+          versionComparison: { latestCommit: workspace.baseCommit, finding: ready ? "needs-fix" : "unknown", evidence: "Pinned source inspection." } };
+      }
+    };
+    await executeVersionedTicketAgent(options);
+    assert.deepEqual(calls, ready ? ["prepare", "review", "fix"] : ["prepare", "review"]);
+    assert.equal(events.at(-1).status, ready ? "passed" : "blocked");
+    assert.ok(events.every(event => Number.isFinite(Date.parse(event.timestamp))));
+    await executeVersionedTicketAgent({ ...options, resume: true,
+      prepareWorkspace() { assert.fail("Authentication resume must not repeat dependency preparation."); },
+      execute: async native => {
+        assert.equal(native.resume, true);
+        return { outcome: "analysis", summary: "Continuing the existing review.",
+          versionComparison: { latestCommit: workspace.baseCommit, finding: "unknown", evidence: "Existing source evidence retained." } };
+      }
+    });
+  }
 });
 
 test("a fetched snapshot cannot substitute a different incident helper for the reviewed revision", async () => {
@@ -481,6 +529,11 @@ test("fix execution follows the completed pinned version review and retains its 
     traceEvidence: retainedTrace, resume: true });
   assert.equal(calls.length, 3);
   assert.deepEqual(calls.map(call => call.mode), ["validate-only", "fix-and-validate", "fix-and-validate"]);
+  for (const call of calls.slice(1)) {
+    assert.match(call.prompt, /ACTIVE PHASE: FIX_AND_VALIDATE/u);
+    assert.match(call.prompt, /earlier version-review source-edit and PR prohibitions no longer apply/u);
+    assert.doesNotMatch(call.prompt, /This is the read-only VERSION REVIEW phase/u);
+  }
   assert.ok(calls.every(call => call.sessionId === sessionId));
   assert.equal(calls[1].resume, true);
   assert.equal(calls[2].resume, true);
@@ -691,6 +744,9 @@ test("watcher production approval re-evaluates only its bound ticket once withou
         assert.match(request, /read-production-evidence.mjs/);
         assert.match(request, /No production application testing or business-data writes/);
         assert.match(request, /continue.*other.*reader/i);
+        assert.match(request, /reader own its single bounded transient retry/);
+        assert.match(request, /precisely which root-cause evidence remains missing/);
+        assert.match(request, /passing unit tests as root-cause proof/);
         return { outcome: "analysis", summary: "Bounded incident reads completed; interaction remains unconfirmed." };
       } });
       assert.equal(history().length, 2);
@@ -954,7 +1010,8 @@ test("ADO tables render escaped cells without interpreting HTML or splitting esc
   ].join("\n");
   const html = formatAzureDevOpsComment(text);
   assert.match(html, /<h3>Analysis summary<\/h3><table/u);
-  assert.match(html, /<th>Topic<\/th><th>Findings<\/th>/u);
+  assert.match(html, /<table width="100%"[^>]*table-layout:fixed;overflow-wrap:anywhere;word-break:break-word/u);
+  assert.match(html, /<th width="30%">Topic<\/th><th>Findings<\/th>/u);
   assert.ok(html.includes("<td>src\\parser.cs:20 | inspected, not tested</td>"));
   assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt; &amp; "unverified"'));
   assert.doesNotMatch(html, /<img|<script/u);
@@ -1011,13 +1068,154 @@ test("ticket feedback gives a high-level summary while retaining detailed work a
   }
 });
 
+function traceImageFixture() {
+  const fixture = ticketFixture({ readable: true });
+  fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
+    subscriptionId: "12345678-1234-1234-1234-123456789abc",
+    applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10 }] };
+  writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
+  const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
+  const policy = issuePlanConfiguration(fixture.repository, fixture.profile, "dev").traces[0];
+  const traceEvidence = { source: policy.id, policyRevision: policy.policyRevision,
+    start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+    rows: [{ table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "private-operation",
+      operation_ParentId: null, success: false, resultCode: "500" }] };
+  return { ...fixture, plan, policy, traceEvidence,
+    execute: async () => ({ outcome: "analysis", summary: "Observed a failure; cause unconfirmed.", traceEvidence }),
+    journalPath: join(fixture.repository, ".git", "fixlab", "dashboard-artifacts", "ticket-automation", "state.json")
+  };
+}
+
+function decodeTracePng(bytes) {
+  assert.deepEqual(bytes.subarray(0, 8), png);
+  const chunks = [];
+  for (let offset = 8; offset < bytes.length;) {
+    const length = bytes.readUInt32BE(offset);
+    const type = bytes.toString("ascii", offset + 4, offset + 8);
+    const data = bytes.subarray(offset + 8, offset + 8 + length);
+    let crc = 0xffffffff;
+    for (const byte of bytes.subarray(offset + 4, offset + 8 + length)) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit++) { crc = crc >>> 1 ^ (crc & 1 ? 0xedb88320 : 0); }
+    }
+    assert.equal(bytes.readUInt32BE(offset + 8 + length), (crc ^ 0xffffffff) >>> 0);
+    chunks.push({ type, data });
+    offset += length + 12;
+    assert.ok(offset <= bytes.length);
+  }
+  assert.deepEqual(chunks.map(chunk => chunk.type), ["IHDR", "iTXt", "IDAT", "IEND"]);
+  const header = chunks[0].data;
+  const width = header.readUInt32BE();
+  const height = header.readUInt32BE(4);
+  assert.deepEqual([...header.subarray(8)], [8, 2, 0, 0, 0]);
+  const pixels = inflateSync(chunks[2].data);
+  assert.equal(pixels.length, (width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) { assert.equal(pixels[y * (width * 3 + 1)], 0); }
+  assert.equal(chunks[1].data.subarray(0, 16).toString("utf8"), "Description\0\0\0\0\0");
+  return { width, height, pixels, description: chunks[1].data.subarray(16).toString("utf8") };
+}
+
+test("rendered trace PNG draws approved row-linked diagnostics without network or private-field leakage", t => {
+  t.mock.method(globalThis, "fetch", () => assert.fail("Rendering must not fetch resources."));
+  t.mock.method(https, "request", () => assert.fail("Rendering must not make HTTP requests."));
+  const policy = { id: "app-traces", policyRevision: "1".repeat(64), maxWindowMinutes: 30,
+    diagnostics: { endpoints: ["GET /v1/items/{id}"],
+      messages: ["Backend request failed (not retried): OData.", "Service returned caf\u00e9."] } };
+  const evidence = { source: policy.id, policyRevision: policy.policyRevision,
+    start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z", truncated: true, omittedDiagnostics: 3,
+    rows: [
+      { table: "requests", timestamp: "2026-11-19T10:01:00Z", operation_Id: "private-id", operation_ParentId: null,
+        success: false, resultCode: "500", endpoint: "GET /v1/items/{id}" },
+      { table: "dependencies", timestamp: "2026-11-19T10:01:01Z", operation_Id: "private-id", operation_ParentId: "parent",
+        success: true, resultCode: "private-code" },
+      { table: "traces", timestamp: "2026-11-19T10:01:02Z", operation_Id: "private-id", operation_ParentId: null,
+        severityLevel: 3, logMessage: "Backend request failed (not retried): OData." },
+      { table: "exceptions", timestamp: "2026-11-19T10:01:03Z", operation_Id: null, operation_ParentId: null,
+        severityLevel: null, type: "Private.CustomerException" }
+    ] };
+  const bytes = renderTraceImage(evidence, policy);
+  const decoded = decodeTracePng(bytes);
+  assert.equal(decoded.width, 1100);
+  assert.equal(decoded.height, 484);
+  assert.match(decoded.description, /UTC WINDOW: 2026-11-19T10:00:00.000Z TO 2026-11-19T10:15:00.000Z/u);
+  assert.match(decoded.description, /OBSERVED ROWS: 4 \/ 10 MAX - TRUNCATED: YES\nOMITTED DIAGNOSTICS: 3/u);
+  assert.match(decoded.description, /REQUESTS \| FALSE \| 500 \| N\/A/u);
+  assert.match(decoded.description, /DEPENDENCIES \| TRUE \| N\/A \| N\/A/u);
+  assert.match(decoded.description, /TRACES \| N\/A \| N\/A \| 3 ERROR/u);
+  assert.match(decoded.description, /EXCEPTIONS \| N\/A \| N\/A \| N\/A/u);
+  assert.match(decoded.description, /NOT A PORTAL SCREENSHOT OR ROOT-CAUSE PROOF/u);
+  assert.match(decoded.description, /ROW 1 API: GET \/v1\/items\/\{id\}/u);
+  assert.match(decoded.description, /ROW 2 API: ROUTE NOT CAPTURED/u);
+  assert.match(decoded.description, /ROW 3 LOG: Backend request failed \(not retried\): OData\./u);
+  assert.doesNotMatch(decoded.description, /private-id|parent|CustomerException|private-code/iu);
+  const changedPrivate = structuredClone(evidence);
+  for (const row of changedPrivate.rows) { row.operation_Id = "other-id"; row.operation_ParentId = null; }
+  changedPrivate.rows[3].type = "Other.PrivateException";
+  assert.deepEqual(renderTraceImage(changedPrivate, policy), bytes);
+  const changedDiagnostic = structuredClone(evidence);
+  changedDiagnostic.rows[2].logMessage = "Service returned caf\u00e9.";
+  const changed = decodeTracePng(renderTraceImage(changedDiagnostic, policy));
+  assert.match(changed.description, /ROW 3 LOG: Service returned caf\u00e9\./u);
+  assert.notDeepEqual(changed.pixels, decoded.pixels, "approved diagnostic changes must be visible, not metadata-only");
+  changedDiagnostic.rows[2].logMessage = "Unapproved error text.";
+  assert.throws(() => renderTraceImage(changedDiagnostic, policy), /not an approved literal/u);
+  // The title and first row number have dark foreground pixels.
+  const pixel = (x, y) => [...decoded.pixels.subarray(y * (1100 * 3 + 1) + 1 + x * 3, y * (1100 * 3 + 1) + 4 + x * 3)];
+  assert.deepEqual(pixel(20, 18), [24, 35, 50]);
+  assert.deepEqual(pixel(24, 165), [24, 35, 50]);
+  assert.deepEqual(pixel(20, 376), [24, 35, 50], "the approved row 3 log must be drawn below the metadata table");
+  assert.throws(() => renderTraceImage(evidence), /approved policy/u);
+  assert.throws(() => renderTraceImage({ ...evidence, policyRevision: "2".repeat(64) }, policy), /approved source/u);
+  assert.throws(() => renderTraceImage({ ...evidence, rows: [{ ...evidence.rows[0], message: "private" }] }, policy), /Unsupported/u);
+  const maximum = renderTraceImage({ ...evidence, rows: Array(10).fill(evidence.rows[0]) }, policy);
+  assert.ok(maximum.length < 64 * 1024);
+  assert.equal(decodeTracePng(maximum).height, 854);
+  const longMessage = "Backend failed: ".repeat(12);
+  const wrapped = decodeTracePng(renderTraceImage({ ...evidence, rows: [
+    { ...evidence.rows[2], logMessage: longMessage }
+  ] }, { ...policy, diagnostics: { messages: [longMessage] } }));
+  assert.ok(wrapped.height > 354, "long approved text must wrap to additional visible lines");
+  assert.ok(wrapped.description.includes(longMessage), "the exact approved message must remain complete");
+  const metadataOnly = structuredClone(evidence);
+  metadataOnly.rows = [{ ...metadataOnly.rows[2] }];
+  delete metadataOnly.rows[0].logMessage;
+  assert.match(decodeTracePng(renderTraceImage(metadataOnly, policy)).description,
+    /NO APPROVED ENDPOINTS OR MESSAGES CAPTURED/u);
+  const shapePolicy = { ...policy, diagnostics: { ...policy.diagnostics, urlShapes: [
+    { id: "outbound", table: "traces", field: "customDimensions.RequestUri", term: "ItemNumber eq '" }
+  ] } };
+  const shapeEvidence = { ...evidence, rows: [{ ...evidence.rows[2],
+    urlShape: { id: "outbound", characterCount: 2056, termCount: 51 }
+  }] };
+  const shapeImage = decodeTracePng(renderTraceImage(shapeEvidence, shapePolicy));
+  assert.match(shapeImage.description, /ROW 1 URL SHAPE outbound: LOGGED CHARACTERS 2056 - DECODED TERM MATCHES 51/u);
+  assert.doesNotMatch(shapeImage.description, /RequestUri|ItemNumber|https?:|item count: 51/iu);
+  shapeEvidence.rows[0].urlShape.characterCount = null;
+  shapeEvidence.rows[0].urlShape.termCount = null;
+  assert.match(decodeTracePng(renderTraceImage(shapeEvidence, shapePolicy)).description,
+    /LOGGED CHARACTERS NOT CAPTURED - DECODED TERM MATCHES NOT CAPTURED/u);
+  assert.throws(() => renderTraceImage(shapeEvidence, policy), /not an approved measurement/u);
+  const unspecifiedLimits = { ...evidence };
+  delete unspecifiedLimits.truncated;
+  delete unspecifiedLimits.omittedDiagnostics;
+  assert.match(decodeTracePng(renderTraceImage(unspecifiedLimits, policy)).description,
+    /TRUNCATED: UNKNOWN\nOMITTED DIAGNOSTICS: N\/A/u);
+});
+
 test("ticket feedback summarizes the failure and trace snapshot while retaining full rows privately", async () => {
   const fixture = ticketFixture({ readable: true });
   try {
+    const uploads = [];
+    fixture.client.uploadTraceImage = async bytes => {
+      uploads.push(bytes);
+      return "12345678-1234-1234-1234-123456789abc";
+    };
+    fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
     fixture.profile.analysis = { traceQueries: [{ id: "app-traces", environment: "dev",
       subscriptionId: "12345678-1234-1234-1234-123456789abc",
       applicationId: "23456789-1234-1234-1234-123456789abc", maxWindowMinutes: 30, maxRows: 10,
-      diagnostics: { endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed.", "Lookup started."] }
+      diagnostics: { endpoints: ["GET /v1/items/lookup"], messages: ["Backend request failed.", "Lookup started."],
+        urlShapes: [{ id: "outbound", table: "traces", field: "customDimensions.RequestUri", term: "ItemNumber eq '" }] }
     }] };
     writeFileSync(join(fixture.repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify(fixture.profile));
     const plan = ticketAutomationPlan(fixture.repository, fixture.profile, { environment: "dev" });
@@ -1029,7 +1227,8 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
         { table: "dependencies", timestamp: "2026-11-19T10:01:00.500Z", operation_Id: "op-42",
           operation_ParentId: "|root-42.span.", success: false, resultCode: "404", endpoint: null },
         { table: "traces", timestamp: "2026-11-19T10:01:00.750Z", operation_Id: "op-42",
-          operation_ParentId: null, severityLevel: 1, logMessage: "Lookup started." },
+          operation_ParentId: null, severityLevel: 1, logMessage: "Lookup started.",
+          urlShape: { id: "outbound", characterCount: 2056, termCount: 51 } },
         { table: "traces", timestamp: "2026-11-19T10:01:01Z", operation_Id: "op-42",
           operation_ParentId: null, severityLevel: 3, logMessage: "Backend request failed." }
       ] };
@@ -1037,6 +1236,8 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
       assert.match(request, /traceEvidence/);
       assert.match(request, /incident resolution was not verified/);
       assert.match(request, /Do not infer request size.*HTTP 404\/500 alone/u);
+      assert.match(request, /excluded projection does not prove a value was not logged/u);
+      assert.match(request, /outbound client\/configuration proves that call traverses it/u);
       return { outcome: "analysis", summary: "Observed a failed request; its cause remains unknown.", traceEvidence,
         report: {
           rootCause: "Incident notes attribute this to a batch larger than 50; the request count was not captured in these traces.",
@@ -1045,6 +1246,21 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
         versionComparison: { latestCommit: "1".repeat(40), finding: "unknown", evidence: "Deployment metadata could not be read." } };
     } });
     const text = fixture.posted[0].text;
+    assert.equal(uploads.length, 1, "approved trace results must produce one PNG attachment");
+    assert.deepEqual(uploads[0].subarray(0, 8), png);
+    const image = decodeTracePng(uploads[0]);
+    assert.match(image.description, /ROW 1 API: GET \/v1\/items\/lookup/u);
+    assert.match(image.description, /ROW 4 LOG: Backend request failed\./u);
+    assert.match(image.description, /ROW 3 URL SHAPE outbound: LOGGED CHARACTERS 2056 - DECODED TERM MATCHES 51/u);
+    assert.doesNotMatch(image.description, /op-42|root-42|Incident notes|larger than 50/u);
+    assert.match(text, /!\[Rendered trace results - full size\]\(https:\/\/dev.azure.com\//u);
+    assert.match(formatAzureDevOpsComment(text), /<img .*alt="Rendered trace results"/u);
+    assert.match(formatAzureDevOpsComment(text), />Open full-size trace image<\/a>/u);
+    assert.match(text, /## Timestamped trace rows \(observed\)\n\| UTC timestamp \| Observed trace \|/u);
+    for (const [index, row] of traceEvidence.rows.entries()) {
+      assert.ok(text.includes(`| ${new Date(row.timestamp).toISOString()} | Row ${index + 1}: ${row.table}`));
+    }
+    assert.match(text, /severity: 1; Lookup started\./u);
     assert.match(text, /Trace snapshot/);
     for (const value of ["10:01:00", "Request: HTTP 500", "Correlated downstream call: HTTP 404",
       "GET /v1/items/lookup", "Backend request failed."]) {
@@ -1053,8 +1269,11 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     const attempt = readTicketAutomationHistory(fixture.repository).attempts[0];
     assert.equal(attempt.traceEvidence.rows[0].endpoint, "GET /v1/items/lookup");
     assert.equal(attempt.traceEvidence.rows[3].logMessage, "Backend request failed.");
+    assert.deepEqual(attempt.traceEvidence.rows[2].urlShape, { id: "outbound", characterCount: 2056, termCount: 51 });
+    assert.match(text, /2056 logged characters, 51 decoded term matches/u);
+    assert.match(text, /Not wire bytes or verified item counts; logging may truncate/u);
     assert.equal(attempt.traceEvidence.rows[0].operation_Id, "op-42");
-    assert.doesNotMatch(text, /op-42|root-42|operation_Id=|operation_ParentId=|severityLevel=|Lookup started\./u);
+    assert.doesNotMatch(text, /op-42|root-42|operation_Id=|operation_ParentId=|severityLevel=/u);
     assert.doesNotMatch(text, /Deployment metadata could not be read|Deployed commit|Deployed version unknown/u);
     assert.match(text, /Latest target commit: 1{40}/u);
     assert.equal(attempt.versionComparison.deployedCommit, null);
@@ -1064,12 +1283,195 @@ test("ticket feedback summarizes the failure and trace snapshot while retaining 
     assert.match(text, /request count was not captured/u);
     assert.doesNotMatch(text, /\| Confirmed cause \|/u);
     assert.match(formatAzureDevOpsComment(text), /<table/u);
-    assert.ok(text.length < 2300);
+    assert.ok(text.length < 3300);
     assert.equal(attempt.confirmedCause, null);
     assert.equal(fixture.item.state, "Active");
     await fixture.run({ plan, execute() { assert.fail("Own trace feedback must not trigger another attempt."); } });
     assert.equal(fixture.posted.length, 1);
+    assert.equal(uploads.length, 1);
   } finally { fixture.cleanup(); }
+});
+
+test("trace image rendering and uncertain upload failures preserve text feedback and bounded restart outcomes", async () => {
+  for (const failure of ["render", "upload", "unsupported"]) {
+    const fixture = traceImageFixture();
+    let uploads = 0;
+    try {
+      if (failure !== "unsupported") {
+        fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
+        fixture.client.uploadTraceImage = async () => { uploads++; throw new Error("private provider error"); };
+      }
+      await fixture.run({ plan: fixture.plan, execute: fixture.execute,
+        ...(failure === "render" ? { renderTraceResults() { throw new Error("private renderer error"); } } : {}) });
+      assert.equal(uploads, failure === "upload" ? 1 : 0);
+      assert.equal(fixture.posted.length, 1);
+      assert.match(fixture.posted[0].text, /image unavailable/u);
+      assert.match(fixture.posted[0].text, /Trace snapshot/u);
+      assert.doesNotMatch(fixture.posted[0].text, /private provider|private renderer|!\[/u);
+      assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].traceImage.reason,
+        { render: "render-failed", upload: "upload-unconfirmed", unsupported: "unsupported" }[failure]);
+      await fixture.run({ plan: fixture.plan, execute() { assert.fail("Do not rerun a completed diagnosis."); } });
+      assert.equal(fixture.posted.length, 1);
+      assert.equal(uploads, failure === "upload" ? 1 : 0);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("trace attachment and uncertain comment receipts survive restart without changing fingerprints or reuploading", async () => {
+  const fixture = traceImageFixture();
+  let uploads = 0;
+  try {
+    fixture.client.uploadTraceImage = async () => { uploads++; return "12345678-1234-1234-1234-123456789abc"; };
+    fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
+    const commentIds = fixture.client.commentIds;
+    fixture.client.commentIds = async () => [];
+    await assert.rejects(fixture.run({ plan: fixture.plan, execute: fixture.execute }), /read-back is unconfirmed/u);
+    const receipt = JSON.parse(readFileSync(fixture.journalPath)).entries[0].feedback;
+    await assert.rejects(fixture.run({ plan: fixture.plan, execute() { assert.fail("Do not rerun."); } }), /previous feedback submission is unconfirmed/u);
+    assert.deepEqual(JSON.parse(readFileSync(fixture.journalPath)).entries[0].feedback, receipt);
+    assert.equal(uploads, 1);
+    fixture.client.commentIds = commentIds;
+    await fixture.run({ plan: fixture.plan, execute() { assert.fail("Reconcile only."); } });
+    assert.equal(uploads, 1);
+    assert.equal(fixture.posted.length, 1);
+    assert.equal(readTicketAutomationHistory(fixture.repository).attempts[0].traceImage.feedbackConfirmed, true);
+  } finally { fixture.cleanup(); }
+});
+
+test("trace feedback rechecks assignment and revision after upload without repeating uncertain uploads", async () => {
+  for (const receiptStatus of ["uploaded", "uploading", "edited"]) {
+    const fixture = traceImageFixture();
+    const description = fixture.item.description;
+    let uploads = 0;
+    try {
+      fixture.client.uploadTraceImage = async () => {
+        uploads++;
+        if (receiptStatus === "edited") { fixture.item.description = "A changed scenario needs review."; }
+        else { fixture.item.assignedToCurrentUser = false; }
+        return "12345678-1234-1234-1234-123456789abc";
+      };
+      fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
+      await assert.rejects(fixture.run({ plan: fixture.plan, execute: fixture.execute }), /changed before feedback/u);
+      assert.equal(uploads, 1);
+      assert.equal(fixture.posted.length, 0);
+      const state = JSON.parse(readFileSync(fixture.journalPath));
+      assert.equal(state.entries[0].traceImage.status, "uploaded");
+      if (receiptStatus === "uploading") {
+        state.entries[0].traceImage = { status: "uploading" };
+        delete state.entries[0].feedback;
+        writeFileSync(fixture.journalPath, JSON.stringify(state));
+      }
+      fixture.item.assignedToCurrentUser = true;
+      fixture.item.description = description;
+      await fixture.run({ plan: fixture.plan, execute() { assert.fail("Retain the investigation."); } });
+      assert.equal(uploads, 1);
+      assert.equal(fixture.posted.length, 1);
+      assert.match(fixture.posted[0].text, receiptStatus !== "uploading" ? /!\[Rendered trace results - full size\]/u : /image unavailable.*upload was not confirmed/u);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("pending legacy trace feedback keeps its delivery format without adding expanded content or uploads", async () => {
+  for (const format of [undefined, "readable", "table", "trace-image"]) {
+    const fixture = traceImageFixture();
+    try {
+      await assert.rejects(fixture.run({ plan: fixture.plan, execute: async () => {
+        fixture.item.assignedToCurrentUser = false;
+        return fixture.execute();
+      } }), /changed during execution/u);
+      const state = JSON.parse(readFileSync(fixture.journalPath));
+      state.entries[0].status = "feedback-pending";
+      if (format === undefined) { delete state.entries[0].feedbackFormat; }
+      else { state.entries[0].feedbackFormat = format; }
+      if (format === "trace-image") {
+        state.entries[0].traceImage = { status: "uploaded", attachmentId: "12345678-1234-1234-1234-123456789abc" };
+        fixture.client.traceImageUrl = id => `https://dev.azure.com/example-org/Example%20Project/_apis/wit/attachments/${id}`;
+      }
+      writeFileSync(fixture.journalPath, JSON.stringify(state));
+      fixture.item.assignedToCurrentUser = true;
+      fixture.client.uploadTraceImage = async () => assert.fail("Historical feedback must not upload.");
+      await fixture.run({ plan: fixture.plan, execute() { assert.fail("Resume feedback only."); } });
+      assert.equal(fixture.posted.length, 1);
+      assert.doesNotMatch(fixture.posted[0].text, /Timestamped trace rows| - full size|image unavailable/u);
+      if (format === "trace-image") { assert.match(fixture.posted[0].text, /!\[Rendered trace results\]/u); }
+      else { assert.doesNotMatch(fixture.posted[0].text, /Rendered trace results/u); }
+      assert.match(fixture.posted[0].text, /Trace snapshot/u);
+      await fixture.run({ plan: fixture.plan, execute() { assert.fail("Do not duplicate historical feedback."); } });
+      assert.equal(fixture.posted.length, 1);
+    } finally { fixture.cleanup(); }
+  }
+});
+
+test("ADO trace upload sends bounded PNG bytes and embeds only canonical attachment images", async t => {
+  const policy = { id: "app-traces", policyRevision: "1".repeat(64), maxWindowMinutes: 30 };
+  const bytes = renderTraceImage({ source: policy.id, policyRevision: policy.policyRevision,
+    start: "2026-11-19T10:00:00Z", end: "2026-11-19T10:15:00Z",
+    rows: [{ table: "traces", timestamp: "2026-11-19T10:01:00Z",
+      operation_Id: null, operation_ParentId: null, severityLevel: 3 }] }, policy);
+  const calls = [];
+  let attachmentId = "12345678-1234-1234-1234-123456789abc";
+  const client = createAzureDevOpsTicketClient({
+    profile: { azureDevOps: { organization: "example-org", project: "Example Project" } },
+    tokenProvider: () => "synthetic-token",
+    requestJson: async (url, token, options) => {
+      assert.equal(token, "synthetic-token");
+      calls.push({ url, options });
+      return { id: attachmentId, url: "https://untrusted.invalid/ignored" };
+    }
+  });
+  const id = await client.uploadTraceImage(bytes);
+  assert.equal(id, attachmentId);
+  assert.match(calls[0].url, /^https:\/\/dev\.azure\.com\/example-org\/Example%20Project\/_apis\/wit\/attachments\?fileName=rendered-trace-results\.png&api-version=7.1$/u);
+  assert.equal(calls[0].options.contentType, "application/octet-stream");
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(calls[0].options.body, bytes);
+  const url = client.traceImageUrl(id);
+  await client.comment(42, `Observed evidence only.\n\n![Rendered trace results](${url})`);
+  assert.equal(calls[1].options.body.text, `Observed evidence only.<br><br><img src="${url}" alt="Rendered trace results">`);
+  const punctuatedProject = url.replace("Example%20Project", encodeURIComponent("Example Project (reviewer's)"));
+  assert.match(formatAzureDevOpsComment(`![Rendered trace results](${punctuatedProject})`), /<img/u);
+  const expanded = formatAzureDevOpsComment(`![Rendered trace results - full size](${url})`);
+  assert.equal(expanded, `<a href="${url}" target="_blank" rel="noopener noreferrer">Open full-size trace image</a><br>` +
+    `<a href="${url}" target="_blank" rel="noopener noreferrer"><img src="${url}" alt="Rendered trace results" style="max-width:100%;height:auto"></a>`);
+  assert.match(formatAzureDevOpsComment(`![Rendered trace results - full size](${punctuatedProject})`), /<a href=/u);
+  for (const unsafe of ["https://example.invalid/a.png", `${url}?token=private`, `${url}" onerror="alert(1)`,
+    `http:${url.slice(6)}`, `javascript:alert(1)`]) {
+    assert.doesNotMatch(formatAzureDevOpsComment(`![Rendered trace results](${unsafe})`), /<img/u);
+    assert.doesNotMatch(formatAzureDevOpsComment(`![Rendered trace results - full size](${unsafe})`), /<img|<a\b/u);
+  }
+  assert.throws(() => client.traceImageUrl("../outside"), /exact attachment/u);
+  await assert.rejects(client.uploadTraceImage(Buffer.alloc(100)), /bounded PNG/u);
+  await assert.rejects(client.uploadTraceImage(Buffer.alloc(65537)), /bounded PNG/u);
+  attachmentId = "../invalid";
+  await assert.rejects(client.uploadTraceImage(bytes), /confirm the trace attachment/u);
+  let wirePayload;
+  const requestMock = t.mock.method(https, "request", (_url, options, callback) => {
+    assert.equal(options.headers["Content-Type"], "application/octet-stream");
+    assert.equal(options.headers["Content-Length"], bytes.length);
+    const request = new EventEmitter();
+    request.setTimeout = () => {};
+    request.end = payload => {
+      wirePayload = payload;
+      const response = new EventEmitter();
+      response.statusCode = 200;
+      callback(response);
+      response.emit("data", Buffer.from(JSON.stringify({ id: "12345678-1234-1234-1234-123456789abc" })));
+      response.emit("end");
+    };
+    return request;
+  });
+  syncBuiltinESMExports();
+  try {
+    const wireClient = createAzureDevOpsTicketClient({
+      profile: { azureDevOps: { organization: "example-org", project: "Example Project" } },
+      tokenProvider: () => "synthetic-token"
+    });
+    await wireClient.uploadTraceImage(bytes);
+    assert.deepEqual(wirePayload, bytes, "the default adapter must not JSON-serialize PNG bytes");
+  } finally {
+    requestMock.mock.restore();
+    syncBuiltinESMExports();
+  }
 });
 
 test("ticket trace evidence rejects unbounded, unrelated and private fields before publication", () => {

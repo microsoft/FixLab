@@ -265,6 +265,7 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
       browserPost = await startBrowserPostBridge({
         send: postAccess.browserRequest ?? postAccess.browserPost,
         serializeRequests: Boolean(postAccess.browserRequest),
+        methods: postAccess.browserMethods,
         revoke: postAccess.revoke, jobId: config.sessionId,
         environment: config.targetEnvironment.toLowerCase()
       });
@@ -332,7 +333,7 @@ export async function runCopilotSession(config, { client, ask, output, onUsage =
       session.sendAndWait({ prompt: config.prompt + (browserPost
         ? "\nBrowser POST integration: a private job-bound relay is inherited by runtime child processes. In a reviewed Node/Playwright business-request guard, import process.env.FIXLAB_BROWSER_POST_HELPER and call forwardApprovedBrowserPost(route, { environment: the selected environment, purpose: a non-sensitive test purpose }). It uses the same configured endpoint/test-record or API-base approval, authentication helper and failure revocation as the POST tool. Never print or persist FIXLAB_BROWSER_POST_* values. Do not copy tokens or browser state. Keep authentication, read-only query guards and unapproved mutations separate. Inherit the executor environment when starting the reviewed runner; do not create approval contract files. Response data stays private in browser memory; report only sanitized status and focused assertions. HTTP success alone does not prove persistence." +
           (postAccess.browserRequest
-            ? " This PPE job also supports complete read/write browser journeys through forwardApprovedBrowserRequest from the same helper: GET, POST, PUT, PATCH and DELETE only on the exact reviewed dataSafety.ppeWrite origins. Route only approved PPE business requests through it, not identity, portal assets or unrelated APIs. Concurrent browser requests are serialized without replay. Use actual response data privately for scenario and persistence assertions; do not stop at HTTP status or claim all scenarios passed without running them. Preserve configured read-only and authentication guards outside this explicit grant."
+            ? ` This ${config.targetEnvironment.toUpperCase()} job also supports complete read/write browser journeys through forwardApprovedBrowserRequest from the same helper: ${postAccess.browserMethods.join(", ")} only within the exact reviewed dataSafety.${config.targetEnvironment.toLowerCase()}Write ${["dev-base", "ppe-base"].includes(config.postWriteApproval?.mode) ? "API bases" : "origins"}. Route only approved business requests through it, not identity, portal assets or unrelated APIs. DEV GET reads retain their existing read-only guards. Concurrent browser requests are serialized without replay. Use actual response data privately for scenario and persistence assertions; do not stop at HTTP status or claim all scenarios passed without running them. Preserve configured read-only and authentication guards outside this explicit grant.`
             : "")
         : "") }, 24 * 60 * 60 * 1000).then(() => false),
       budget.then(() => true)

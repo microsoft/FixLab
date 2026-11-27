@@ -78,6 +78,11 @@ export function resolveEvidenceRoot(repository) {
 }
 
 export function repositoryState(repository) {
+  const root = git(repository, ["rev-parse", "--show-toplevel"]);
+  if (root.status !== 0 || !root.stdout.trim()) {
+    throw new Error("fixlab exec could not resolve the repository root");
+  }
+  repository = realpathSync(root.stdout.trim());
   const head = git(repository, ["rev-parse", "HEAD"]);
   if (head.status !== 0) {
     throw new Error("fixlab exec could not resolve the repository HEAD");
@@ -960,6 +965,7 @@ export async function executeStructuredCommand(options, io = {}) {
       });
     }
     child = containment?.child ?? spawnProcess(executable, spawnedArguments, spawnOptions);
+    io.onSpawn?.(child);
     child.stdout.on("data", stdoutCollector.write);
     child.stderr.on("data", stderrCollector.write);
     io.signal?.addEventListener("abort", abort, { once: true });

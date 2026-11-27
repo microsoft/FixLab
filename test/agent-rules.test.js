@@ -121,6 +121,7 @@ test("safe recovery and scoped DEV/PPE/SIT/UAT POST guidance stay aligned across
       /single-use human confirmation/u, /Allow all and batch approval never apply/u,
       /without repeat confirmation/u, /profile\/helper revision/u,
       /newly reviewed job/u, /stop job-scoped approval/u,
+      /HTTPS origins or environment-bound baseUrls/u,
       /API-only read-only contracts/u, /never substitute a shell\/browser POST/u
     ]) { assert.match(text, contract, entryPoint); }
   }
@@ -293,7 +294,9 @@ test("cross-runtime validation guidance stays aligned", () => {
 test("issue-driven execution keeps runtime and packaged-agent contracts aligned", () => {
   const root = join(testDirectory, "..");
   for (const entry of ["dashboard/server.js", "bin/fixlab.js", "dashboard/ticket-automation.js"]) {
-    assert.match(readFileSync(join(root, entry), "utf8"), /issuePlanContext/u, entry);
+    const source = readFileSync(join(root, entry), "utf8");
+    assert.match(source, /issuePlanContext/u, entry);
+    assert.match(source, /SOURCE_GUIDED_ANALYSIS/u, entry);
   }
   for (const entry of ["agents/fixlab.md", "com.github.copilot/agents/fixlab.agent.md",
     "templates/fixlab-autofix.agent.md", ".github/agents/fixlab-autofix.agent.md", ".github/agents/fixlab.agent.md"]) {
@@ -301,6 +304,12 @@ test("issue-driven execution keeps runtime and packaged-agent contracts aligned"
     for (const contract of [/fixlab issue-plan/u, /No arbitrary KQL\/JavaScript/u,
       /--allow-production-evidence/u, /DEV writes require explicit job approval/u,
       /--allow-dev-writes/u, /Generated journeys stay transient/u, /actual executed assertions/u]) {
+      assert.match(text, contract, entry);
+    }
+    for (const contract of [/Source-guided incident analysis/u, /not requested from not logged/u,
+      /same approved UTC window/u, /reviewed `urlShape`/u, /not raw URLs, wire bytes or verified item counts/u,
+      /Telemetry truncation can undercount/u, /Check APIM only when outbound configuration proves/u,
+      /do not change profiles, expand access/u]) {
       assert.match(text, contract, entry);
     }
   }

@@ -40,6 +40,33 @@ attempts keep the same snapshot. Legacy resumes are not silently moved.
 Preparation already installs the reviewed profile and declared non-sensitive
 setup files in the snapshot. Watcher phases review remaining setup locally,
 without repeating onboarding with `--from` or requesting source-clone access.
+The agent uses the prepared profile and the host preparation summary supplied
+in its prompt or retained session. It does not discover private setup receipts
+by reading `.git` pointers or scanning parent Git/worktree metadata. Approved
+`fixlab issue-plan` and `fixlab exec` commands perform their own internal setup
+checks; this handoff grants no additional folder access.
+Before a fresh read-only review, the host uses the contained worktree setup runner
+to run `fixlab prepare --application=<frontend|backend|browser> --yes` with that
+snapshot's reviewed restore commands and
+confined working directories. This is included in the watcher approval preview;
+it does not run onboarding, application/browser startup or sign-in. Setup has a
+ten-minute restore-command budget divided between configured applications, with
+bounded owned-process termination grace. Each restore gets an independent attempt;
+one missing folder, failure or timeout does not starve other applications.
+Setup records a separate passed/blocked prerequisite, not a passed test. Restore
+failures retain only bounded diagnostic codes in the review prompt; independent
+checks with available prerequisites can still run. Tracked-file changes or changed
+reviewed profile/setup file hashes stop read-only review. A bounded content
+inventory also protects untracked and Git-ignored instructions, source and
+configuration before and after every restore. Only `node_modules` below declared
+restore directories and `obj` below backend restore directories are dependency
+outputs; tracked and explicitly reviewed files remain protected there too.
+Changes are preserved rather than silently reviewing modified source.
+Authentication resumes and later fix
+phases do not repeat host preparation.
+Restore directories and the Git-private command-evidence path are checked again
+immediately before each invocation. Verified pre-launch failures release setup
+ownership; only launched work without stopped proof retains its reservation.
 Read-only review never provisions dependencies or changes configuration; any
 fix-phase setup still requires its existing scoped approval. Missing prerequisites
 block dependent checks, not independent source analysis. No extra folder grants,
@@ -63,11 +90,30 @@ analysis; only `needs-fix` continues in the same session, retaining its comparis
 through authentication pauses. A deployment gap requires a known, different
 deployed commit. Profile/helper approval, ordinary authentication, read-only
 business-data access and normal publication gates remain unchanged.
+The fix handoff explicitly ends only the completed review phase's source/PR
+prohibitions; it does not widen runtime permissions. Agency resumes retain its
+own `--session-id` as well as the underlying Copilot `--resume` identity.
+Copilot's plugin and agent arguments follow Agency's `--` passthrough boundary,
+so Agency cannot replace the stable `fixlab:fixlab` agent with a temporary
+rendered agent name that fails to reload on resume. Prompts stay on stdin.
+Already-prepared snapshots do not repeat onboarding or scaffolding to review
+setup. Structured validation fingerprints the whole Git repository even when
+invoked from a component directory; command working-directory selection remains
+separate, preserving source/profile/instruction invalidation across components.
 Validated trace evidence is checkpointed before entering fix work and restored
 on authentication resume. Phase results merge only one source/revision within
 the approved bounded window, deduplicate observed rows, retain at most ten and
 disclose truncation and omitted diagnostics. Incompatible evidence blocks rather
 than replacing the earlier observations.
+
+Compiled read-only trace queries allow one host-owned retry for recognized
+transient transport failures or HTTP 429/502/503/504, with bounded backoff and
+unchanged source, query, window, row limit and token. The CLI revalidates profile
+and compiler approval before each dispatch. Redirects, TLS failures, denied
+access, invalid evidence and failed response cleanup remain hard stops.
+Recovery reports actual attempts; exhausted diagnostics name the missing
+root-cause proof and the next authorized action instead of implying that
+correlated status codes or passing unit tests establish the cause.
 
 The existing dashboard's **Watcher jobs** panel reads the scope-checked private
 journal through `GET /api/ticket-automation`; reading never starts or changes
@@ -106,6 +152,67 @@ delivery fingerprint. If that proves an existing comment but the trace policy
 is now stale, the attempt is marked reconciled with an explicit review notice;
 no stale result is reposted and no new resolution is attempted. Unconfirmed or
 unsent stale feedback remains blocked for review.
+New attempts use a separate `trace-image` feedback version. After policy
+validation, an in-memory PNG grid renders returned UTC timestamps, telemetry
+table/type, boolean success, three-digit status codes and numeric severity with
+fixed level labels. It shows the bounded UTC window, retained row count,
+truncation and omitted-diagnostic count. Exact policy-approved endpoint templates
+and log messages are drawn below the grid and linked by row number; missing
+request/dependency routes are explicitly marked not captured. Approval is rechecked
+before rendering, and an absent route is never inferred from a method or message.
+Diagnostic text wraps within the image, is uppercased for the bitmap font, and
+unsupported characters display as `U+HEX`; the PNG description retains the exact
+approved literals. Source/operation/correlation IDs, exception names, URLs and
+payloads are never drawn or embedded. The original bitmap font, rasterizer, PNG chunks and Node
+zlib compression require no browser, fonts, external requests or new dependency;
+the module ships in the existing `dashboard` package directory.
+The image is explicitly **Rendered trace results**, observed evidence, not a
+Portal screenshot, causal proof or application validation. It uses no uploaded
+user screenshot and causes no additional telemetry read.
+New `trace-image-expanded` attempts also include a compact text row for each
+observed UTC timestamp, telemetry type, available status/severity and approved
+diagnostic preview. Correlation IDs remain private. Tables use available comment
+width and wrap long cells; FixLab cannot expand ADO's outer Discussion column.
+A visible full-size attachment link and clickable, responsive image provide
+access when an inline preview is hidden or too small. Older pending feedback
+versions retain their original text and image marker for delivery reconciliation.
+An operator-only error-message preview is separate from the literal-only evidence
+contract. It requires `--error-preview-approval` with an absolute, regular local
+JSON file binding the exact plan hash, profile hash, policy revision, work item,
+source and UTC timestamp. Approval expires within 30 minutes and is atomically
+claimed with a sibling `.used` receipt before authentication; an uncertain attempt
+cannot be replayed. Only one operation-ID predicate, one severity-3/4 trace record
+and a 200-character message are permitted. The reader makes no transient retry,
+returns only timestamp/error columns (never normal `traceEvidence`), redacts
+detected URLs, identities and identifiers before truncation, and omits payload-,
+credential- or stack-shaped content. Empty/omitted output is not an error diagnosis.
+This opt-in does not modify the repository profile or authorize unattended use.
+Redaction is conservative and may remove useful context; it is not raw log export.
+Source-guided incident analysis is shared by the dashboard, headless CLI and
+watcher and mirrored in packaged/initialized agent guidance. It follows actual
+client/logging fields and distinguishes excluded projections from missing logs.
+Opt-in URL-shape plans compute numeric diagnostics inside the reviewed telemetry
+query; raw URL/query values never enter returned evidence. Policy, source/table,
+numeric bounds and optional term definitions are rechecked before storage,
+feedback and image rendering. Logged character lengths and decoded fixed-term
+matches are neither wire-byte sizes nor verified item counts; telemetry truncation
+can undercount them. APIM is a follow-up source only when outbound configuration
+establishes that path. No new reader/source approval is inferred from this guidance.
+
+The configured ADO project receives at most one bounded 64 KiB PNG upload per
+feedback phase. A private `uploading` receipt is saved before the request;
+confirmed attachment identities are persisted before comment preparation.
+Only canonical ADO attachment URLs are rendered as images, alongside a readable
+caption whose attachment identity participates in the comment fingerprint.
+An uncertain upload (including a restart during upload), unsupported upload
+client or failed render yields explicit **image unavailable** text, not another
+upload or a blocked diagnosis. An uncertain upload may leave an unlinked provider
+attachment; there is no automatic deletion or retry. Confirmed uploads are reused
+after restart, and attempted comment fingerprints stay unchanged. Legacy,
+`readable` and `table` pending attempts never gain images. Assignment, ticket
+revision and reviewed scope are rechecked immediately before both upload and
+comment writes. An explicit authentication continuation starts a new feedback
+phase with its own image receipt; previous comment deduplication remains intact.
 These agent-reported correlations never establish a cause or deployed revision.
 Last reported worker status is not a process-liveness assertion.
 On Windows, atomic journal replacement retries transient reader-sharing errors
@@ -277,7 +384,11 @@ request does not consume a later request's dispatch budget.
 
 For broader DEV validation, the separate **Allow all DEV API writes for this job**
 checkbox exposes `fixlab_dev_write` for POST/PUT/PATCH/DELETE on exact reviewed
-`dataSafety.devWrite` HTTPS origins, without endpoint/test-record enumeration.
+`dataSafety.devWrite` HTTPS origins or exact environment-bound `baseUrls`,
+without endpoint/test-record enumeration. API base scopes bind the origin and
+path prefix, so a shared gateway does not grant access to sibling APIs or another
+environment on the same hostname. These scopes require fresh per-job approval;
+`allowAll` and browser proxy aliases cannot be combined with `baseUrls`.
 It can affect any accessible DEV record and reuses the same revision-bound,
 memory-only grant and lifecycle revocation. No other environment or explicit
 read-only contract is expanded; browser guards remain intact. See

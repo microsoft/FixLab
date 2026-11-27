@@ -116,6 +116,7 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     mkdirSync(join(repository, ".github", "fixlab"), { recursive: true });
     writeFileSync(join(repository, ".github", "fixlab", "repository-profile.json"), JSON.stringify({
       environments: ["dev"],
+      validation: { commands: { backendRestore: "node restore-fixture.cjs" } },
       pullRequests: { defaultTargetBranch: "develop", requireConfirmation: true },
       ticketAutomation: { tag: "FixLab", areaPaths: ["Example\\Application"] }
     }));
@@ -127,6 +128,11 @@ test("watch is plan-only until the repository-scoped tool and publication sessio
     assert.match(plan.stdout, /"targetBranch": "develop"/);
     assert.match(plan.stdout, /each assigned checkout's own command-evidence folder/u);
     assert.match(plan.stdout, /No work-item state changes/);
+    const preparation = JSON.parse(plan.stdout.slice(0, plan.stdout.lastIndexOf("}") + 1)).dependencyPreparation;
+    assert.deepEqual(preparation.commands, { backendRestore: "node restore-fixture.cjs" });
+    assert.match(preparation.scope, /Before a fresh owned snapshot enters read-only review/u);
+    assert.match(preparation.scope, /No application\/browser startup or sign-in/u);
+    assert.equal(existsSync(join(repository, "obj")), false);
     const copilotArgs = ["watch", repository, "--runtime", "copilot", "--model", "gpt-5.3-codex", "--environment", "dev"];
     const copilot = run(copilotArgs, repository);
     assert.equal(copilot.status, 0, copilot.stderr);
@@ -1344,6 +1350,11 @@ test("prepare plans and runs repository-owned restore commands", () => {
       false
     );
 
+    const backendOnly = run(["prepare", repository, "--application=backend", "--yes"], repository);
+    assert.equal(backendOnly.status, 0, backendOnly.stderr);
+    assert.equal(existsSync(join(repository, "backend", "src", "prepared.txt")), true);
+    assert.equal(existsSync(join(repository, "frontend", "prepared.txt")), false);
+    assert.equal(run(["prepare", repository, "--application=unknown", "--yes"], repository).status, 1);
     const prepared = run(["prepare", repository, "--yes"], repository);
     assert.equal(prepared.status, 0);
     assert.match(prepared.stdout, /PASS  frontend restore/);
@@ -1755,7 +1766,7 @@ test("chat validates a repository before starting a missing dashboard", () => {
   assert.match(result.stderr, /repository does not exist/);
 });
 
-test("run launches the Agency-resolved FixLab agent with real DEV reads from new onboarding defaults", () => {
+test("run passes the stable Copilot FixLab agent through Agency with real DEV reads from new onboarding defaults", () => {
   const repository = mkdtempSync(join(tmpdir(), "fixlab-cli-"));
   const executableDirectory = join(repository, "bin");
 
@@ -1806,7 +1817,7 @@ test("run launches the Agency-resolved FixLab agent with real DEV reads from new
     assert.equal(result.status, 0);
     assert.match(
       result.stdout,
-      /ARGS:copilot --plugin-dir [^\r\n]+ --agent fixlab:fixlab/
+      /ARGS:copilot --session-id [a-f0-9-]{36} -- --plugin-dir [^\r\n]+ --agent fixlab:fixlab/
     );
     assert.doesNotMatch(result.stdout, /--interactive/);
     assert.match(result.stdout, /Use development as the user-selected validation environment/);

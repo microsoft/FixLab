@@ -856,6 +856,28 @@ duplicate PR. Only a completed `needs-fix` review continues into the same
 session's authorized fix/draft-PR phase. Existing profile/setup approvals are
 retained; private credentials and browser state are not copied.
 
+The watcher preview includes the configured frontend, backend and browser restore
+commands. Before each fresh owned snapshot enters read-only review, the host runs
+only those commands through `fixlab prepare --application=<frontend|backend|browser>
+--yes`. A ten-minute restore-command budget is divided between the configured
+applications, with bounded owned-process termination grace. Each application is
+attempted independently, so a failed frontend restore cannot prevent backend setup.
+Application/browser startup, sign-in and onboarding are not requested.
+Restore directories must remain inside the owned snapshot, and its reviewed
+profile revision must match the configuration approved when the watcher started.
+Changed configuration requires review and a watcher restart.
+Preparation also checks untracked and Git-ignored instructions, source and
+configuration before and after each restore. Only `node_modules` below declared
+restore directories and `obj` below backend restore directories are permitted
+dependency outputs; tracked and reviewed setup files remain protected there.
+Unexpected changes are preserved and block read-only review.
+Preparation is not repeated on authentication resume
+or entry to the fix phase. A failed restore is a blocked prerequisite, not a passed
+test; independent existing checks with available prerequisites, source analysis
+and approved evidence analysis can still continue.
+Direct `fixlab prepare` without `--application` retains its existing fail-fast,
+all-applications behavior.
+
 Adding `FixLab` to an active Bug, User Story, Feature or Product Backlog Item
 assigned to the signed-in Azure DevOps user, in a configured area or descendant,
 makes it eligible at the next poll. The query uses `[System.AssignedTo] = @Me`:
@@ -879,6 +901,18 @@ relative file/line references where available. Trace evidence has a separate
 **Trace snapshot (observed)** table showing the request/downstream/log chain and
 its limits. Reported incident explanations are attributed; status codes alone
 do not establish request counts, exceeded limits or an oversized URL.
+New attempts also embed **Rendered trace results**, a PNG grid rendered locally
+from the already-returned approved rows. It shows UTC timestamps/window,
+telemetry table/type, success/status/severity, row count and truncation/omissions;
+private IDs, exception names, URLs, endpoints, payloads and log messages are
+excluded. It is observed evidence, not an Azure Portal screenshot, root-cause
+proof or application validation. Rendering needs no browser, sign-in or network
+access and never triggers another trace query. Only uploading to the reviewed
+ADO project uses the existing ADO authentication. Render/upload failure produces
+explicit **image unavailable** feedback with the text findings intact. An
+uncertain upload is not automatically repeated; an unlinked attachment may need
+provider-side review. Restart reuses confirmed uploads and preserves attempted
+comment receipts; older pending feedback is not retrofitted with an image.
 Tables do not require screenshots. Screenshot evidence must come from actual
 approved validation; missing screenshots or inaccessible incident notes are never
 invented. Detailed findings, completed/proposed work and evidence remain

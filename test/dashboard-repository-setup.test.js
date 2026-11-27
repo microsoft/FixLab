@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { assignedJobWorktree, needsJobWorktree, prepareJobWorktree, restoreJobWorktree } from "../dashboard/job-worktree.js";
 import { createExecutorLease } from "../dashboard/executor-lease.js";
+import { executeVersionedTicketAgent } from "../dashboard/ticket-automation.js";
+import { resolveEvidenceRoot } from "../bin/structured-command.js";
 import { applyWorktreeSetup, browserConfigurationErrors, planWorktreeSetup, SETUP_PROFILE_PATH } from "../dashboard/repository-setup.js";
 
 function fixture() {
@@ -133,6 +136,8 @@ test("owned checkout recovery retains verified configuration when only watcher d
 test("owned checkout onboarding runs declared setup and reports a failed restore without claiming readiness", async () => {
   const f = fixture();
   try {
+    f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
     const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
     const packageRoot = join(f.root, "helper");
     mkdirSync(join(packageRoot, "bin"), { recursive: true });
@@ -150,10 +155,27 @@ test("owned checkout onboarding runs declared setup and reports a failed restore
     assert.equal((await restoreJobWorktree({ workspace: recovered, packageRoot, runtime: "copilot",
       onOutput: text => output.push(text) })).ready, true);
     assert.match(output.join(""), /retaining.*verified.*configuration/);
+    writeFileSync(cli, `
+      if (process.argv[2] !== 'prepare' || !process.argv.includes('--yes') ||
+          process.argv.includes('--from') || process.argv.includes('--authenticate') ||
+          process.argv.includes('--start-dashboard')) process.exit(8);
+      const fs = require('node:fs');
+      fs.mkdirSync('obj', { recursive: true });
+      fs.writeFileSync(require('node:path').join('obj', 'project.assets.json'), 'restored');
+    `);
+    const dependencies = await restoreJobWorktree({ workspace, packageRoot, runtime: "copilot", dependenciesOnly: true });
+    assert.equal(dependencies.ready, true);
+    assert.equal(readFileSync(join(workspace.repository, "obj", "project.assets.json"), "utf8"), "restored");
     writeFileSync(cli, "process.exit(7);");
     const failed = await restoreJobWorktree({ workspace, packageRoot, runtime: "copilot" });
     assert.equal(failed.ready, false);
     assert.match(failed.message, /exited 7.*no check is claimed passed/);
+    writeFileSync(cli, "setInterval(() => {}, 1000);");
+    const timedOut = await restoreJobWorktree({
+      workspace, packageRoot, dependenciesOnly: true, timeoutMs: 1000
+    });
+    assert.equal(timedOut.ready, false);
+    assert.match(timedOut.message, /timed out.*no check is claimed passed/u);
     const cancellation = new AbortController();
     cancellation.abort();
     await assert.rejects(restoreJobWorktree({ workspace, packageRoot, runtime: "copilot",
@@ -165,6 +187,223 @@ test("owned checkout onboarding runs declared setup and reports a failed restore
     }), { name: "AbortError" });
     createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
       .acquire(workspace.jobId).release();
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("watcher preparation runs real profile restores before review without copying assets from the source", async () => {
+  const f = fixture();
+  try {
+    f.profile.applications = { backend: { workingDirectory: "." } };
+    f.profile.validation = { commands: { backendRestore:
+      `node -e "const f=require('node:fs'); const p=require('node:path'); f.mkdirSync('obj',{recursive:true}); f.writeFileSync(p.join('obj','project.assets.json'),'restored'); f.mkdirSync(p.join('node_modules','fixture'),{recursive:true}); f.writeFileSync(p.join('node_modules','fixture','index.js'),'restored dependency');"`
+    } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+    await assert.rejects(restoreJobWorktree({
+      workspace, packageRoot, dependenciesOnly: true, approvedProfile: { ...f.profile, changed: true }
+    }), /changed since watcher approval/u);
+    await executeVersionedTicketAgent({
+      workspace, prompt: "Review synthetic source after its declared restore.",
+      prepareWorkspace: assigned => restoreJobWorktree({ workspace: assigned, packageRoot, dependenciesOnly: true }),
+      execute: async options => {
+        assert.equal(options.mode, "validate-only");
+        assert.equal(readFileSync(join(workspace.repository, "obj", "project.assets.json"), "utf8"), "restored");
+        assert.equal(readFileSync(join(workspace.repository, "node_modules", "fixture", "index.js"), "utf8"), "restored dependency");
+        assert.equal(existsSync(join(f.source, "obj")), false);
+        assert.match(options.prompt, /configured dependency restores completed/u);
+        return { outcome: "analysis", summary: "Existing source inspected.",
+          versionComparison: { latestCommit: workspace.baseCommit, finding: "unknown", evidence: "Synthetic source only." } };
+      }
+    });
+    writeFileSync(join(workspace.repository, SETUP_PROFILE_PATH), `${JSON.stringify(f.profile)} `);
+    await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }), /reviewed profile revision/u);
+    f.profile.applications.backend.workingDirectory = "..";
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const escaped = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    await assert.rejects(restoreJobWorktree({ workspace: escaped, packageRoot, dependenciesOnly: true }), /without traversal/u);
+    f.profile.applications.backend.workingDirectory = ".";
+    f.profile.validation.commands.backendRestore =
+      `node -e "console.error('NU1301 token=synthetic-secret https://example.invalid/feed'); process.exit(7);"`;
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const failed = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    const prerequisite = await restoreJobWorktree({ workspace: failed, packageRoot, dependenciesOnly: true });
+    assert.equal(prerequisite.ready, false);
+    assert.match(prerequisite.message, /backend restore failed.*NU1301/u);
+    assert.doesNotMatch(prerequisite.message, /synthetic-secret|example\.invalid/u);
+    f.profile.validation.commands.backendRestore =
+      `node -e "require('node:fs').writeFileSync('tracked.txt','changed by restore');"`;
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const changed = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    await assert.rejects(executeVersionedTicketAgent({
+      workspace: changed, prompt: "Do not review modified source.",
+      prepareWorkspace: assigned => restoreJobWorktree({ workspace: assigned, packageRoot, dependenciesOnly: true }),
+      execute() { assert.fail("Restore-modified source must not enter read-only version review."); }
+    }), /changed tracked snapshot files/u);
+    assert.equal(readFileSync(join(changed.repository, "tracked.txt"), "utf8"), "changed by restore");
+    createExecutorLease(changed.repository, "verified-setup-successor", { worktree: true })
+      .acquire(changed.jobId).release();
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("dependency preparation rejects added instructions and modified untracked or ignored source before review", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.source, ".gitignore"), "ignored-source/\n");
+    f.git("add", ".gitignore");
+    f.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "source ignores");
+    f.profile.applications = { backend: { workingDirectory: "." } };
+    f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    const cli = join(packageRoot, "bin", "fixlab.js");
+    for (const parts of [["AGENTS.md"], ["ignored-source", "new.js"], ["source", "config.json"], ["obj"]]) {
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      const target = join(workspace.repository, ...parts);
+      mkdirSync(dirname(target), { recursive: true });
+      if (parts[0] === "source") { writeFileSync(target, "reviewed configuration"); }
+      writeFileSync(cli, `const fs = require('node:fs'); const p = require('node:path').join(...${JSON.stringify(parts)});
+        fs.mkdirSync(require('node:path').dirname(p), { recursive: true }); fs.writeFileSync(p, 'restore-modified source');`);
+      await assert.rejects(executeVersionedTicketAgent({
+        workspace, prompt: "Review only the original snapshot.",
+        prepareWorkspace: assigned => restoreJobWorktree({ workspace: assigned, packageRoot, dependenciesOnly: true }),
+        execute() { assert.fail("Restore-modified instructions or source must not enter read-only review."); }
+      }), /changed protected snapshot files/u);
+      assert.equal(readFileSync(target, "utf8"), "restore-modified source");
+      createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+        .acquire(workspace.jobId).release();
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("dependency preparation blocks missing directories and rejects restore-modified reviewed setup", async () => {
+  const f = fixture();
+  try {
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    const cli = join(packageRoot, "bin", "fixlab.js");
+    f.profile.applications = { backend: { workingDirectory: "missing-backend" } };
+    f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+    for (const directory of ["missing-backend", "tracked.txt"]) {
+      f.profile.applications.backend.workingDirectory = directory;
+      writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      writeFileSync(cli, "process.exit(8);");
+      const result = await restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true });
+      assert.equal(result.ready, false);
+      assert.match(result.message, /backend restore directory.*missing|backend restore directory.*not a directory/u);
+    }
+    f.profile.applications.backend.workingDirectory = ".";
+    for (const parts of [[".github", "fixlab", "repository-profile.json"], ["frontend", "playwright.local.ts"]]) {
+      writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      writeFileSync(cli, `require('node:fs').writeFileSync(require('node:path').join(...${JSON.stringify(parts)}),'{}');`);
+      await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }),
+        /reviewed profile|reviewed setup/u);
+      assert.equal(readFileSync(join(workspace.repository, ...parts), "utf8"), "{}");
+      createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+        .acquire(workspace.jobId).release();
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("dependency preparation force-stops a POSIX restore that ignores graceful termination",
+  { skip: process.platform === "win32", timeout: 20000 }, async () => {
+    const f = fixture();
+    try {
+      f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+      writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      const packageRoot = join(f.root, "helper");
+      mkdirSync(join(packageRoot, "bin"), { recursive: true });
+      writeFileSync(join(packageRoot, "bin", "fixlab.js"),
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);");
+      const result = await restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true, timeoutMs: 1000 });
+      assert.equal(result.ready, false);
+      assert.match(result.message, /timed out/u);
+      createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+        .acquire(workspace.jobId).release();
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
+test("a failed frontend restore does not prevent independent backend preparation", async () => {
+  const f = fixture();
+  try {
+    f.profile.applications = { frontend: { workingDirectory: "frontend" }, backend: { workingDirectory: "." } };
+    f.profile.validation = { commands: { frontendRestore: "node restore-fixture.cjs", backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    writeFileSync(join(packageRoot, "bin", "fixlab.js"), `
+      if (process.argv.includes('--application=frontend')) process.exit(7);
+      if (!process.argv.includes('--application=backend')) process.exit(8);
+      const fs = require('node:fs'); fs.mkdirSync('obj', {recursive:true});
+      fs.writeFileSync(require('node:path').join('obj','project.assets.json'),'restored');
+    `);
+    const result = await restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true });
+    assert.equal(result.ready, false);
+    assert.match(result.message, /frontend restore.*exited 7.*backend restore.*completed/u);
+    assert.equal(readFileSync(join(workspace.repository, "obj", "project.assets.json"), "utf8"), "restored");
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("dependency preparation rejects linked evidence and releases ownership on pre-launch failures", async () => {
+  const f = fixture();
+  try {
+    f.profile.validation = { commands: { backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    writeFileSync(join(packageRoot, "bin", "fixlab.js"), "process.exit(0);");
+    for (const linked of [true, false]) {
+      const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+      const evidence = resolveEvidenceRoot(workspace.repository);
+      mkdirSync(dirname(evidence), { recursive: true });
+      if (linked) {
+        const outside = join(f.root, "outside-evidence");
+        mkdirSync(outside);
+        symlinkSync(outside, evidence, process.platform === "win32" ? "junction" : "dir");
+        await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }), /symbolic links/u);
+      } else {
+        mkdirSync(evidence);
+        writeFileSync(join(evidence, "cache"), "not a directory");
+        await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }), error => {
+          assert.equal(error.code, "ENOTDIR");
+          assert.notEqual(error.ownedExecutorRunning, true);
+          return true;
+        });
+      }
+      createExecutorLease(workspace.repository, "verified-setup-successor", { worktree: true })
+        .acquire(workspace.jobId).release();
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("each restore rechecks its directory after earlier restore scripts run", async () => {
+  const f = fixture();
+  try {
+    f.profile.applications = { frontend: { workingDirectory: "." }, backend: { workingDirectory: "backend" } };
+    f.profile.validation = { commands: { frontendRestore: "node restore-fixture.cjs", backendRestore: "node restore-fixture.cjs" } };
+    writeFileSync(join(f.source, SETUP_PROFILE_PATH), JSON.stringify(f.profile));
+    const workspace = prepareJobWorktree({ repository: f.source, jobId: randomUUID() });
+    mkdirSync(join(workspace.repository, "backend"));
+    const outside = join(f.root, "outside-backend");
+    mkdirSync(outside);
+    const packageRoot = join(f.root, "helper");
+    mkdirSync(join(packageRoot, "bin"), { recursive: true });
+    writeFileSync(join(packageRoot, "bin", "fixlab.js"), `
+      const fs=require('node:fs'), path=require('node:path');
+      if(process.argv.includes('--application=frontend')){
+        fs.rmdirSync('backend');
+        fs.symlinkSync(${JSON.stringify(outside)}, 'backend', process.platform==='win32'?'junction':'dir');
+      } else {
+        fs.writeFileSync(path.join('backend','must-not-execute.txt'),'escaped');
+      }
+    `);
+    await assert.rejects(restoreJobWorktree({ workspace, packageRoot, dependenciesOnly: true }), /symbolic links/u);
+    assert.equal(existsSync(join(outside, "must-not-execute.txt")), false);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
