@@ -391,6 +391,36 @@ and the explicit profile are an operator assertion, not deployment attestation;
 they cannot prove that a misleading DNS alias reaches DEV. Do not list aliases
 for another environment.
 
+For a shared gateway whose environment is identified by its URL path, use
+`baseUrls` instead of `origins`. For example:
+
+```json
+{
+  "devWrite": {
+    "baseUrls": [
+      "https://api.shared.example.test/api/dev/v1/families",
+      "https://api.shared.example.test/api/dev/v1/hierarchy"
+    ],
+    "scope": "api://example-service/access",
+    "sessionHelper": "tools/dev-session.mjs"
+  }
+}
+```
+
+Each of the 1-16 base URLs must be canonical HTTPS, have no credentials,
+query, fragment or trailing slash, and identify only the selected environment
+in its host/path labels. Requests must match the exact origin and base path or
+a descendant path; sibling prefixes, another environment on the same gateway,
+encoded path escapes and redirects are blocked. The independent PPE
+configuration supports the same path-scoped form with PPE URLs.
+Do not combine `baseUrls` with `origins`, `browserProxyPaths` or
+`allowAll: true`: path-scoped writes require fresh per-job consent and never
+establish persistent write permission. Existing POST-only `dataSafety.post`
+base scopes remain POST-only. These write scopes allow any accessible record
+within the reviewed paths, not just named test records; review the job's
+specific test data separately and use isolated copies rather than modifying
+source business records.
+
 The existing reviewed `.mjs` helper must export
 `withApiToken({ scope, interactive }, callback)` and use genuine authentication.
 Complete sign-in separately; the tool neither collects credentials nor bypasses
@@ -516,12 +546,14 @@ job, environment and bounded JSON input. It delegates to the same mediated
 authorization and authentication path as `fixlab_nonproduction_post`, without
 copying browser credentials. Endpoint/test-record and API-base scopes, changed
 profile/helper rejection, no redirects/retries, and shared failure revocation
-remain enforced. Endpoint/API-base grants and broad DEV grants expose only POST.
-For a broad PPE-origin grant, `forwardApprovedBrowserRequest` from the same
-helper additionally supports GET, PUT, PATCH and DELETE on exactly those PPE
-origins. Use it for approved PPE business traffic only, not sign-in, portal
-assets or other origins. The POST-only helper remains POST-only; endpoint and
-API-base grants never acquire additional methods. PPE browser requests are
+remain enforced. Endpoint and `dataSafety.post` API-base grants expose only POST.
+DEV path-scoped grants support POST, PUT, PATCH and DELETE through
+`forwardApprovedBrowserRequest`; DEV GET remains outside this relay.
+PPE origin and path-scoped grants additionally support GET within their reviewed
+scope. Existing DEV-origin relay grants remain POST-only.
+Use the helper only for approved business traffic, not sign-in, portal assets
+or other API paths. The POST-only helper remains POST-only; endpoint and
+POST-only API-base grants never acquire additional methods. Full-method requests are
 serialized (at most 16 pending) rather than raced or replayed. A failed or
 ambiguous request revokes the grant for queued requests too. GET cannot carry
 a payload and retains read-only metadata; use scenario assertions to verify

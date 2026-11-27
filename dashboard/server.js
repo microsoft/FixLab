@@ -582,8 +582,8 @@ function publicQueue(jobs) {
     toolApprovalMode: job.toolApprovalMode ?? "ask",
     postWriteApproved: Boolean(job.postWriteApproval?.revision) &&
       (!isOriginWriteApproval(job.postWriteApproval) || job.postWriteApproval.mode === "post-base"),
-    devWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "dev-origin",
-    ppeWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "ppe-origin",
+    devWriteApproved: Boolean(job.postWriteApproval?.revision) && ["dev-origin", "dev-base"].includes(job.postWriteApproval.mode),
+    ppeWriteApproved: Boolean(job.postWriteApproval?.revision) && ["ppe-origin", "ppe-base"].includes(job.postWriteApproval.mode),
     fileAccess: job.fileAccess ?? null,
     sourceEditReview: recordedSourceEditReview(job.sourceEditReview),
     recordPlaywrightVideo: job.recordPlaywrightVideo,
@@ -2475,8 +2475,8 @@ function publicJob(job) {
     toolApprovalMode: job.toolApprovalMode ?? "ask",
     postWriteApproved: Boolean(job.postWriteApproval?.revision) &&
       (!isOriginWriteApproval(job.postWriteApproval) || job.postWriteApproval.mode === "post-base"),
-    devWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "dev-origin",
-    ppeWriteApproved: Boolean(job.postWriteApproval?.revision) && job.postWriteApproval.mode === "ppe-origin",
+    devWriteApproved: Boolean(job.postWriteApproval?.revision) && ["dev-origin", "dev-base"].includes(job.postWriteApproval.mode),
+    ppeWriteApproved: Boolean(job.postWriteApproval?.revision) && ["ppe-origin", "ppe-base"].includes(job.postWriteApproval.mode),
     budgetExceeded: job.budgetExceeded === true,
     runtimeDirectoryGrants: (job.runtimeDirectoryGrants ?? []).map((scope) => scope.directory),
     canResume: canResumeJob(job),
@@ -4394,7 +4394,8 @@ export function createDashboardServer({
       configuredTestSynthesis(currentProfile, job.testEvidence.selectedMutationMode ?? "", true, job.targetEnvironment);
       const environment = job.postWriteApproval.environment;
       const postOnly = job.postWriteApproval.mode === "post-base";
-      prompt += `\nThe user explicitly authorized all ${environment.toUpperCase()} ${postOnly ? "POST requests, including writes," : "API writes"} for this job within the reviewed ${postOnly ? `dataSafety.post.${environment}.baseUrls HTTPS API bases` : `dataSafety.${environment}Write HTTPS origins`}. Use ${postOnly ? "fixlab_nonproduction_post for POST only" : `fixlab_${environment}_write for ${environment === "ppe" ? "GET, " : ""}POST, PUT, PATCH and DELETE`} without repeat confirmation or endpoint/test-record enumeration. This can change any record accessible to the signed-in account within that scope. The grant binds this job, ${environment.toUpperCase()} and the profile/helper revision, expires with execution, and stops after unsuccessful or ambiguous attempts. No other ${postOnly ? "methods, " : ""}environments, redirects, retries, shell/browser-write substitutes or browser-guard bypass. Existing authentication is required. Report approved-write evidence; HTTP success alone is not scenario success.`;
+      const pathScoped = ["dev-base", "ppe-base"].includes(job.postWriteApproval.mode);
+      prompt += `\nThe user explicitly authorized all ${environment.toUpperCase()} ${postOnly ? "POST requests, including writes," : "API writes"} for this job within the reviewed ${postOnly ? `dataSafety.post.${environment}.baseUrls HTTPS API bases` : `dataSafety.${environment}Write${pathScoped ? ".baseUrls HTTPS API bases" : " HTTPS origins"}`}. Use ${postOnly ? "fixlab_nonproduction_post for POST only" : `fixlab_${environment}_write for ${environment === "ppe" ? "GET, " : ""}POST, PUT, PATCH and DELETE`} without repeat confirmation or endpoint/test-record enumeration. This can change any record accessible to the signed-in account within that scope. The grant binds this job, ${environment.toUpperCase()} and the profile/helper revision, expires with execution, and stops after unsuccessful or ambiguous attempts. No other ${postOnly ? "methods, " : ""}environments, redirects, retries, shell/browser-write substitutes or browser-guard bypass. Existing authentication is required. Report approved-write evidence; HTTP success alone is not scenario success.`;
     } else if (typeof job.testEvidence.allowPostRequests === "boolean") {
       configuredTestSynthesis(currentProfile, job.testEvidence.selectedMutationMode ?? "",
         job.testEvidence.allowPostRequests, job.targetEnvironment);
@@ -7600,7 +7601,7 @@ Code work remains parallel in separate owned checkouts. Local-stack/live-test ga
         pushLog(job, {
           index: job.nextLogIndex, timestamp: new Date().toISOString(), stream: "dashboard",
           message: isOriginWriteApproval(postWriteApproval)
-            ? `The user explicitly authorized ${postWriteApproval.mode === "post-base" ? "POST only within reviewed API bases" : "POST/PUT/PATCH/DELETE on reviewed origins"} in ${postWriteApproval.environment.toUpperCase()} for this job, including any record accessible to their account. Approval is revision-bound, memory-only and expires with this executor; other methods/environments and explicit read-only restrictions remain blocked.`
+            ? `The user explicitly authorized ${postWriteApproval.mode === "post-base" ? "POST only within reviewed API bases" : `POST/PUT/PATCH/DELETE on reviewed ${["dev-base", "ppe-base"].includes(postWriteApproval.mode) ? "API bases" : "origins"}`} in ${postWriteApproval.environment.toUpperCase()} for this job, including any record accessible to their account. Approval is revision-bound, memory-only and expires with this executor; other methods/environments and explicit read-only restrictions remain blocked.`
             : "The user explicitly authorized configured POST writes for this job and selected environment without repeat confirmation. Approval is revision-bound, memory-only and expires with this executor; production and read-only restrictions remain in effect."
         });
       }

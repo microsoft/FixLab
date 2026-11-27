@@ -246,6 +246,15 @@ artifacts rather than product changes.
 
 ### Real DEV reads and writes for React applications
 
+For job-scoped writes through a shared gateway, configure
+`browserAutomation.dataSafety.devWrite.baseUrls` with exact environment-bound
+HTTPS API paths, the approved `scope` and an existing `.mjs` `sessionHelper`.
+Keep `allowAll` absent or false and omit `origins` and `browserProxyPaths`.
+Each native job then needs its own DEV-write confirmation; no permission is
+shared with another developer or recovered job. See
+[path-scoped write setup](security.md#broad-dev-and-ppe-api-writes).
+Share the reviewed profile/helper code, not authentication state or job grants.
+
 In repository settings, enable **real DEV API reads and all writes** and provide
 the real DEV API origins, full API scope and existing repository-relative `.mjs`
 authentication helper. Review and apply the preview once. This config is shared

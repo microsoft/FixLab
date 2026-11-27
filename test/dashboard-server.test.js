@@ -2864,8 +2864,8 @@ test("POST checkbox write consent is origin-bound, job-scoped and never recovere
   }
 });
 
-for (const environment of ["dev", "ppe"]) {
-test(`${environment.toUpperCase()} write checkbox requires fresh native loopback consent and loses broad approval on hold/recovery`, async () => {
+for (const [environment, pathScoped] of [["dev", false], ["ppe", false], ["dev", true]]) {
+test(`${environment.toUpperCase()} ${pathScoped ? "path-scoped " : ""}write checkbox requires fresh native loopback consent and loses broad approval on hold/recovery`, async () => {
   const repository = createGitRepository();
   const writeField = environment === "dev" ? "allowDevWrites" : "allowPpeWrites";
   const confirmField = environment === "dev" ? "devWriteApprovalConfirmed" : "ppeWriteApprovalConfirmed";
@@ -2877,7 +2877,9 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
   }
   profile.browserAutomation.dataSafety[`${environment}Write`] = {
     scope: "api://example-service/access", sessionHelper: "dev-session.mjs",
-    origins: [`https://api.${environment}.example.test`]
+    ...(pathScoped
+      ? { baseUrls: [`https://api.shared.example.test/api/${environment}/v1/families`] }
+      : { origins: [`https://api.${environment}.example.test`] })
   };
   writeFileSync(join(repository, "dev-session.mjs"),
     'export async function withApiToken(options, run) { await run("synthetic-value"); }\n');
@@ -2915,10 +2917,13 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
     assert.equal(created.body.job[approvedField], true);
     assert.equal(created.body.job[environment === "dev" ? "ppeWriteApproved" : "devWriteApproved"], false);
     assert.equal(created.body.job.postWriteApproved, false);
-    assert.equal(launches[0].postWriteApproval.mode, `${environment}-origin`);
+    assert.equal(launches[0].postWriteApproval.mode, `${environment}-${pathScoped ? "base" : "origin"}`);
     assert.equal(launches[0].postWriteApproval.jobId, created.body.job.id);
     assert.equal(launches[0].allowPostRequests, true);
     assert.match(launches[0].prompt, new RegExp(`fixlab_${environment}_write.*POST, PUT, PATCH and DELETE`, "u"));
+    if (pathScoped) {
+      assert.match(launches[0].prompt, /dataSafety\.devWrite\.baseUrls HTTPS API bases/u);
+    }
     if (environment === "ppe") {
       assert.equal(created.body.job.runAllUiScenarios, true);
       assert.match(launches[0].prompt, /run every repository-defined Playwright\/UI scenario/);
@@ -2939,7 +2944,7 @@ test(`${environment.toUpperCase()} write checkbox requires fresh native loopback
     });
     assert.equal(held.body.held[0][approvedField], false);
     const snapshot = readFileSync(join(dirname(createCacheContext(repository).cachePath), "dashboard-jobs.json"), "utf8");
-    assert.doesNotMatch(snapshot, /"postWriteApproval":|"(dev|ppe)-origin"|"(dev|ppe)WriteApproved":true/u);
+    assert.doesNotMatch(snapshot, /"postWriteApproval":|"(dev|ppe)-(origin|base)"|"(dev|ppe)WriteApproved":true/u);
     await running.dashboard.close();
     running = await startDashboard(repository, executor, undefined, { runtime: "copilot" });
     assert.equal((await jsonRequest(running.url, "/api/status")).body.job[approvedField], false);

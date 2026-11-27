@@ -37,7 +37,7 @@ export const COPILOT_EXECUTION_GUIDANCE =
   "Use normal Copilot reasoning and native tools. Stage markers report work; they are not a recipe. Reuse verified context; do authorized work without asking. Respect instructions, permissions, human authentication and data safety.";
 
 export const DEV_WRITE_GUIDANCE =
-  "Native Copilot DEV/PPE: separate consent enables fixlab_dev_write/fixlab_ppe_write POST/PUT/PATCH/DELETE on dataSafety.devWrite/ppeWrite HTTPS origins, any record; job guards.";
+  "Native DEV/PPE consent: fixlab_dev_write/fixlab_ppe_write POST/PUT/PATCH/DELETE on dataSafety.devWrite/ppeWrite HTTPS origins or environment-bound baseUrls; scoped records; job guards.";
 
 export const PPE_POST_GUIDANCE =
   "Native Copilot POST-only consent: fixlab_nonproduction_post covers any POST path/record within reviewed dataSafety.post environment baseUrls; job guards, no repeat prompts.";

@@ -384,7 +384,11 @@ request does not consume a later request's dispatch budget.
 
 For broader DEV validation, the separate **Allow all DEV API writes for this job**
 checkbox exposes `fixlab_dev_write` for POST/PUT/PATCH/DELETE on exact reviewed
-`dataSafety.devWrite` HTTPS origins, without endpoint/test-record enumeration.
+`dataSafety.devWrite` HTTPS origins or exact environment-bound `baseUrls`,
+without endpoint/test-record enumeration. API base scopes bind the origin and
+path prefix, so a shared gateway does not grant access to sibling APIs or another
+environment on the same hostname. These scopes require fresh per-job approval;
+`allowAll` and browser proxy aliases cannot be combined with `baseUrls`.
 It can affect any accessible DEV record and reuses the same revision-bound,
 memory-only grant and lifecycle revocation. No other environment or explicit
 read-only contract is expanded; browser guards remain intact. See

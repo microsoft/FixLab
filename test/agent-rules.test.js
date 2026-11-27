@@ -121,6 +121,7 @@ test("safe recovery and scoped DEV/PPE/SIT/UAT POST guidance stay aligned across
       /single-use human confirmation/u, /Allow all and batch approval never apply/u,
       /without repeat confirmation/u, /profile\/helper revision/u,
       /newly reviewed job/u, /stop job-scoped approval/u,
+      /HTTPS origins or environment-bound baseUrls/u,
       /API-only read-only contracts/u, /never substitute a shell\/browser POST/u
     ]) { assert.match(text, contract, entryPoint); }
   }

@@ -35,6 +35,13 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
   const safety = profile.browserAutomation?.dataSafety;
   const configuration = originWrites ? safety?.[`${environment}Write`] : configuredPostSafety(profile, environment);
   if (!configuration || (postBases && configuration.baseUrls === undefined)) { return null; }
+  const pathScoped = originWrites && configuration.baseUrls !== undefined;
+  if (pathScoped && configuration.origins !== undefined) {
+    throw new Error(`${label} writes must select origins or API base URLs, not both.`);
+  }
+  if (pathScoped && configuration.browserProxyPaths !== undefined) {
+    throw new Error("Path-scoped writes require direct approved API URLs, not browser proxy aliases.");
+  }
   const environments = Array.isArray(profile.environments)
     ? profile.environments : Object.keys(profile.environments ?? {});
   if (!environments.some((value) => typeof value === "string" && value.toLowerCase() === environment) ||
@@ -53,11 +60,12 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
     throw new Error(`${operation} requires an existing .mjs session helper for revision-bound loading.`);
   }
   const scope = apiScope(configuration.scope);
-  if (postBases) {
+  if (postBases || pathScoped) {
     if (!jobConsent || !["dev", "sit", "uat", "ppe"].includes(environment) ||
+        (pathScoped && !["dev", "ppe"].includes(environment)) ||
         !Array.isArray(configuration.baseUrls) || !configuration.baseUrls.length ||
         configuration.baseUrls.length > 16) {
-      throw new Error("All-POST approval requires 1-16 reviewed non-production API base URLs.");
+      throw new Error(`${pathScoped ? `${label} write` : "All-POST"} approval requires 1-16 reviewed non-production API base URLs.`);
     }
     for (const base of configuration.baseUrls) {
       const url = new URL(base);
@@ -72,7 +80,7 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
           !labels.includes(environment) ||
           ["dev", "ppe", "sit", "uat", "stage", "staging"]
             .some((value) => labels.includes(value) && value !== environment)) {
-        throw new Error("POST API bases must be exact HTTPS URLs identifying only the selected non-production environment.");
+        throw new Error(`${pathScoped ? `${label} write` : "POST"} API bases must be exact HTTPS URLs identifying only the selected non-production environment.`);
       }
     }
   } else if (originWrites) {
@@ -116,7 +124,7 @@ function configurationAt(repository, environment = "dev", jobConsent = false, or
       }
     }
   }
-  return { configuration, helper, scope,
+  return { configuration, helper, scope, pathScoped,
     revision: createHash("sha256").update(raw).update(readFileSync(helper)).digest("hex") };
 }
 
@@ -129,6 +137,9 @@ export function persistentDevApiConfiguration(repository, proposedProfile) {
     throw new Error("DEV API allowAll must be an explicit boolean in a bounded repository profile.");
   }
   const plan = configurationAt(repository, "dev", true, true, false, snapshot);
+  if (plan.pathScoped) {
+    throw new Error("Path-scoped DEV writes require fresh per-job approval; do not combine baseUrls with allowAll.");
+  }
   const frontend = snapshot.profile.applications?.frontend?.healthUrl;
   const url = frontend ? new URL(frontend) : null;
   if (url && (!["http:", "https:"].includes(url.protocol) || url.username || url.password)) {
@@ -163,9 +174,10 @@ function createOriginWriteApproval(repository, targetEnvironment, jobId, expecte
   }
   const plan = configurationAt(repository, environment, true, true);
   if (!plan) {
-    throw new Error(`Configure dataSafety.${environment}Write with reviewed ${label} origins and an existing authentication helper before approval.`);
+    throw new Error(`Configure dataSafety.${environment}Write with reviewed ${label} origins or API base URLs and an existing authentication helper before approval.`);
   }
-  return { jobId, environment, revision: plan.revision, mode: `${environment}-origin` };
+  return { jobId, environment, revision: plan.revision,
+    mode: `${environment}-${plan.pathScoped ? "base" : "origin"}` };
 }
 
 export function createDevWriteApproval(repository, targetEnvironment, jobId) {
@@ -214,6 +226,7 @@ export function inspectPpeWriteConfiguration(repository) {
 
 export function isOriginWriteApproval(approval) {
   return approval?.mode === "dev-origin" || approval?.mode === "ppe-origin" ||
+    approval?.mode === "dev-base" || approval?.mode === "ppe-base" ||
     approval?.mode === "post-base";
 }
 
@@ -234,8 +247,11 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
   const jobScoped = postWriteApproval !== undefined && postWriteApproval !== null;
   const originWrites = isOriginWriteApproval(postWriteApproval);
   const postBases = postWriteApproval?.mode === "post-base";
+  const writeBases = postWriteApproval?.mode === "dev-base" || postWriteApproval?.mode === "ppe-base";
+  const scopedBases = postBases || writeBases;
   const allMethods = originWrites && !postBases;
   const ppeJourney = allMethods && environment === "ppe";
+  const devPathJourney = allMethods && environment === "dev" && writeBases;
   const methods = [...(ppeJourney ? ["GET"] : []), "POST", "PUT", "PATCH", "DELETE"];
   const label = environment.toUpperCase();
   const operation = allMethods ? `${label} write` : "POST";
@@ -246,6 +262,7 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
         (postWriteApproval.mode !== undefined && !originWrites) ||
         (originWrites && (!(postBases ? ["dev", "sit", "uat", "ppe"] : ["dev", "ppe"]).includes(environment) ||
           !(postWriteApproval.mode === `${environment}-origin` ||
+            postWriteApproval.mode === `${environment}-base` ||
             postBases) ||
           postWriteApproval.revision === null)) ||
         typeof jobId !== "string" || !/^[a-f0-9-]{36}$/u.test(jobId) ||
@@ -261,7 +278,13 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
     return null;
   }
   const planAt = () => {
-    try { return configurationAt(repository, environment, jobConsent, originWrites && !postBases, postBases); } catch (error) {
+    try {
+      const plan = configurationAt(repository, environment, jobConsent, originWrites && !postBases, postBases);
+      if (plan && originWrites && !postBases && plan.pathScoped !== writeBases) {
+        throw new Error("The write approval scope type does not match the reviewed configuration; start a newly reviewed job.");
+      }
+      return plan;
+    } catch (error) {
       approvalStopped = jobScoped;
       throw error;
     }
@@ -274,7 +297,7 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
     name: allMethods ? `fixlab_${environment}_write` :
       !jobConsent && environment === "dev" ? "fixlab_dev_post" : "fixlab_nonproduction_post",
     description: originWrites
-      ? `Send ${allMethods ? methods.join(", ") : "any POST, including writes,"} to any path/record within the configured ${label} HTTPS ${postBases ? "API bases" : "origins"}, using existing authentication. ${originConsent} no endpoint/test-record list or repeat confirmation is needed. Approval is job/profile/helper-bound and expires with execution. No other ${allMethods ? "" : "methods, "}environments, redirects, retries, credentials or response bodies. A real write is not a passed scenario assertion.`
+      ? `Send ${allMethods ? methods.join(", ") : "any POST, including writes,"} to any path/record within the configured ${label} HTTPS ${scopedBases ? "API bases" : "origins"}, using existing authentication. ${originConsent} no endpoint/test-record list or repeat confirmation is needed. Approval is job/profile/helper-bound and expires with execution. No other ${allMethods ? "" : "methods, "}environments, redirects, retries, credentials or response bodies. A real write is not a passed scenario assertion.`
       : `Send one ${label} POST using its configured endpoint/test-record allowlist and existing authentication helper. ${jobScoped ? "The user approved this job's configured writes through the POST checkbox; no repeat confirmation is needed. Approval is bound to this job and the reviewed profile/helper revision." : "The complete URL and JSON payload require individual human confirmation, even with Allow all."} Missing setup blocks the action, not unrelated work. No redirects, retries, credentials or response bodies. This is a real write, not intercepted evidence.`,
     skipPermission: true,
     parameters: {
@@ -344,7 +367,7 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
       if (originWrites) {
         if (!safeRuntimeText(args.url, 1000)) { throw new Error(`${label} write URL is sensitive or invalid.`); }
         const target = new URL(args.url);
-        const approvedDestination = postBases
+        const approvedDestination = scopedBases
           ? !/%(?:2f|5c|25)/iu.test(target.pathname) && plan.configuration.baseUrls.some((base) => {
             const approved = new URL(base);
             return target.origin === approved.origin &&
@@ -353,7 +376,7 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
           : plan.configuration.origins.includes(target.origin);
         if (target.protocol !== "https:" || target.username || target.password || target.hash ||
             target.href !== args.url || !approvedDestination) {
-          throw new Error(`${label} write destination is outside the explicitly approved ${label} ${postBases ? "API bases" : "origins"}.`);
+          throw new Error(`${label} write destination is outside the explicitly approved ${label} ${scopedBases ? "API bases" : "origins"}.`);
         }
         url = target.href;
       } else {
@@ -445,7 +468,8 @@ export function createNonProductionPostAccess({ repository, targetEnvironment, m
       }
       return send(args, dispatch);
     } : null,
-    browserRequest: jobScoped && approvedRevision && ppeJourney
+    browserMethods: ppeJourney || devPathJourney ? methods : ["POST"],
+    browserRequest: jobScoped && approvedRevision && (ppeJourney || devPathJourney)
       ? (args, dispatch) => send({ ...args, method: args?.method ?? "POST" }, dispatch)
       : null
   };

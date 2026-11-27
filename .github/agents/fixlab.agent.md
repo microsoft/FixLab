@@ -79,9 +79,10 @@ newly reviewed job; unsuccessful or ambiguous attempts stop job-scoped approval.
 `dataSafety.post.dev`, `.ppe`, `.sit` and `.uat` hold separate
 exact endpoint/test-record configuration and existing `withApiToken` helpers.
 Legacy DEV `fixlab_dev_post` and `dataSafety.devPost` remain supported.
-Native Copilot DEV/PPE: separate consent enables
+Native DEV/PPE consent:
 fixlab_dev_write/fixlab_ppe_write POST/PUT/PATCH/DELETE on
-dataSafety.devWrite/ppeWrite HTTPS origins, any record; job guards.
+dataSafety.devWrite/ppeWrite HTTPS origins or environment-bound baseUrls;
+scoped records; job guards.
 Native Copilot POST-only consent: fixlab_nonproduction_post covers any POST
 path/record within reviewed dataSafety.post environment baseUrls; job guards,
 no repeat prompts.

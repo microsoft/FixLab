@@ -8,7 +8,7 @@ const maxPendingRequests = 16;
 const transportTimeoutMs = 20000;
 const channelNames = [
   "FIXLAB_BROWSER_POST_URL", "FIXLAB_BROWSER_POST_KEY", "FIXLAB_BROWSER_POST_JOB",
-  "FIXLAB_BROWSER_POST_ENV", "FIXLAB_BROWSER_POST_HELPER"
+  "FIXLAB_BROWSER_POST_ENV", "FIXLAB_BROWSER_POST_HELPER", "FIXLAB_BROWSER_POST_METHODS"
 ];
 
 export function clearBrowserPostEnvironment() {
@@ -30,10 +30,21 @@ async function boundedBody(stream, limit) {
   return Buffer.concat(chunks);
 }
 
-export async function startBrowserPostBridge({ send, revoke, jobId, environment, serializeRequests = false, request = fetch }) {
+export async function startBrowserPostBridge({
+  send, revoke, jobId, environment, serializeRequests = false, request = fetch,
+  methods = environment === "ppe" && serializeRequests
+    ? ["GET", "POST", "PUT", "PATCH", "DELETE"] : ["POST"]
+}) {
   if (process.env.DEBUG || process.env.PWDEBUG || process.env.NODE_DEBUG) {
     throw new Error("Browser POST requires credential-sensitive debug logging to be disabled.");
   }
+  if (!Array.isArray(methods) || !methods.includes("POST") || methods.length > 5 ||
+      new Set(methods).size !== methods.length ||
+      methods.some(method => !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) ||
+      (methods.includes("GET") && environment !== "ppe")) {
+    throw new Error("Browser POST requires an explicit valid method scope for its environment.");
+  }
+  const approvedMethods = Object.freeze([...methods]);
   const key = randomBytes(32).toString("hex");
   const shutdown = new AbortController();
   let active = true;
@@ -78,6 +89,9 @@ export async function startBrowserPostBridge({ send, revoke, jobId, environment,
           Object.keys(input).some((name) => !["jobId", "environment", "args"].includes(name))) {
         throw new Error("Browser POST does not match the current job and environment.");
       }
+      if (!approvedMethods.includes(input.args?.method ?? "POST")) {
+        throw new Error("Browser POST method is outside the current job's approved scope.");
+      }
       let reply;
       const metadata = await send(input.args, async (target, options) => {
         dispatched = true;
@@ -117,7 +131,7 @@ export async function startBrowserPostBridge({ send, revoke, jobId, environment,
     server.listen(0, "127.0.0.1", resolve);
   });
   const url = `http://127.0.0.1:${server.address().port}/post`;
-  const values = [url, key, jobId, environment, import.meta.url];
+  const values = [url, key, jobId, environment, import.meta.url, approvedMethods.join(",")];
   const previous = channelNames.map((name) => process.env[name]);
   for (const [index, name] of channelNames.entries()) {
     process.env[name] = values[index];
@@ -163,8 +177,10 @@ async function forwardBrowserRequest(route, { environment, purpose }, postOnly) 
     const data = request.postData();
     const method = request.method();
     const contentType = request.headers()["content-type"];
-    if (!(postOnly ? method === "POST" : method === "POST" ||
-          environment?.toLowerCase() === "ppe" && ["GET", "PUT", "PATCH", "DELETE"].includes(method)) ||
+    const approvedMethods = (process.env.FIXLAB_BROWSER_POST_METHODS ?? "POST").split(",");
+    if (!(postOnly ? method === "POST" : approvedMethods.includes(method) &&
+          ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) ||
+        (method === "GET" && environment?.toLowerCase() !== "ppe") ||
         (method === "GET" && data !== null) || typeof environment !== "string" ||
         environment.toLowerCase() !== process.env.FIXLAB_BROWSER_POST_ENV ||
         url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port ||

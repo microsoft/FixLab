@@ -73,6 +73,19 @@ function approvePostBase(state, environment = "PPE") {
   return state.tool();
 }
 
+function approveWriteBase(state, environment = "DEV") {
+  approveOrigins(state, environment);
+  const key = environment.toLowerCase();
+  const configuration = state.profile.browserAutomation.dataSafety[`${key}Write`];
+  delete configuration.origins;
+  state.writeBase = `https://api.shared.example.test/fmdm/${key}/v1`;
+  configuration.baseUrls = [`${state.writeBase}/families`, `${state.writeBase}/hierarchy`];
+  state.save();
+  state.settings.postWriteApproval = (environment === "PPE" ? createPpeWriteApproval : createDevWriteApproval)(
+    state.repository, environment, state.settings.jobId);
+  return state.tool();
+}
+
 function browserRoute(state, overrides = {}) {
   const fulfilled = [];
   const aborted = [];
@@ -93,6 +106,7 @@ async function browserAccess(t, state) {
   const access = createNonProductionPostAccess(state.settings);
   const bridge = await startBrowserPostBridge({
     send: access.browserRequest ?? access.browserPost, serializeRequests: Boolean(access.browserRequest),
+    methods: access.browserMethods,
     revoke: access.revoke, jobId: state.settings.jobId,
     environment: state.settings.targetEnvironment.toLowerCase(), request: state.settings.request
   });
@@ -251,6 +265,15 @@ test(`PPE journey helpers cannot expand ${environment} POST-only grants to GET o
     await assert.rejects(forwardApprovedBrowserRequest(browserRoute(state, {
       method: () => method, headers: () => ({}), postData: () => null
     }), { environment, purpose: state.args.purpose }));
+  }
+  const originalMethods = process.env.FIXLAB_BROWSER_POST_METHODS;
+  try {
+    process.env.FIXLAB_BROWSER_POST_METHODS = "POST,PUT";
+    await assert.rejects(forwardApprovedBrowserRequest(browserRoute(state, {
+      method: () => "PUT", headers: () => ({}), postData: () => null
+    }), { environment, purpose: state.args.purpose }), /approved scope|JSON POST scope/u);
+  } finally {
+    process.env.FIXLAB_BROWSER_POST_METHODS = originalMethods;
   }
   assert.equal(state.requests.length, 0);
 });
@@ -760,6 +783,82 @@ test("broad DEV approval supports every write method and any record/path only on
   assert.equal(state.requests.length, 4);
 });
 
+test("path-scoped DEV grants share native and browser CRUD without granting sibling gateway paths", async (t) => {
+  const state = fixture(t);
+  const tool = approveWriteBase(state);
+  const base = state.writeBase;
+  assert.equal(state.settings.postWriteApproval.mode, "dev-base");
+  assert.equal(tool.name, "fixlab_dev_write");
+  assert.match(tool.description, /HTTPS API bases/u);
+  for (const [index, method] of ["POST", "PUT", "PATCH", "DELETE"].entries()) {
+    const args = { ...state.args, method,
+      url: `${base}/${index % 2 ? "hierarchy" : "families"}/records/test-record?kind=product` };
+    await tool.handler(args);
+    assert.equal(state.requests.at(-1).options.method, method);
+  }
+  for (const url of [
+    `${base}/families-other/records`, `${base}/unrelated/records`,
+    "https://api.shared.example.test/fmdm/uat/v1/families/records",
+    "https://api.shared.example.test/fmdm/prod/v1/families/records",
+    `${base}/families/%2f../unrelated`, `${base}/families/%5c../unrelated`,
+    `${base}/families/%252f../unrelated`, `${base}/families/../unrelated`,
+    `${base}/families/%2e%2e/unrelated`, `${base}/families/records#fragment`,
+    "https://api.shared.example.test.evil.invalid/fmdm/dev/v1/families/records"
+  ]) {
+    await assert.rejects(tool.handler({ ...state.args, method: "PUT", url }), /approved DEV API bases/u);
+  }
+  assert.equal(state.requests.length, 4);
+  state.args.url = `${base}/families/records/test-record`;
+  await browserAccess(t, state);
+  const route = browserRoute(state, { method: () => "PUT" });
+  await forwardApprovedBrowserRequest(route, { environment: "DEV", purpose: state.args.purpose });
+  assert.equal(route.fulfilled[0].status, 201);
+  assert.equal(state.requests.at(-1).options.method, "PUT");
+  assert.equal(state.prompts.length, 0);
+  state.profile.name = "Changed after grant";
+  state.save();
+  await assert.rejects(tool.handler({ ...state.args, method: "DELETE" }), /changed/u);
+  assert.equal(state.requests.length, 5);
+});
+
+test("path-scoped setup rejects ambiguous, cross-environment and persistent grants", async (t) => {
+  const state = fixture(t);
+  approveOrigins(state);
+  const configuration = state.profile.browserAutomation.dataSafety.devWrite;
+  const valid = "https://api.shared.example.test/fmdm/dev/v1/families";
+  configuration.baseUrls = [valid];
+  state.save();
+  assert.throws(() => createDevWriteApproval(state.repository, "DEV", state.settings.jobId), /not both/u);
+  delete configuration.origins;
+  for (const baseUrls of [
+    [], ["https://api.shared.example.test/fmdm/v1/families"],
+    ["https://api.shared.example.test/fmdm/uat/v1/families"],
+    ["https://api.prod.example.test/fmdm/dev/v1/families"],
+    ["https://api.shared.example.test/fmdm/dev/uat/v1/families"],
+    ["https://api.shared.example.test/fmdm/dev/v1/families/../unrelated"],
+    [`${valid}/`], [`${valid}?record=test`], [`${valid}#fragment`],
+    [valid.replace("https:", "http:")], Array(17).fill(valid)
+  ]) {
+    configuration.baseUrls = baseUrls;
+    state.save();
+    assert.throws(() => createDevWriteApproval(state.repository, "DEV", state.settings.jobId), /API base/u);
+  }
+  configuration.baseUrls = [valid];
+  configuration.browserProxyPaths = ["/api"];
+  state.save();
+  assert.throws(() => createDevWriteApproval(state.repository, "DEV", state.settings.jobId), /proxy aliases/u);
+  delete configuration.browserProxyPaths;
+  configuration.allowAll = true;
+  state.save();
+  assert.throws(state.tool, /fresh per-job approval/u);
+  configuration.allowAll = false;
+  state.save();
+  state.settings.postWriteApproval = createDevWriteApproval(state.repository, "DEV", state.settings.jobId);
+  state.settings.postWriteApproval.mode = "dev-origin";
+  const wrongScope = state.tool();
+  await assert.rejects(wrongScope.handler({ ...state.args, method: "PUT", url: `${valid}/records` }), /scope type/u);
+});
+
 test("broad DEV approval requires reviewed DEV-only setup and never follows generic tool/POST preferences", async (t) => {
   const state = fixture(t);
   const tool = approveOrigins(state);
@@ -866,13 +965,19 @@ test("PPE origin grants permit GET and CRUD but never accept DEV grants, mixed h
   assert.equal(state.requests.length, 5);
 });
 
-for (const [environment, postOnly] of [["DEV", false], ["PPE", false], ["PPE", true]]) {
-test(`native SDK consumes ${environment} ${postOnly ? "POST-only" : "broad"} approval and expires it on executor shutdown`, async (t) => {
+for (const [environment, postOnly, pathScoped] of [
+  ["DEV", false, false], ["PPE", false, false], ["PPE", true, false],
+  ["DEV", false, true], ["PPE", false, true]
+]) {
+test(`native SDK consumes ${environment} ${postOnly ? "POST-only" : pathScoped ? "path-scoped" : "broad"} approval and expires it on executor shutdown`, async (t) => {
   const state = fixture(t);
   state.args.url = `https://api.${environment.toLowerCase()}.example.test/items`;
   if (postOnly) {
     approvePostBase(state, environment);
     state.args.url = `${state.postBase}/items`;
+  } else if (pathScoped) {
+    approveWriteBase(state, environment);
+    state.args.url = `${state.writeBase}/families/items`;
   } else {
     approveOrigins(state, environment);
   }
@@ -904,6 +1009,11 @@ test(`native SDK consumes ${environment} ${postOnly ? "POST-only" : "broad"} app
               });
               await forwardApprovedBrowserRequest(route, { environment, purpose: "Verify approved PPE data." });
               assert.equal(route.fulfilled[0].status, 201);
+            } else if (pathScoped) {
+              assert.match(prompt, /DEV job also supports complete read\/write browser journeys/u);
+              const route = browserRoute(state, { method: () => "PUT" });
+              await forwardApprovedBrowserRequest(route, { environment, purpose: state.args.purpose });
+              assert.equal(route.fulfilled[0].status, 201);
             }
           }
         };
@@ -912,7 +1022,7 @@ test(`native SDK consumes ${environment} ${postOnly ? "POST-only" : "broad"} app
     }
   });
   await assert.rejects(exposedTool.handler(args), /policy.*shutdown/u);
-  assert.equal(state.requests.length, environment === "PPE" && !postOnly ? 2 : 1);
+  assert.equal(state.requests.length, environment === "PPE" && !postOnly || pathScoped ? 2 : 1);
 });
 }
 
